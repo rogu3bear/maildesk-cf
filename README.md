@@ -71,6 +71,16 @@ maildesk-cf/
 This template may include `wrangler.toml` placeholders for local development,
 but account mutation should flow through `cfctl`.
 
+## Router Contract
+
+The Rust router is the template's product core. It owns the deployable policy
+shape, route decisions, and reply authorization. Workers and UI surfaces should
+adapt around that typed contract rather than duplicating routing behavior in
+provider glue.
+
+Start with [docs/architecture/rust-router-contract.md](docs/architecture/rust-router-contract.md)
+before changing inbound routing, outbound identity, or policy validation.
+
 ## Runtime Targets
 
 - Cloudflare Workers
@@ -89,6 +99,7 @@ Current local checks:
 
 ```bash
 cargo test
+cargo clippy --all-targets -- -D warnings
 bash scripts/check-template.sh
 cargo run --bin maildesk-policy-check -- config/policy.example.json
 ```

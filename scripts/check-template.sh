@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in README.md docs/architecture/template-standard.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
+for file in README.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done
@@ -17,26 +17,32 @@ for file in NORTH_STAR.md ANCHOR.md AGENTS.md CLAUDE.md; do
 done
 
 echo "== personal data scan"
-if rg -n \
-  -e '/Users/' \
-  -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
-  -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
-  "${ROOT_DIR}" \
-  --glob '!target/**' \
-  --glob '!var/**' \
-  --glob '!AGENTS.md' \
-  --glob '!CLAUDE.md' \
-  --glob '!NORTH_STAR.md' \
-  --glob '!ANCHOR.md' \
-  --glob '!Cargo.lock' \
-  --glob '!scripts/check-template.sh'
-then
+scan_output="$(
+  grep -RInE \
+    -e '/Users/' \
+    -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
+    -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
+    --exclude-dir=target \
+    --exclude-dir=var \
+    --exclude=AGENTS.md \
+    --exclude=CLAUDE.md \
+    --exclude=NORTH_STAR.md \
+    --exclude=ANCHOR.md \
+    --exclude=Cargo.lock \
+    --exclude=check-template.sh \
+    "${ROOT_DIR}" || true
+)"
+if [[ -n "${scan_output}" ]]; then
+  echo "${scan_output}"
   echo "personal or production-specific data found" >&2
   exit 1
 fi
 
 echo "== reserved examples"
-rg -n 'example\.com|example\.net|example\.org' "${ROOT_DIR}" >/dev/null
+grep -RInE 'example\.com|example\.net|example\.org' \
+  --exclude-dir=target \
+  --exclude-dir=var \
+  "${ROOT_DIR}" >/dev/null
 
 echo "== rust tests"
 cargo test --manifest-path "${ROOT_DIR}/Cargo.toml"

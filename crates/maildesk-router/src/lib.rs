@@ -53,6 +53,12 @@ pub struct RouteDecision {
     pub allowed_reply_identities: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAuthorization {
+    pub from_identity: String,
+    pub envelope_sender: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteKind {
@@ -70,6 +76,24 @@ pub enum RouteError {
     UnknownAlias(String, String),
     #[error("policy has an empty operator set for: {0}@{1}")]
     EmptyOperators(String, String),
+    #[error("sender is not an operator on the route: {0}")]
+    UnauthorizedOperator(String),
+    #[error("reply identity is not allowed for this route: {0}")]
+    UnauthorizedReplyIdentity(String),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PolicyError {
+    #[error("policy contains no domains")]
+    EmptyPolicy,
+    #[error("domain has no aliases: {0}")]
+    EmptyDomain(String),
+    #[error("invalid route for {0}@{1}: {2}")]
+    InvalidRoute(String, String, RouteError),
+    #[error("role reply identity must be part of its allowed identities: {0}@{1}")]
+    MissingRoleReplyIdentity(String, String),
+    #[error("personal reply identity must match the alias address: {0}@{1}")]
+    PersonalReplyIdentityMismatch(String, String),
 }
 
 pub fn route_message(
@@ -91,6 +115,97 @@ pub fn route_message(
     }
 
     Err(RouteError::UnknownAlias(local_part, domain))
+}
+
+pub fn authorize_reply(
+    decision: &RouteDecision,
+    operator: &str,
+    requested_identity: Option<&str>,
+) -> Result<ReplyAuthorization, RouteError> {
+    let operator = normalize_mailbox(operator)?;
+    if !decision
+        .operators
+        .iter()
+        .any(|allowed| allowed == &operator)
+    {
+        return Err(RouteError::UnauthorizedOperator(operator));
+    }
+
+    let identity = requested_identity
+        .map(normalize_mailbox)
+        .transpose()?
+        .unwrap_or_else(|| decision.default_reply_identity.clone());
+
+    if !decision
+        .allowed_reply_identities
+        .iter()
+        .any(|allowed| allowed == &identity)
+    {
+        return Err(RouteError::UnauthorizedReplyIdentity(identity));
+    }
+
+    Ok(ReplyAuthorization {
+        from_identity: identity.clone(),
+        envelope_sender: identity,
+    })
+}
+
+pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
+    if policy.domains.is_empty() {
+        return Err(PolicyError::EmptyPolicy);
+    }
+
+    let mut route_count = 0usize;
+    for (domain, domain_policy) in &policy.domains {
+        if domain_policy.role_aliases.is_empty() && domain_policy.personal_aliases.is_empty() {
+            return Err(PolicyError::EmptyDomain(domain.clone()));
+        }
+
+        for (local_part, role_policy) in &domain_policy.role_aliases {
+            let decision = route_for_policy_check(policy, local_part, domain)?;
+            if !decision
+                .allowed_reply_identities
+                .contains(&role_policy.reply_identity)
+            {
+                return Err(PolicyError::MissingRoleReplyIdentity(
+                    local_part.clone(),
+                    domain.clone(),
+                ));
+            }
+            route_count += 1;
+        }
+
+        for (local_part, personal_policy) in &domain_policy.personal_aliases {
+            route_for_policy_check(policy, local_part, domain)?;
+            let expected_identity = format!("{local_part}@{domain}");
+            if personal_policy.reply_identity != expected_identity {
+                return Err(PolicyError::PersonalReplyIdentityMismatch(
+                    local_part.clone(),
+                    domain.clone(),
+                ));
+            }
+            route_count += 1;
+        }
+    }
+
+    Ok(route_count)
+}
+
+fn route_for_policy_check(
+    policy: &RouterPolicy,
+    local_part: &str,
+    domain: &str,
+) -> Result<RouteDecision, PolicyError> {
+    route_message(
+        policy,
+        &InboundMessage {
+            envelope_to: format!("{local_part}@{domain}"),
+            header_from: "sender@example.net".to_string(),
+            message_id: None,
+            subject: None,
+        },
+    )
+    .map_err(|error| PolicyError::InvalidRoute(local_part.to_string(), domain.to_string(), error))
 }
 
 fn role_decision(
@@ -136,7 +251,7 @@ fn personal_decision(
 }
 
 fn split_mailbox(address: &str) -> Result<(String, String), RouteError> {
-    let trimmed = address.trim().to_ascii_lowercase();
+    let trimmed = normalize_mailbox(address)?;
     let (local, domain) = trimmed
         .split_once('@')
         .ok_or(RouteError::InvalidRecipient)?;
@@ -146,6 +261,15 @@ fn split_mailbox(address: &str) -> Result<(String, String), RouteError> {
     }
 
     Ok((local.to_string(), domain.to_string()))
+}
+
+fn normalize_mailbox(address: &str) -> Result<String, RouteError> {
+    let trimmed = address.trim().to_ascii_lowercase();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return Err(RouteError::InvalidRecipient);
+    }
+
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -233,6 +357,63 @@ mod tests {
             error,
             RouteError::UnknownAlias("unknown".to_string(), "example.com".to_string())
         );
+    }
+
+    #[test]
+    fn authorizes_default_reply_identity_for_route_operator() -> Result<(), RouteError> {
+        let policy = example_policy();
+        let decision = route_message(
+            &policy,
+            &InboundMessage {
+                envelope_to: "founders@example.com".to_string(),
+                header_from: "customer@example.net".to_string(),
+                message_id: None,
+                subject: None,
+            },
+        )?;
+
+        let authorization = authorize_reply(&decision, "operator-a@example.com", None)?;
+
+        assert_eq!(authorization.from_identity, "founders@example.com");
+        assert_eq!(authorization.envelope_sender, "founders@example.com");
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_operator_not_on_route() -> Result<(), RouteError> {
+        let policy = example_policy();
+        let decision = route_message(
+            &policy,
+            &InboundMessage {
+                envelope_to: "founders@example.com".to_string(),
+                header_from: "customer@example.net".to_string(),
+                message_id: None,
+                subject: None,
+            },
+        )?;
+
+        let error = match authorize_reply(&decision, "outsider@example.com", None) {
+            Ok(authorization) => {
+                assert_eq!(authorization.from_identity, "unreachable");
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            RouteError::UnauthorizedOperator("outsider@example.com".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn validates_policy_shape() -> Result<(), PolicyError> {
+        let policy = example_policy();
+        assert_eq!(validate_policy(&policy)?, 2);
+        Ok(())
     }
 
     fn example_policy() -> RouterPolicy {

@@ -27,6 +27,11 @@ compile and test without Cloudflare.
 It should not know about D1 SQL, R2 object keys, Worker request objects, or
 dashboard state.
 
+The router contract is documented in
+[rust-router-contract.md](rust-router-contract.md). Behavior changes should
+start there, then flow outward to Workers, API handlers, UI actions, and
+`cfctl` surfaces.
+
 ### Edge Adapters
 
 Workers adapt Cloudflare events to router inputs and persist router outputs.
@@ -52,6 +57,29 @@ Inbound and outbound identity are related but not identical.
 - Outbound identities must be explicitly allowed.
 - The UI should default to the identity that preserves the original domain
   story.
+
+## Build Lanes
+
+Use separate lanes so the template can grow without hiding risk:
+
+- router lane: Rust policy, validation, and reply authorization;
+- adapter lane: Cloudflare Email Worker and API Worker translation code;
+- storage lane: D1 schema, R2 object contract, Queue jobs, and migrations;
+- control-plane lane: `cfctl` desired state, plans, and verification receipts;
+- UI lane: Leptos-compatible operator workflow and access control.
+
+The router lane should remain independently buildable. If it cannot be tested
+without Cloudflare credentials, the boundary has drifted.
+
+## Public Template Versus Private Instance
+
+The public template contains only reserved examples and reusable conventions.
+Private instances should keep production domains, operator identities, account
+IDs, tokens, and live receipts in ignored local files or secret stores.
+
+Anything that improves the reusable mechanism belongs here first. Anything that
+names a real operator, real domain, or real account belongs in a private
+instance or a control-plane secret.
 
 ## Template Hygiene
 
