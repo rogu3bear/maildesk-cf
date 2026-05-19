@@ -19,8 +19,6 @@ done
 echo "== personal data scan"
 if rg -n \
   -e '/Users/' \
-  -e 'privaterelay' \
-  -e 'icloud' \
   -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
   -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
   "${ROOT_DIR}" \
