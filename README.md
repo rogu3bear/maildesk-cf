@@ -93,6 +93,16 @@ bash scripts/check-template.sh
 These checks verify the Rust router and template hygiene. They do not prove live
 Cloudflare account state.
 
+## De-Templating
+
+After cloning or generating a new project:
+
+```bash
+scripts/init.sh acme-maildesk
+```
+
+Then review [docs/operations/getting-started.md](docs/operations/getting-started.md).
+
 ## Template Hygiene
 
 This repository should not contain personal names, private domains, personal
