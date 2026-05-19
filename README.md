@@ -98,8 +98,11 @@ remain Cloudflare-first.
 Current local checks:
 
 ```bash
+bun install
 cargo test
 cargo clippy --all-targets -- -D warnings
+bun run typecheck
+bun run preflight:template
 bash scripts/check-template.sh
 cargo run --bin maildesk-policy-check -- config/policy.example.json
 ```
@@ -116,6 +119,24 @@ scripts/init.sh acme-maildesk
 ```
 
 Then review [docs/operations/getting-started.md](docs/operations/getting-started.md).
+
+## Preflight
+
+Use template preflight while developing the public template:
+
+```bash
+bun run preflight:template
+```
+
+Before provisioning a real Cloudflare account, copy `.env.example` to a local
+ignored environment file or export equivalent variables, then run:
+
+```bash
+bun run preflight:production
+```
+
+Production preflight checks required Cloudflare/cfctl inputs, policy validity,
+and placeholder Cloudflare resource IDs before any account mutation.
 
 ## Template Hygiene
 

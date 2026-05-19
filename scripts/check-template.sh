@@ -4,13 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in README.md package.json tsconfig.json docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
+for file in AGENTS.md README.md .env.example package.json tsconfig.json scripts/preflight.ts docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done
 
 echo "== local strategy files"
-for file in NORTH_STAR.md ANCHOR.md AGENTS.md CLAUDE.md; do
+for file in NORTH_STAR.md ANCHOR.md CLAUDE.md; do
   if [[ -e "${ROOT_DIR}/${file}" ]]; then
     echo "local-only ${file}"
   fi
@@ -56,8 +56,9 @@ cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --bin maildesk-policy-check -
 echo "== worker typecheck"
 if [[ -d "${ROOT_DIR}/node_modules" ]]; then
   (cd "${ROOT_DIR}" && bun run typecheck)
+  (cd "${ROOT_DIR}" && bun run preflight:template)
 else
-  echo "node_modules missing; run bun install before worker typecheck"
+  echo "node_modules missing; run bun install before worker typecheck and preflight"
 fi
 
 echo "template check passed"
