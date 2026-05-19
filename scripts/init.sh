@@ -34,7 +34,7 @@ fi
 
 replace_in_file() {
   local file="$1"
-  perl -0pi -e "s/maildesk-cf/${PROJECT_NAME}/g" "${file}"
+  perl -0pi -e "s/(?<![a-z0-9-])maildesk-cf(?![a-z0-9-])/${PROJECT_NAME}/g" "${file}"
 }
 
 replace_in_file "${ROOT_DIR}/Cargo.toml"
