@@ -1,0 +1,118 @@
+# maildesk-cf
+
+`maildesk-cf` is a standalone Cloudflare-edge mail desk template.
+
+It gives teams a reusable starting point for domain-consistent shared inboxes:
+mail arrives through Cloudflare Email Routing, routing policy is decided by a
+Rust core, state is stored on Cloudflare, and replies are sent from approved
+domain identities.
+
+## Positioning
+
+`maildesk-cf` is an optional extension in a Cloudflare-native stack:
+
+- use it alone when you need a mail desk;
+- use `cfctl` to provision and verify Cloudflare account state;
+- use `leptos-cf` conventions when building the operator UI;
+- keep the router core independent, testable, and reusable.
+
+It is not a private mailbox configuration, a Gmail add-on, a marketing sender,
+or a generic helpdesk clone.
+
+## Core Loop
+
+1. A message arrives at `role@example.com`.
+2. Cloudflare Email Routing invokes the inbound Worker.
+3. The Worker converts the event into a Rust router input.
+4. The router returns a policy-backed route decision.
+5. Metadata is stored in D1.
+6. Raw MIME and attachments are stored in R2.
+7. Queue jobs handle parsing, notifications, and delivery work.
+8. Operators reply through the app.
+9. Outbound mail is sent from an allowed domain identity.
+10. The audit log records the decision and delivery attempt.
+
+## Repository Shape
+
+```text
+maildesk-cf/
+  apps/
+    maildesk-ui/        # Leptos-compatible operator UI placeholder
+  crates/
+    maildesk-router/    # Rust routing and identity policy core
+  workers/
+    mail-router/        # Cloudflare Email Worker adapter
+    mail-api/           # HTTP API and outbound adapter placeholder
+  migrations/           # D1 schema
+  ops/
+    cfctl/              # cfctl desired-state and surface notes
+  docs/
+    architecture/       # architecture and threat model
+    operations/         # setup and verification runbooks
+  scripts/
+    check-template.sh   # local template hygiene checks
+```
+
+## Required Dependency
+
+`cfctl` is required for production provisioning and verification. It should own:
+
+- Email Routing rules;
+- Worker deployment and bindings;
+- D1 databases and migrations;
+- R2 buckets;
+- Queues;
+- secrets;
+- DNS and sender authentication records;
+- verification receipts.
+
+This template may include `wrangler.toml` placeholders for local development,
+but account mutation should flow through `cfctl`.
+
+## Runtime Targets
+
+- Cloudflare Workers
+- Cloudflare Email Routing
+- Cloudflare Email Service
+- D1
+- R2
+- Queues
+
+Optional fallback sender adapters can be added later. The default path should
+remain Cloudflare-first.
+
+## Build
+
+Current local checks:
+
+```bash
+cargo test
+bash scripts/check-template.sh
+```
+
+These checks verify the Rust router and template hygiene. They do not prove live
+Cloudflare account state.
+
+## Template Hygiene
+
+This repository should not contain personal names, private domains, personal
+email addresses, local machine paths, account IDs, tokens, or generated live
+receipts. Use reserved documentation examples such as:
+
+- `example.com`
+- `example.net`
+- `example.org`
+- `operator@example.com`
+
+## First Milestone
+
+The first milestone is deliberately narrow:
+
+- buildable Rust router crate;
+- policy tests for role aliases and reply identities;
+- D1 schema skeleton;
+- Worker adapter skeletons;
+- `cfctl` provisioning contract draft;
+- template hygiene check.
+
+Everything else should build on that foundation.

@@ -1,0 +1,22 @@
+/target/
+/dist/
+/.wrangler/
+/.dev.vars
+/.env
+/.env.*
+!.env.example
+/var/
+*.log
+*.tmp
+*.secret
+*.pem
+
+# Local operator/agent strategy files. These are intentionally useful in a
+# private checkout but should not ship in the public template.
+/AGENTS.md
+/CLAUDE.md
+/NORTH_STAR.md
+/ANCHOR.md
+/.agents/
+/.claude/
+/*.local.md
