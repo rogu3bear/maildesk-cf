@@ -90,6 +90,7 @@ Current local checks:
 ```bash
 cargo test
 bash scripts/check-template.sh
+cargo run --bin maildesk-policy-check -- config/policy.example.json
 ```
 
 These checks verify the Rust router and template hygiene. They do not prove live

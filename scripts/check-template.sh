@@ -41,4 +41,8 @@ rg -n 'example\.com|example\.net|example\.org' "${ROOT_DIR}" >/dev/null
 echo "== rust tests"
 cargo test --manifest-path "${ROOT_DIR}/Cargo.toml"
 
+echo "== example policy"
+cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --bin maildesk-policy-check -- \
+  "${ROOT_DIR}/config/policy.example.json"
+
 echo "template check passed"
