@@ -21,6 +21,7 @@ checkCommand(process.env.CFCTL_BIN ?? "cfctl", ["--help"], mode === "production"
 
 checkFile("Cargo.toml");
 checkFile("wrangler.toml");
+checkFile("wrangler.mail-router.toml");
 checkFile("config/policy.example.json");
 checkFile("scripts/check-template.sh");
 
@@ -97,9 +98,11 @@ function checkRequiredEnv(name: string) {
 }
 
 function checkWranglerPlaceholders() {
-  const wrangler = readFileSync(resolve(root, "wrangler.toml"), "utf8");
-  if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
-    failures.push("wrangler.toml still contains placeholder Cloudflare resource IDs");
+  for (const file of ["wrangler.toml", "wrangler.mail-router.toml"]) {
+    const wrangler = readFileSync(resolve(root, file), "utf8");
+    if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
+      failures.push(`${file} still contains placeholder Cloudflare resource IDs`);
+    }
   }
 }
 

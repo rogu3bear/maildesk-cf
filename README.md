@@ -93,6 +93,10 @@ The full runtime shape is described in
 - R2
 - Queues
 
+The HTTP API Worker uses `wrangler.toml`. The inbound Email Worker uses
+`wrangler.mail-router.toml`. Production resource creation should still be
+driven by `cfctl`; these files document and typecheck the app-side bindings.
+
 Optional fallback sender adapters can be added later. The default path should
 remain Cloudflare-first.
 

@@ -20,6 +20,8 @@ The Email Worker receives Cloudflare Email Routing events. It should:
 It should not own policy. If policy logic appears in TypeScript, move it back
 into `crates/maildesk-router`.
 
+The template deploy target for this Worker is `wrangler.mail-router.toml`.
+
 ### API Worker
 
 The API Worker powers the operator desk. It should:
@@ -29,6 +31,8 @@ The API Worker powers the operator desk. It should:
 - create outbound reply intents only after router authorization;
 - enqueue outbound send jobs instead of sending inline;
 - expose health and readiness endpoints that do not leak private config.
+
+The template deploy target for this Worker is `wrangler.toml`.
 
 ### Rust Router
 

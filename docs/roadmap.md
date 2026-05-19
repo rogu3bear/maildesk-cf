@@ -13,17 +13,20 @@ complete elsewhere.
 - [x] Template and production preflight split.
 - [x] D1 schema skeleton.
 - [x] Email Worker and API Worker skeletons.
+- [x] Separate API Worker and Email Worker Wrangler targets.
+- [x] Shared TypeScript edge contract for readiness and queue jobs.
 - [x] `cfctl` surface draft.
 
 ## Milestone 1: Deployable Edge Skeleton
 
 - [ ] Compile router for Worker consumption or expose a stable adapter crate.
-- [ ] Email Worker maps Cloudflare email events into router input.
-- [ ] Email Worker writes raw MIME to R2.
+- [x] Email Worker accepts Cloudflare email events into the edge job contract.
+- [x] Email Worker writes raw MIME to R2.
 - [ ] Email Worker persists accepted inbound metadata in D1.
+- [x] API Worker exposes health and readiness endpoints.
+- [x] Queue consumer records job audit events.
 - [ ] Queue consumer parses MIME and records parse status.
-- [ ] API Worker exposes authenticated health, readiness, thread, and identity
-      endpoints.
+- [ ] API Worker exposes authenticated thread and identity endpoints.
 - [ ] `cfctl` can provision required D1, R2, Queue, Worker, DNS, and Email
       Routing resources.
 
