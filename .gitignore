@@ -20,3 +20,5 @@
 /.agents/
 /.claude/
 /*.local.md
+/config/*.local.json
+/ops/local/

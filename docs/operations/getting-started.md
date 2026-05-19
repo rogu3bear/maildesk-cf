@@ -14,6 +14,9 @@ identifiers in public source files. It does not provision Cloudflare resources.
 ## 2. Review Policy
 
 Start with the Rust router policy model in `crates/maildesk-router`.
+Copy `config/policy.example.json` to `config/policy.local.json` for local
+experiments. Local policy files are ignored so template users do not
+accidentally publish private domains or operator addresses.
 
 Define:
 

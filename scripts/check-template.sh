@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in README.md docs/architecture/template-standard.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md; do
+for file in README.md docs/architecture/template-standard.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done

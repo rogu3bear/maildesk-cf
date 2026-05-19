@@ -46,6 +46,8 @@ maildesk-cf/
   migrations/           # D1 schema
   ops/
     cfctl/              # cfctl desired-state and surface notes
+  config/
+    policy.example.json # documentation-safe policy fixture
   docs/
     architecture/       # architecture and threat model
     operations/         # setup and verification runbooks

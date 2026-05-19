@@ -1,0 +1,38 @@
+{
+  "default_reply_mode": "role_first",
+  "domains": {
+    "example.com": {
+      "role_aliases": {
+        "founders": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "founders@example.com",
+          "allowed_reply_identities": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
+        "security": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "security@example.com",
+          "allowed_reply_identities": []
+        }
+      },
+      "personal_aliases": {
+        "operator-a": {
+          "operator": "operator-a@example.com",
+          "reply_identity": "operator-a@example.com"
+        },
+        "operator-b": {
+          "operator": "operator-b@example.com",
+          "reply_identity": "operator-b@example.com"
+        }
+      }
+    }
+  }
+}
