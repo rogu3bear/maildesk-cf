@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in README.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
+for file in README.md package.json tsconfig.json docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/operations/cfctl-contract.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done
@@ -24,6 +24,7 @@ scan_output="$(
     -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
     --exclude-dir=target \
     --exclude-dir=var \
+    --exclude-dir=node_modules \
     --exclude=AGENTS.md \
     --exclude=CLAUDE.md \
     --exclude=NORTH_STAR.md \
@@ -42,6 +43,7 @@ echo "== reserved examples"
 grep -RInE 'example\.com|example\.net|example\.org' \
   --exclude-dir=target \
   --exclude-dir=var \
+  --exclude-dir=node_modules \
   "${ROOT_DIR}" >/dev/null
 
 echo "== rust tests"
@@ -50,5 +52,12 @@ cargo test --manifest-path "${ROOT_DIR}/Cargo.toml"
 echo "== example policy"
 cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --bin maildesk-policy-check -- \
   "${ROOT_DIR}/config/policy.example.json"
+
+echo "== worker typecheck"
+if [[ -d "${ROOT_DIR}/node_modules" ]]; then
+  (cd "${ROOT_DIR}" && bun run typecheck)
+else
+  echo "node_modules missing; run bun install before worker typecheck"
+fi
 
 echo "template check passed"
