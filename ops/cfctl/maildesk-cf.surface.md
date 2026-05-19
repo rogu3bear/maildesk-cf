@@ -25,12 +25,48 @@ cfctl maildesk-cf snapshot
 - Worker script names;
 - sender provider mode.
 
+## Desired State Shape
+
+The first version should be able to consume a file with these sections:
+
+```text
+project:
+  name
+  account_id
+domains:
+  name
+  role_aliases
+  personal_aliases
+workers:
+  mail_router_script
+  mail_api_script
+storage:
+  d1_database
+  r2_raw_mail_bucket
+  queue
+sender:
+  mode
+  authenticated_domains
+```
+
+The exact serialization can evolve, but plan/apply/verify should preserve these
+boundaries.
+
 ## Outputs
 
 - preview artifact;
 - applied operation receipt;
 - resource inventory snapshot;
 - verification report.
+
+## Plan/Verify Invariants
+
+- no apply without a plan and acknowledged operation id;
+- no broad live email tests by default;
+- no secret values in receipts;
+- explicit drift status per domain and binding;
+- deterministic resource names from the de-templated project name unless
+  overridden.
 
 ## Rule
 

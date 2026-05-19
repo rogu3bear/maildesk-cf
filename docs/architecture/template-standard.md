@@ -37,6 +37,11 @@ start there, then flow outward to Workers, API handlers, UI actions, and
 Workers adapt Cloudflare events to router inputs and persist router outputs.
 They should be thin, explicit, and easy to replace.
 
+The runtime contract is documented in
+[runtime-contract.md](runtime-contract.md). If a Worker needs behavior that is
+not covered there, update the contract before wiring the behavior into an
+adapter.
+
 ### Storage
 
 D1 stores normalized queryable state. R2 stores large opaque mail artifacts.
@@ -70,6 +75,22 @@ Use separate lanes so the template can grow without hiding risk:
 
 The router lane should remain independently buildable. If it cannot be tested
 without Cloudflare credentials, the boundary has drifted.
+
+## Readiness Language
+
+Use precise status words:
+
+- `template-ready`: public checkout builds, typechecks, and passes template
+  preflight;
+- `instance-ready`: private checkout passes production preflight against real
+  account inputs;
+- `edge-ready`: Workers are deployed, bindings exist, and `cfctl verify`
+  reports no drift;
+- `mail-ready`: inbound route, persistence, notification, reply authorization,
+  outbound send, and audit trail are proven by targeted checks.
+
+Do not collapse these statuses into "done". They answer different operational
+questions.
 
 ## Public Template Versus Private Instance
 

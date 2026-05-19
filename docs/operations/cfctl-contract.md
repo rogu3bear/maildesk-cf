@@ -12,11 +12,16 @@ The eventual first-class surface could look like:
 
 ```bash
 cfctl maildesk-cf init --domain example.com
+cfctl maildesk-cf diff --domain example.com
 cfctl maildesk-cf provision --plan
 cfctl maildesk-cf provision --ack-plan <operation-id>
 cfctl maildesk-cf verify --domain example.com
 cfctl maildesk-cf snapshot
 ```
+
+The surface should accept a desired-state file generated from the same policy
+shape validated by `maildesk-policy-check`. `cfctl` owns account resources; the
+application owns runtime behavior.
 
 ## Resources To Own
 
@@ -42,6 +47,16 @@ Verification should avoid broad live sends. Prefer:
 - DNS record reads;
 - provider sender-domain status reads;
 - one explicit targeted send only when a human asks for delivery proof.
+
+Verification output should distinguish:
+
+- missing resource;
+- wrong binding;
+- DNS/authentication drift;
+- Email Routing alias drift;
+- sender-domain drift;
+- policy/config drift;
+- optional live-send proof not requested.
 
 ## Current State
 

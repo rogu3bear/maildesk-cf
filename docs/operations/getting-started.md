@@ -47,12 +47,24 @@ secrets, and Email Routing.
 ## 4. Run Local Checks
 
 ```bash
+bun install
+bun run preflight:template
 cargo test
+bun run typecheck
 bash scripts/check-template.sh
 ```
 
 These checks prove local template hygiene and router behavior. They do not
 prove live Cloudflare account state.
+
+Before a real deployment, export production variables or use a local ignored
+environment file, then run:
+
+```bash
+bun run preflight:production
+```
+
+See [preflight.md](preflight.md) for the full variable contract.
 
 ## 5. Avoid Broad Email Tests
 

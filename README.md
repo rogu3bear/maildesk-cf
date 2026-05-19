@@ -81,6 +81,9 @@ provider glue.
 Start with [docs/architecture/rust-router-contract.md](docs/architecture/rust-router-contract.md)
 before changing inbound routing, outbound identity, or policy validation.
 
+The full runtime shape is described in
+[docs/architecture/runtime-contract.md](docs/architecture/runtime-contract.md).
+
 ## Runtime Targets
 
 - Cloudflare Workers
@@ -137,6 +140,14 @@ bun run preflight:production
 
 Production preflight checks required Cloudflare/cfctl inputs, policy validity,
 and placeholder Cloudflare resource IDs before any account mutation.
+
+See [docs/operations/preflight.md](docs/operations/preflight.md) for the exact
+variable contract.
+
+## Roadmap
+
+The template roadmap is tracked in [docs/roadmap.md](docs/roadmap.md). Planned
+items there are not complete just because the repository has placeholders.
 
 ## Template Hygiene
 
