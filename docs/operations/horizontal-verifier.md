@@ -19,6 +19,19 @@ bun run verify:maildesk -- \
   --json
 ```
 
+Collect a best-effort live evidence file from local readback tools:
+
+```bash
+CFCTL_BIN=/path/to/cfctl \
+MAILDESK_READYZ_URL=https://maildesk.example.workers.dev/readyz \
+bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
+```
+
+The collector reads Cloudflare state through `cfctl`, sender domains through the
+Resend CLI when available, `/readyz` when `MAILDESK_READYZ_URL` is set, and D1
+schema/audit counts through Wrangler when a D1 database is configured. It does
+not send mail and does not mutate Cloudflare.
+
 ## Receipt Shape
 
 The command emits one row per domain and reports:

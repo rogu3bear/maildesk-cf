@@ -111,6 +111,7 @@ bun install
 cargo test
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
+CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run preflight:template
 bash scripts/check-template.sh
@@ -123,6 +124,8 @@ Cloudflare account state.
 `bun run verify:maildesk` emits the horizontal domain matrix for policy,
 desired-state, and optional live evidence. See
 [docs/operations/horizontal-verifier.md](docs/operations/horizontal-verifier.md).
+`bun run collect:maildesk-evidence` builds that optional evidence file from
+available readbacks without mutating Cloudflare.
 
 ## De-Templating
 
