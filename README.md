@@ -83,6 +83,8 @@ before changing inbound routing, outbound identity, or policy validation.
 
 The full runtime shape is described in
 [docs/architecture/runtime-contract.md](docs/architecture/runtime-contract.md).
+Domain-consistent replies are covered in
+[docs/architecture/outbound-identity.md](docs/architecture/outbound-identity.md).
 
 ## Runtime Targets
 
@@ -126,6 +128,9 @@ scripts/init.sh acme-maildesk
 ```
 
 Then review [docs/operations/getting-started.md](docs/operations/getting-started.md).
+For production, follow
+[docs/operations/production-rollout.md](docs/operations/production-rollout.md)
+and [docs/operations/deliverability.md](docs/operations/deliverability.md).
 
 ## Preflight
 

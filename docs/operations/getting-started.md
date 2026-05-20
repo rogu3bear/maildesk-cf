@@ -66,7 +66,15 @@ bun run preflight:production
 
 See [preflight.md](preflight.md) for the full variable contract.
 
-## 5. Avoid Broad Email Tests
+## 5. Roll Out Production Carefully
+
+Use [production-rollout.md](production-rollout.md) as the release runbook.
+Use [deliverability.md](deliverability.md) as the mail-authentication and probe
+strategy. Use
+[../architecture/outbound-identity.md](../architecture/outbound-identity.md)
+before enabling replies from domain identities.
+
+## 6. Avoid Broad Email Tests
 
 For deliverability and reputation, do not use broad live-send smoke tests as
 normal verification. Prefer provider state reads, DNS reads, binding reads, and

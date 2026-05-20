@@ -42,6 +42,7 @@ The desired-state fixture may include preview storage resources, but production
 `wrangler.toml` files must bind only production storage. `cfctl` verification
 should catch accidental preview bindings before deploy.
 - Worker secrets and identity policy config.
+- Sender-domain authentication and outbound identity verification status.
 
 ## Verification Bar
 
@@ -54,6 +55,7 @@ Verification should avoid broad live sends. Prefer:
 - Queue existence;
 - DNS record reads;
 - provider sender-domain status reads;
+- outbound identity readback for every configured reply identity;
 - one explicit targeted send only when a human asks for delivery proof.
 
 Verification output should distinguish:

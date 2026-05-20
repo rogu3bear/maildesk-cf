@@ -12,6 +12,9 @@ The Email Worker receives Cloudflare Email Routing events. It should:
 
 - normalize the envelope recipient into an `InboundMessage`;
 - call the Rust router contract through the compiled adapter path;
+- forward accepted mail to configured operators before attempting raw MIME
+  storage, because the Cloudflare raw message stream may not be reusable after
+  storage;
 - store raw MIME content in R2 before parsing work begins;
 - persist the route decision and initial message metadata in D1;
 - enqueue parsing, indexing, notification, and delivery jobs;
@@ -70,13 +73,14 @@ binding limits.
 1. Cloudflare Email Routing receives `role@example.com`.
 2. Email Worker converts the event into router input.
 3. Rust router returns a `RouteDecision`.
-4. Raw MIME is written to R2.
-5. Route, message, and audit metadata are written to D1.
-6. Queue jobs parse MIME and notify operators.
-7. Operator opens a thread in the UI.
-8. API Worker asks the router to authorize the reply identity.
-9. Outbound job sends through the configured Cloudflare-first sender path.
-10. Audit events record the send request, provider result, and final status.
+4. Accepted mail is forwarded to the policy-selected operators.
+5. Raw MIME is written to R2.
+6. Route, message, and audit metadata are written to D1.
+7. Queue jobs parse MIME and notify operators.
+8. Operator opens a thread in the UI.
+9. API Worker asks the router to authorize the reply identity.
+10. Outbound job sends through the configured Cloudflare-first sender path.
+11. Audit events record the send request, provider result, and final status.
 
 ## Failure Policy
 
@@ -85,7 +89,9 @@ binding limits.
 - Empty operator set: fail preflight before deploy.
 - Unauthorized operator: reject API request.
 - Unauthorized reply identity: reject API request.
-- R2 write failure: do not mark message accepted in D1.
+- R2 write failure after forwarding: enqueue an inbound job with explicit
+  storage error metadata so operators receive the message and recovery has
+  evidence.
 - D1 write failure: enqueue no follow-up work unless recovery is explicit.
 - Sender failure: retry through Queue policy and preserve audit evidence.
 

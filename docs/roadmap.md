@@ -17,12 +17,14 @@ complete elsewhere.
 - [x] Shared TypeScript edge contract for readiness and queue jobs.
 - [x] Template desired-state fixture for future `cfctl maildesk-cf` surface.
 - [x] `cfctl` surface draft.
+- [x] Production rollout, deliverability, and outbound identity runbooks.
 
 ## Milestone 1: Deployable Edge Skeleton
 
 - [ ] Compile router for Worker consumption or expose a stable adapter crate.
 - [x] Email Worker accepts Cloudflare email events into the edge job contract.
 - [x] Email Worker writes raw MIME to R2.
+- [x] Email Worker forwards accepted inbound mail to policy-selected operators.
 - [ ] Email Worker persists accepted inbound metadata in D1.
 - [x] API Worker exposes health and readiness endpoints.
 - [x] Queue consumer records job audit events.
@@ -38,6 +40,7 @@ complete elsewhere.
 - [ ] Reply composer defaults to the policy-selected identity.
 - [ ] API Worker validates operator and reply identity through the Rust router.
 - [ ] Outbound reply jobs are persisted before send.
+- [ ] Sender adapter sends authorized replies from verified domain identities.
 - [ ] Delivery results update audit events.
 
 ## Milestone 3: Production Hardening
