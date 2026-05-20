@@ -34,18 +34,28 @@ fi
 
 replace_in_file() {
   local file="$1"
-  perl -0pi -e "s/(?<![a-z0-9-])maildesk-cf(?![a-z0-9-])/${PROJECT_NAME}/g" "${file}"
+  perl -0pi -e "s/(?<![a-z0-9-])maildesk-cf/${PROJECT_NAME}/g" "${file}"
 }
 
 replace_in_file "${ROOT_DIR}/Cargo.toml"
+replace_in_file "${ROOT_DIR}/AGENTS.md"
 replace_in_file "${ROOT_DIR}/README.md"
+replace_in_file "${ROOT_DIR}/.env.example"
 replace_in_file "${ROOT_DIR}/wrangler.toml"
+replace_in_file "${ROOT_DIR}/wrangler.mail-router.toml"
+replace_in_file "${ROOT_DIR}/config/desired-state.example.json"
 replace_in_file "${ROOT_DIR}/docs/architecture/template-standard.md"
+replace_in_file "${ROOT_DIR}/docs/architecture/runtime-contract.md"
+replace_in_file "${ROOT_DIR}/docs/architecture/rust-router-contract.md"
 replace_in_file "${ROOT_DIR}/docs/operations/cfctl-contract.md"
+replace_in_file "${ROOT_DIR}/docs/operations/getting-started.md"
+replace_in_file "${ROOT_DIR}/docs/operations/preflight.md"
+replace_in_file "${ROOT_DIR}/docs/roadmap.md"
 replace_in_file "${ROOT_DIR}/ops/cfctl/maildesk-cf.surface.md"
+replace_in_file "${ROOT_DIR}/package.json"
 replace_in_file "${ROOT_DIR}/workers/mail-api/src/index.ts"
 replace_in_file "${ROOT_DIR}/workers/mail-router/src/index.ts"
 replace_in_file "${ROOT_DIR}/apps/maildesk-ui/README.md"
 
 echo "Initialized template identifiers for ${PROJECT_NAME}."
-echo "Next: review wrangler.toml placeholders, then provision resources with cfctl."
+echo "Next: review wrangler.toml and wrangler.mail-router.toml placeholders, then provision resources with cfctl."
