@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 interface DesiredState {
-  domains: Array<{ name: string }>;
+  domains: Array<{ name: string; inbound_mx_provider?: string }>;
   workers?: {
     mail_router?: {
       script_name?: string;
@@ -39,6 +39,8 @@ interface InboundProof {
   forward_errors: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
   raw_r2_key?: string;
+  provider?: string;
+  external_receipt_path?: string;
   audit_event_at?: string;
 }
 
@@ -59,6 +61,7 @@ const cfctlBin = process.env.CFCTL_BIN ?? argValue("--cfctl") ?? "cfctl";
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
 const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-policy-path");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
+const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
 const useResend = !args.includes("--no-resend");
 const desiredState = readJson<DesiredState>(desiredStatePath);
 const routerService = desiredState.workers?.mail_router?.script_name;
@@ -133,6 +136,13 @@ if (useResend) {
   const senderDomains = collectResendDomains();
   if (Object.keys(senderDomains).length > 0) {
     evidence.sender_domains = senderDomains;
+  }
+}
+
+if (googleAdminBin) {
+  const externalInboundProofs = collectGoogleWorkspaceProofs(googleAdminBin);
+  if (Object.keys(externalInboundProofs).length > 0) {
+    evidence.inbound_proofs = { ...(evidence.inbound_proofs ?? {}), ...externalInboundProofs };
   }
 }
 
@@ -298,6 +308,39 @@ function collectResendDomains(): Record<string, string> {
   }
 }
 
+function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof> {
+  const proofs: Record<string, InboundProof> = {};
+  for (const domain of desiredState.domains.filter((entry) => entry.inbound_mx_provider === "google_workspace")) {
+    const target = `founders@${domain.name}`;
+    const result = spawnSync(bin, ["resource", "search", "--json", target], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    if (result.status !== 0) continue;
+    const parsed = parseJson<GoogleResourceSearch>(result.stdout);
+    const resources = parsed?.resources ?? [];
+    const group = resources.find((resource) => resource.id === `workspace:group:${target}`);
+    const members = resources
+      .filter((resource) => resource.type === "workspace.group_membership")
+      .map((resource) => resource.record?.email)
+      .filter((email): email is string => typeof email === "string")
+      .sort();
+    if (!group || members.length === 0) continue;
+    proofs[domain.name] = {
+      status: "ok",
+      envelope_to: target,
+      route_kind: "role_alias",
+      forwarded_to: members,
+      forward_errors: [],
+      default_reply_identity: target,
+      audit_event_at: parsed?.snapshot_captured_at,
+      provider: "google_workspace",
+      external_receipt_path: parsed?.receipt_path,
+    };
+  }
+  return proofs;
+}
+
 function routesToMaildesk(rule: RoutingRule, routerService: string | undefined): boolean {
   return (rule.actions ?? []).some((action) => {
     if (action.type === "worker") {
@@ -371,6 +414,18 @@ interface InboundAuditDetail {
   defaultReplyIdentity?: string;
   rawR2Key?: string;
   storageError?: string;
+}
+
+interface GoogleResourceSearch {
+  receipt_path?: string;
+  snapshot_captured_at?: string;
+  resources?: Array<{
+    id?: string;
+    type?: string;
+    record?: {
+      email?: string;
+    };
+  }>;
 }
 
 interface OutboundAuditDetail {

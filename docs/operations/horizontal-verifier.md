@@ -134,8 +134,11 @@ Domains default to Cloudflare Email Routing at the root MX. If a private
 instance intentionally keeps a primary mailbox domain on another provider, set
 `inbound_mx_provider` on that domain in desired state, for example
 `google_workspace`. The verifier then treats the external MX set as intentional
-edge state, while proof planning still blocks Cloudflare inbound proof probes
-for that domain because the Worker cannot receive root-domain mail.
+edge state. When `--google-admin` or `GOOGLE_ADMIN_BIN` points at a compatible
+Google Workspace control-plane CLI, the evidence collector also reads the
+external group membership and records it as inbound proof. Without that external
+proof, proof planning still blocks Cloudflare inbound proof probes for that
+domain because the Worker cannot receive root-domain mail.
 
 When live `zones` evidence is present, every Cloudflare-held zone is included in
 the receipt. A held zone missing from local policy or desired state is reported

@@ -78,6 +78,7 @@ interface ProofEvidence {
   audit_event_at?: string;
   from_identity?: string;
   provider?: string;
+  external_receipt_path?: string;
   provider_message_id?: string;
 }
 
@@ -125,6 +126,8 @@ interface EvidenceSummary {
     forwarded_to: string[];
     default_reply_identity: string | null;
     raw_r2_key: string | null;
+    provider: string | null;
+    external_receipt_path: string | null;
     audit_event_at: string | null;
   };
   outbound: {
@@ -293,7 +296,7 @@ function buildRows(
       r2_policy: live.r2_policy_sha256 ? (live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift") : "not_checked",
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
-      inbound_proof: checkInboundProof(domainName, policyDomain, live.inbound_proofs?.[domainName]),
+      inbound_proof: checkInboundProof(domainName, policyDomain, desiredDomain, live.inbound_proofs?.[domainName]),
       outbound_sender: checkSender(domainName, desired, live),
       outbound_proof: checkOutboundProof(domainName, live.outbound_proofs?.[domainName]),
     };
@@ -440,6 +443,7 @@ function requiredReadyzChecks(live: LiveEvidence, names: string[]): boolean {
 function checkInboundProof(
   domainName: string,
   policyDomain: PolicyDomain | undefined,
+  desiredDomain: DesiredDomain | undefined,
   proof: ProofEvidence | undefined,
 ): Status {
   if (!proof) return "not_checked";
@@ -452,13 +456,14 @@ function checkInboundProof(
   if (!mailbox || mailbox.domain !== domainName) return "drift";
 
   const roleAlias = policyDomain.role_aliases[mailbox.localPart];
+  const requireRawR2Key = (desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing") === "cloudflare_email_routing";
   if (roleAlias) {
-    return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity);
+    return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, requireRawR2Key);
   }
 
   const personalAlias = policyDomain.personal_aliases[mailbox.localPart];
   if (personalAlias) {
-    return proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity);
+    return proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity, requireRawR2Key);
   }
 
   return "drift";
@@ -469,13 +474,15 @@ function proofMatchesRoute(
   expectedRouteKind: "role_alias" | "personal_alias",
   expectedOperators: string[],
   expectedReplyIdentity: string,
+  requireRawR2Key: boolean,
 ): Status {
   if (proof.route_kind && proof.route_kind !== expectedRouteKind) return "drift";
   if (proof.default_reply_identity && normalizeMailbox(proof.default_reply_identity) !== normalizeMailbox(expectedReplyIdentity)) {
     return "drift";
   }
   if (proof.forward_errors && proof.forward_errors.length > 0) return "drift";
-  if (!proof.raw_r2_key) return "drift";
+  if (requireRawR2Key && !proof.raw_r2_key) return "drift";
+  if (!requireRawR2Key && !proof.provider && !proof.external_receipt_path) return "drift";
   if (!proof.forwarded_to) return "drift";
 
   const actualRecipients = proof.forwarded_to.map(normalizeMailbox);
@@ -570,6 +577,8 @@ function evidenceSummary(
       forwarded_to: inbound?.forwarded_to ?? [],
       default_reply_identity: inbound?.default_reply_identity ?? null,
       raw_r2_key: inbound?.raw_r2_key ?? null,
+      provider: inbound?.provider ?? null,
+      external_receipt_path: inbound?.external_receipt_path ?? null,
       audit_event_at: inbound?.audit_event_at ?? null,
     },
     outbound: {

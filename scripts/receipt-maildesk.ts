@@ -42,6 +42,7 @@ if (!skipCollect) {
     ...forwardValue("--readyz-url"),
     ...forwardValue("--r2-policy-path"),
     ...forwardValue("--d1-database"),
+    ...forwardValue("--google-admin"),
     ...(args.includes("--no-resend") ? ["--no-resend"] : []),
   ];
   runInherited("collect live evidence", ["run", "scripts/collect-live-evidence.ts", "--", ...collectArgs]);
