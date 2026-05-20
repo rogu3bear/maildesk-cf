@@ -55,7 +55,7 @@ const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const from = argValue("--from") ?? (execute ? undefined : "maildesk-proof@example.com");
 const to = argValue("--to") ?? (execute && kind === "outbound" ? undefined : "maildesk-proof@example.com");
 const apiUrl = argValue("--api-url") ?? process.env.MAILDESK_API_URL;
-const apiToken = argValue("--api-token") ?? process.env.MAILDESK_API_TOKEN;
+const apiToken = argValue("--api-token") ?? process.env.MAILDESK_PROOF_API_TOKEN ?? process.env.MAILDESK_API_TOKEN;
 const domainFilter = argValue("--domain");
 const limit = args.includes("--all") ? Number.POSITIVE_INFINITY : Number(argValue("--limit") ?? "1");
 

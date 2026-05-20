@@ -94,6 +94,9 @@ bun run send:maildesk-probes -- \
   --domain example.com
 ```
 
+For proof-only runs, prefer a deployed `MAILDESK_PROOF_API_TOKEN` over rotating
+the primary `MAILDESK_API_TOKEN`.
+
 ## Receipt Shape
 
 The command emits one row per domain and reports:

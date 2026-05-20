@@ -39,6 +39,7 @@ It verifies the template checks plus production-only requirements.
 | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_API_TOKEN` | production | bearer token for the reply API |
+| `MAILDESK_PROOF_API_TOKEN` | optional | secondary bearer token for receipt/proof runs without rotating the primary API token |
 | `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` |
 | `MAILDESK_VERIFIED_SENDER_DOMAINS` | required when outbound is enabled | comma-separated sender domains approved by provider readback |
 | `RESEND_API_KEY` | required for `resend` mode | Resend API key stored as a Worker secret |

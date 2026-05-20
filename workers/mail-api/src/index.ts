@@ -146,12 +146,13 @@ async function recordAuditEvent(
 type Env = MaildeskEnv;
 
 function isAuthorizedRequest(request: Request, env: Env): boolean {
-  if (!env.MAILDESK_API_TOKEN) return false;
+  const tokens = [env.MAILDESK_API_TOKEN, env.MAILDESK_PROOF_API_TOKEN].filter(Boolean);
+  if (tokens.length === 0) return false;
 
   const authorization = request.headers.get("authorization") ?? "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
   const headerToken = request.headers.get("x-maildesk-token");
-  return bearer === env.MAILDESK_API_TOKEN || headerToken === env.MAILDESK_API_TOKEN;
+  return Boolean((bearer && tokens.includes(bearer)) || (headerToken && tokens.includes(headerToken)));
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
