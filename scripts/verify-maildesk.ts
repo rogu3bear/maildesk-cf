@@ -212,7 +212,7 @@ function checkIncludes(values: string[] | undefined, expected: string): Status {
 function checkRouting(actual: string[] | undefined, expected: string[] | undefined): Status {
   if (!expected) return "missing";
   if (!actual) return "not_checked";
-  return same([...actual].sort(), [...expected].sort()) ? "ok" : "drift";
+  return expected.every((alias) => actual.includes(alias)) ? "ok" : "missing";
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {

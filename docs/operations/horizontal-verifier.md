@@ -42,6 +42,10 @@ without credentials while private instances can add live evidence gathered by
 Use `--require-live` when the evidence file is meant to prove production
 readiness and any non-`ok` live status should fail the command.
 
+Email Routing evidence may include more rules than the policy requires. The
+verifier checks that every expected alias is present and tolerates extra
+Cloudflare rules so adjacent account routing does not create false drift.
+
 ## Evidence Contract
 
 The optional evidence file is JSON. It should be generated from `cfctl`,
