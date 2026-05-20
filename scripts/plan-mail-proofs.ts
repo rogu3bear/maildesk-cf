@@ -8,6 +8,7 @@ interface Receipt {
 
 interface DomainRow {
   domain: string;
+  inbound_mx?: Status;
   inbound_proof: Status;
   outbound_sender: Status;
   outbound_proof: Status;
@@ -90,13 +91,22 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
     if (!row || !policyDomain) continue;
 
     if (gap.field === "inbound_proof") {
-      const target = inboundTarget(gap.domain, policyDomain);
-      actions.push({
-        kind: "targeted_inbound_probe",
-        domain: gap.domain,
-        target,
-        description: `send one targeted inbound proof message to ${target}, then recollect evidence`,
-      });
+      if (row.inbound_mx && row.inbound_mx !== "ok") {
+        actions.push({
+          kind: "blocked",
+          domain: gap.domain,
+          blocked_by: "inbound_mx",
+          description: "repair root-domain MX before attempting inbound proof",
+        });
+      } else {
+        const target = inboundTarget(gap.domain, policyDomain);
+        actions.push({
+          kind: "targeted_inbound_probe",
+          domain: gap.domain,
+          target,
+          description: `send one targeted inbound proof message to ${target}, then recollect evidence`,
+        });
+      }
     }
 
     if (gap.field === "outbound_sender") {
@@ -109,7 +119,14 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
     }
 
     if (gap.field === "outbound_proof") {
-      if (row.inbound_proof !== "ok") {
+      if (row.inbound_mx && row.inbound_mx !== "ok") {
+        actions.push({
+          kind: "blocked",
+          domain: gap.domain,
+          blocked_by: "inbound_mx",
+          description: "repair root-domain MX before attempting outbound reply proof",
+        });
+      } else if (row.inbound_proof !== "ok") {
         actions.push({
           kind: "blocked",
           domain: gap.domain,
@@ -194,6 +211,6 @@ type ProofAction =
   | {
       kind: "blocked";
       domain: string;
-      blocked_by: "inbound_proof" | "sender_domain_not_verified";
+      blocked_by: "inbound_mx" | "inbound_proof" | "sender_domain_not_verified";
       description: string;
     };
