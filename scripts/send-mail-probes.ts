@@ -118,7 +118,7 @@ function sendInboundProbe(
   probe: Extract<ProofAction, { kind: "targeted_inbound_probe" }>,
   generatedAt: string,
 ): { domain: string; target: string; status: "sent" | "dry_run"; id?: string } {
-  const idempotencyKey = `maildesk-proof:${probe.domain}:${generatedAt.slice(0, 10)}`;
+  const idempotencyKey = `maildesk-proof:${probe.domain}:${tagValue(from as string)}:${generatedAt.slice(0, 10)}`;
   const commandArgs = [
     "emails",
     "send",

@@ -40,6 +40,7 @@ interface DesiredDomain {
 interface LiveEvidence {
   zones?: string[];
   email_routing?: Record<string, RoutingEvidence>;
+  dns_mx?: Record<string, string[]>;
   r2_policy_sha256?: string;
   readyz?: {
     ok?: boolean;
@@ -88,6 +89,7 @@ interface DomainRow {
   zone_held: Status;
   role_aliases_wired: Status;
   personal_aliases_wired: Status;
+  inbound_mx: Status;
   r2_policy: Status;
   worker_bindings: Status;
   d1_queue: Status;
@@ -137,6 +139,7 @@ interface ReceiptGap {
     | "zone_held"
     | "role_aliases_wired"
     | "personal_aliases_wired"
+    | "inbound_mx"
     | "r2_policy"
     | "worker_bindings"
     | "d1_queue"
@@ -172,6 +175,7 @@ const edgeFailures = rows.filter((row) =>
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
     row.d1_queue,
@@ -182,6 +186,7 @@ const mailFailures = rows.filter((row) =>
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
     row.d1_queue,
@@ -276,6 +281,7 @@ function buildRows(
       zone_held: checkIncludes(live.zones, domainName),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
+      inbound_mx: checkInboundMx(live.dns_mx?.[domainName]),
       r2_policy: live.r2_policy_sha256 ? (live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift") : "not_checked",
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
@@ -292,6 +298,7 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
     "zone_held",
     "role_aliases_wired",
     "personal_aliases_wired",
+    "inbound_mx",
     "r2_policy",
     "worker_bindings",
     "d1_queue",
@@ -339,6 +346,16 @@ function checkRouting(actual: string[] | undefined, expected: string[] | undefin
   if (!expected) return "missing";
   if (!actual) return "not_checked";
   return expected.every((alias) => actual.includes(alias)) ? "ok" : "missing";
+}
+
+function checkInboundMx(actual: string[] | undefined): Status {
+  if (!actual) return "not_checked";
+  const normalized = actual.map((value) => value.replace(/\.$/, "").toLowerCase());
+  return ["route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"].every((mx) =>
+    normalized.includes(mx),
+  )
+    ? "ok"
+    : "drift";
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {
@@ -540,6 +557,7 @@ function hasLiveEvidence(live: LiveEvidence): boolean {
   return Boolean(
     live.zones ||
       live.email_routing ||
+      live.dns_mx ||
       live.r2_policy_sha256 ||
       live.readyz ||
       live.d1 ||
@@ -561,6 +579,7 @@ function printTable(tableRows: DomainRow[]) {
     "zone",
     "roles",
     "personal",
+    "mx",
     "r2",
     "bindings",
     "d1_queue",
@@ -574,6 +593,7 @@ function printTable(tableRows: DomainRow[]) {
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
     row.d1_queue,

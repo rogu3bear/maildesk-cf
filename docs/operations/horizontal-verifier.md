@@ -107,6 +107,7 @@ The command emits one row per domain and reports:
 - local policy versus desired-state agreement;
 - Cloudflare zone readback status;
 - Email Routing role and personal alias wiring status;
+- root-domain MX readiness for Cloudflare Email Routing;
 - R2 runtime policy hash agreement;
 - Worker binding readiness;
 - D1 and Queue readiness;
@@ -129,10 +130,10 @@ as drift instead of being silently ignored.
 Use `--require-live` when the evidence file is meant to prove production
 readiness and any non-`ok` live status should fail the command.
 
-`edge_ready` covers Cloudflare-held zones, Email Routing aliases, R2 policy,
-Worker bindings, and D1/Queue reachability. `mail_ready` is stricter: it also
-requires inbound proof, outbound sender readiness, and outbound reply audit
-proof.
+`edge_ready` covers Cloudflare-held zones, Email Routing aliases, root-domain MX
+readiness for Cloudflare Email Routing, R2 policy, Worker bindings, and D1/Queue
+reachability. `mail_ready` is stricter: it also requires inbound proof, outbound
+sender readiness, and outbound reply audit proof.
 
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra
@@ -151,6 +152,13 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
       "role_aliases": ["founders", "security"],
       "personal_aliases": ["operator-a", "operator-b"]
     }
+  },
+  "dns_mx": {
+    "example.com": [
+      "route1.mx.cloudflare.net",
+      "route2.mx.cloudflare.net",
+      "route3.mx.cloudflare.net"
+    ]
   },
   "r2_policy_sha256": "<sha256-of-local-policy-json>",
   "readyz": {

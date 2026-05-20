@@ -19,6 +19,7 @@ interface Evidence {
   generated_at: string;
   zones?: string[];
   email_routing?: Record<string, { role_aliases: string[]; personal_aliases: string[] }>;
+  dns_mx?: Record<string, string[]>;
   r2_policy_sha256?: string;
   readyz?: unknown;
   d1?: {
@@ -71,23 +72,37 @@ if (zones.ok && Array.isArray(zones.value.result)) {
 }
 
 const routing: Evidence["email_routing"] = {};
+const dnsMx: Evidence["dns_mx"] = {};
 for (const domain of desiredState.domains.map((entry) => entry.name).sort()) {
   const rules = cfctlJson(["list", "email.routing_rule", "--zone", domain, "--json"]);
-  if (!rules.ok || !Array.isArray(rules.value.result)) continue;
+  if (rules.ok && Array.isArray(rules.value.result)) {
+    const aliases = rules.value.result
+      .filter((rule: RoutingRule) => rule.enabled !== false && routesToMaildesk(rule, routerService))
+      .map((rule: RoutingRule) => localPart(rule.recipient ?? matcherValue(rule)))
+      .filter(Boolean)
+      .sort();
 
-  const aliases = rules.value.result
-    .filter((rule: RoutingRule) => rule.enabled !== false && routesToMaildesk(rule, routerService))
-    .map((rule: RoutingRule) => localPart(rule.recipient ?? matcherValue(rule)))
-    .filter(Boolean)
-    .sort();
+    routing[domain] = {
+      role_aliases: unique(aliases),
+      personal_aliases: unique(aliases),
+    };
+  }
 
-  routing[domain] = {
-    role_aliases: unique(aliases),
-    personal_aliases: unique(aliases),
-  };
+  const dnsRecords = cfctlJson(["list", "dns.record", "--zone", domain, "--json"]);
+  if (dnsRecords.ok && Array.isArray(dnsRecords.value.result)) {
+    const mxRecords = dnsRecords.value.result
+      .filter((record: DnsRecord) => record.type === "MX" && normalizeName(record.name) === domain)
+      .map((record: DnsRecord) => record.content)
+      .filter((content): content is string => typeof content === "string")
+      .sort();
+    if (mxRecords.length > 0) dnsMx[domain] = mxRecords;
+  }
 }
 if (Object.keys(routing).length > 0) {
   evidence.email_routing = routing;
+}
+if (Object.keys(dnsMx).length > 0) {
+  evidence.dns_mx = dnsMx;
 }
 
 if (r2PolicyPath) {
@@ -319,6 +334,10 @@ function parseJson<T>(value: string): T | null {
   }
 }
 
+function normalizeName(name: string | undefined): string {
+  return (name ?? "").replace(/\.$/, "").toLowerCase();
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -336,6 +355,12 @@ interface RoutingRule {
   enabled?: boolean;
   matchers?: Array<{ field?: string; value?: string }>;
   actions?: Array<{ type?: string; value?: string[] }>;
+}
+
+interface DnsRecord {
+  name?: string;
+  type?: string;
+  content?: string;
 }
 
 interface InboundAuditDetail {
