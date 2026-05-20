@@ -76,6 +76,24 @@ bun run send:maildesk-probes -- --execute --from proof@example.com --domain exam
 The probe executor defaults to dry-run and a limit of one target. Use
 `--limit <n>` or `--all` only for a deliberate proof pass.
 
+Dry-run an outbound reply proof from a plan:
+
+```bash
+bun run send:maildesk-probes -- --kind outbound --to proof@example.com --domain example.com --json
+```
+
+Executing outbound proof requires the deployed reply API URL and token:
+
+```bash
+bun run send:maildesk-probes -- \
+  --kind outbound \
+  --execute \
+  --api-url https://maildesk.example.workers.dev \
+  --api-token "$MAILDESK_API_TOKEN" \
+  --to proof@example.com \
+  --domain example.com
+```
+
 ## Receipt Shape
 
 The command emits one row per domain and reports:
