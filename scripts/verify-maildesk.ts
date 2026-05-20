@@ -93,7 +93,17 @@ const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePat
 const policySha256 = sha256(policyText);
 const rows = buildRows(policy, desiredState, evidence, policySha256);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
-const liveFailures = rows.filter((row) =>
+const edgeFailures = rows.filter((row) =>
+  [
+    row.zone_held,
+    row.role_aliases_wired,
+    row.personal_aliases_wired,
+    row.r2_policy,
+    row.worker_bindings,
+    row.d1_queue,
+  ].some((status) => status !== "ok"),
+);
+const mailFailures = rows.filter((row) =>
   [
     row.zone_held,
     row.role_aliases_wired,
@@ -113,8 +123,8 @@ const receipt = {
   local_policy_sha256: policySha256,
   status: {
     local_truth_ok: localFailures.length === 0,
-    edge_ready: liveFailures.length === 0 && hasLiveEvidence(evidence),
-    mail_ready: liveFailures.length === 0 && hasLiveEvidence(evidence),
+    edge_ready: edgeFailures.length === 0 && hasLiveEvidence(evidence),
+    mail_ready: mailFailures.length === 0 && hasLiveEvidence(evidence),
     live_evidence_present: hasLiveEvidence(evidence),
   },
   rows,
@@ -132,7 +142,7 @@ if (jsonOutput) {
   console.log(`mail_ready ${receipt.status.mail_ready}`);
 }
 
-if (localFailures.length > 0 || (requireLive && liveFailures.length > 0)) {
+if (localFailures.length > 0 || (requireLive && mailFailures.length > 0)) {
   process.exit(1);
 }
 

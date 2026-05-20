@@ -42,6 +42,10 @@ without credentials while private instances can add live evidence gathered by
 Use `--require-live` when the evidence file is meant to prove production
 readiness and any non-`ok` live status should fail the command.
 
+`edge_ready` covers Cloudflare-held zones, Email Routing aliases, R2 policy,
+Worker bindings, and D1/Queue reachability. `mail_ready` is stricter: it also
+requires inbound proof and outbound sender readiness.
+
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra
 Cloudflare rules so adjacent account routing does not create false drift.
