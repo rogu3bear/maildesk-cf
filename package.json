@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
     "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
+    "receipt:maildesk": "bun run scripts/receipt-maildesk.ts",
     "verify:maildesk": "bun run scripts/verify-maildesk.ts"
   },
   "devDependencies": {

@@ -3,7 +3,24 @@
 The horizontal verifier is the local command surface for proving that the mail
 desk is one coherent system instead of a pile of individually green checks.
 
-Run it with the template fixtures:
+Run the full non-mutating receipt workflow:
+
+```bash
+bun run receipt:maildesk
+```
+
+That command collects live evidence when credentials and readback tools are
+available, writes `var/maildesk-live-evidence.json`, writes
+`var/maildesk-receipt.json`, writes `var/maildesk-proof-plan.json`, and prints a
+short readiness summary.
+
+For template-only or offline receipt checks, skip live collection:
+
+```bash
+bun run receipt:maildesk -- --skip-collect
+```
+
+Run the verifier only with the template fixtures:
 
 ```bash
 bun run verify:maildesk
@@ -50,6 +67,10 @@ The command emits one row per domain and reports:
 
 - configured operators;
 - configured reply identities;
+- route-level recipient, reply identity, allowed reply identity, and wiring
+  details;
+- sender-domain provider status;
+- inbound and outbound audit evidence references;
 - local policy versus desired-state agreement;
 - Cloudflare zone readback status;
 - Email Routing role and personal alias wiring status;

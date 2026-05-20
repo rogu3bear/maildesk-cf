@@ -81,6 +81,9 @@ interface DomainRow {
   domain: string;
   operators: string[];
   reply_identities: string[];
+  routes: RouteSummary[];
+  sender_domain: SenderSummary;
+  evidence: EvidenceSummary;
   policy_desired: Status;
   zone_held: Status;
   role_aliases_wired: Status;
@@ -91,6 +94,39 @@ interface DomainRow {
   inbound_proof: Status;
   outbound_sender: Status;
   outbound_proof: Status;
+}
+
+interface RouteSummary {
+  kind: "role_alias" | "personal_alias";
+  mailbox: string;
+  operators: string[];
+  reply_identity: string;
+  allowed_reply_identities: string[];
+  wired: Status;
+}
+
+interface SenderSummary {
+  authenticated: boolean;
+  provider: "resend";
+  provider_status: string | null;
+}
+
+interface EvidenceSummary {
+  inbound: {
+    status: string | null;
+    envelope_to: string | null;
+    forwarded_to: string[];
+    default_reply_identity: string | null;
+    raw_r2_key: string | null;
+    audit_event_at: string | null;
+  };
+  outbound: {
+    status: string | null;
+    from_identity: string | null;
+    provider: string | null;
+    provider_message_id: string | null;
+    audit_event_at: string | null;
+  };
 }
 
 interface ReceiptGap {
@@ -233,6 +269,9 @@ function buildRows(
       domain: domainName,
       operators: policyDomain ? domainOperators(policyDomain) : [],
       reply_identities: policyDomain ? replyIdentities(policyDomain) : [],
+      routes: policyDomain ? domainRoutes(domainName, policyDomain, routingEvidence) : [],
+      sender_domain: senderSummary(domainName, desired, live),
+      evidence: evidenceSummary(live.inbound_proofs?.[domainName], live.outbound_proofs?.[domainName]),
       policy_desired: comparePolicyAndDesired(policyDomain, desiredDomain),
       zone_held: checkIncludes(live.zones, domainName),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
@@ -410,6 +449,69 @@ function replyIdentities(domain: PolicyDomain): string[] {
     ...Object.values(domain.role_aliases).flatMap((alias) => alias.allowed_reply_identities),
     ...Object.values(domain.personal_aliases).map((alias) => alias.reply_identity),
   ]).sort();
+}
+
+function domainRoutes(
+  domainName: string,
+  domain: PolicyDomain,
+  routingEvidence: RoutingEvidence | undefined,
+): RouteSummary[] {
+  const roleRoutes = Object.entries(domain.role_aliases).map(([alias, route]) => ({
+    kind: "role_alias" as const,
+    mailbox: `${alias}@${domainName}`,
+    operators: [...route.operators].sort(),
+    reply_identity: route.reply_identity,
+    allowed_reply_identities: [...route.allowed_reply_identities].sort(),
+    wired: checkRouting(routingEvidence?.role_aliases, [alias]),
+  }));
+  const personalRoutes = Object.entries(domain.personal_aliases).map(([alias, route]) => ({
+    kind: "personal_alias" as const,
+    mailbox: `${alias}@${domainName}`,
+    operators: [route.operator],
+    reply_identity: route.reply_identity,
+    allowed_reply_identities: [route.reply_identity],
+    wired: checkRouting(routingEvidence?.personal_aliases, [alias]),
+  }));
+  return [...roleRoutes, ...personalRoutes].sort((left, right) => left.mailbox.localeCompare(right.mailbox));
+}
+
+function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
+  return {
+    authenticated: desired.sender?.authenticated_domains?.includes(domainName) ?? false,
+    provider: "resend",
+    provider_status: senderProviderStatus(domainName, live),
+  };
+}
+
+function senderProviderStatus(domainName: string, live: LiveEvidence): string | null {
+  if (!live.sender_domains) return null;
+  if (Array.isArray(live.sender_domains)) {
+    return live.sender_domains.includes(domainName) ? "listed" : null;
+  }
+  return live.sender_domains[domainName] ?? null;
+}
+
+function evidenceSummary(
+  inbound: ProofEvidence | undefined,
+  outbound: ProofEvidence | undefined,
+): EvidenceSummary {
+  return {
+    inbound: {
+      status: inbound?.status ?? null,
+      envelope_to: inbound?.envelope_to ?? inbound?.alias ?? null,
+      forwarded_to: inbound?.forwarded_to ?? [],
+      default_reply_identity: inbound?.default_reply_identity ?? null,
+      raw_r2_key: inbound?.raw_r2_key ?? null,
+      audit_event_at: inbound?.audit_event_at ?? null,
+    },
+    outbound: {
+      status: outbound?.status ?? null,
+      from_identity: outbound?.from_identity ?? null,
+      provider: outbound?.provider ?? null,
+      provider_message_id: outbound?.provider_message_id ?? null,
+      audit_event_at: outbound?.audit_event_at ?? null,
+    },
+  };
 }
 
 function same(left: string[], right: string[]): boolean {

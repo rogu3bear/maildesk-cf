@@ -111,6 +111,7 @@ bun install
 cargo test
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
+CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
@@ -125,6 +126,8 @@ Cloudflare account state.
 `bun run verify:maildesk` emits the horizontal domain matrix for policy,
 desired-state, and optional live evidence. See
 [docs/operations/horizontal-verifier.md](docs/operations/horizontal-verifier.md).
+`bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
+workflow and writes the three receipt artifacts under `var/`.
 `bun run collect:maildesk-evidence` builds that optional evidence file from
 available readbacks without mutating Cloudflare.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.
