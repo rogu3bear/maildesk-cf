@@ -38,7 +38,6 @@ replace_in_file() {
 }
 
 replace_in_file "${ROOT_DIR}/Cargo.toml"
-replace_in_file "${ROOT_DIR}/AGENTS.md"
 replace_in_file "${ROOT_DIR}/README.md"
 replace_in_file "${ROOT_DIR}/.env.example"
 replace_in_file "${ROOT_DIR}/wrangler.toml"
@@ -58,4 +57,5 @@ replace_in_file "${ROOT_DIR}/workers/mail-router/src/index.ts"
 replace_in_file "${ROOT_DIR}/apps/maildesk-ui/README.md"
 
 echo "Initialized template identifiers for ${PROJECT_NAME}."
+echo "AGENTS.md was left unchanged; review it deliberately for clone-specific agent doctrine."
 echo "Next: review wrangler.toml and wrangler.mail-router.toml placeholders, then provision resources with cfctl."
