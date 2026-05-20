@@ -3,6 +3,29 @@
   "domains": {
     "example.com": {
       "role_aliases": {
+        "abuse": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "abuse@example.com",
+          "allowed_reply_identities": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
+        "dmarc": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "dmarc@example.com",
+          "allowed_reply_identities": [
+            "security@example.com",
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
         "founders": {
           "operators": [
             "operator-a@example.com",
@@ -10,6 +33,48 @@
           ],
           "reply_identity": "founders@example.com",
           "allowed_reply_identities": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
+        "info": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "info@example.com",
+          "allowed_reply_identities": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
+        "legal": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "legal@example.com",
+          "allowed_reply_identities": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ]
+        },
+        "noreply": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "noreply@example.com",
+          "allowed_reply_identities": []
+        },
+        "postmaster": {
+          "operators": [
+            "operator-a@example.com",
+            "operator-b@example.com"
+          ],
+          "reply_identity": "postmaster@example.com",
+          "allowed_reply_identities": [
+            "security@example.com",
             "operator-a@example.com",
             "operator-b@example.com"
           ]

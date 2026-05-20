@@ -48,6 +48,7 @@ complete elsewhere.
 ## Milestone 3: Production Hardening
 
 - [ ] `cfctl maildesk-cf verify` reads live Cloudflare state and reports drift.
+- [x] Local horizontal verifier emits a per-domain policy/readiness receipt.
 - [ ] DNS authentication checks cover SPF, DKIM, DMARC, MTA-STS, and TLS
       reporting when configured.
 - [ ] Email deliverability verification avoids broad smoke sends.

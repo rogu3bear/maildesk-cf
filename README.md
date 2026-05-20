@@ -111,6 +111,7 @@ bun install
 cargo test
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
+bun run verify:maildesk
 bun run preflight:template
 bash scripts/check-template.sh
 cargo run --bin maildesk-policy-check -- config/policy.example.json
@@ -118,6 +119,10 @@ cargo run --bin maildesk-policy-check -- config/policy.example.json
 
 These checks verify the Rust router and template hygiene. They do not prove live
 Cloudflare account state.
+
+`bun run verify:maildesk` emits the horizontal domain matrix for policy,
+desired-state, and optional live evidence. See
+[docs/operations/horizontal-verifier.md](docs/operations/horizontal-verifier.md).
 
 ## De-Templating
 
