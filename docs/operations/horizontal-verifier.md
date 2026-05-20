@@ -106,6 +106,7 @@ The command emits one row per domain and reports:
 - route-level recipient, reply identity, allowed reply identity, and wiring
   details;
 - sender-domain provider status;
+- root-domain MX records and classified inbound MX provider;
 - inbound and outbound audit evidence references;
 - local policy versus desired-state agreement;
 - Cloudflare zone readback status;
@@ -119,7 +120,10 @@ The command emits one row per domain and reports:
 - outbound reply audit proof status.
 
 JSON output also includes `gaps`: one machine-readable entry for every non-`ok`
-field, classified as `local`, `edge`, or `mail` readiness work.
+field, classified as `local`, `edge`, or `mail` readiness work. Gaps include a
+short `detail` string when live evidence can explain the blocker, such as a
+Google Workspace root MX set blocking a Cloudflare Email Routing proof or a
+sender provider still reporting a domain as pending.
 
 Template mode intentionally reports live Cloudflare checks as `not_checked`.
 That is not a failure. It means the public template can prove local coherence

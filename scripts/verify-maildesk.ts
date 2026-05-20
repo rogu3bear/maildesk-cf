@@ -84,6 +84,8 @@ interface DomainRow {
   reply_identities: string[];
   routes: RouteSummary[];
   sender_domain: SenderSummary;
+  inbound_mx_records: string[];
+  inbound_mx_provider: string | null;
   evidence: EvidenceSummary;
   policy_desired: Status;
   zone_held: Status;
@@ -149,6 +151,7 @@ interface ReceiptGap {
   >;
   status: Status;
   readiness: "local" | "edge" | "mail";
+  detail: string | null;
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -276,6 +279,8 @@ function buildRows(
       reply_identities: policyDomain ? replyIdentities(policyDomain) : [],
       routes: policyDomain ? domainRoutes(domainName, policyDomain, routingEvidence) : [],
       sender_domain: senderSummary(domainName, desired, live),
+      inbound_mx_records: normalizedMxRecords(live.dns_mx?.[domainName]),
+      inbound_mx_provider: inboundMxProvider(live.dns_mx?.[domainName]),
       evidence: evidenceSummary(live.inbound_proofs?.[domainName], live.outbound_proofs?.[domainName]),
       policy_desired: comparePolicyAndDesired(policyDomain, desiredDomain),
       zone_held: checkIncludes(live.zones, domainName),
@@ -315,8 +320,31 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
         field,
         status: row[field],
         readiness: gapReadiness(field),
+        detail: gapDetail(row, field),
       })),
   );
+}
+
+function gapDetail(row: DomainRow, field: ReceiptGap["field"]): string | null {
+  if (field === "inbound_mx") {
+    if (row.inbound_mx_records.length === 0) return "no root-domain MX records were found in live DNS evidence";
+    const provider = row.inbound_mx_provider ?? "unknown";
+    return `root-domain MX provider is ${provider}: ${row.inbound_mx_records.join(", ")}`;
+  }
+  if (field === "outbound_sender") {
+    return `sender provider status is ${row.sender_domain.provider_status ?? "not present"}`;
+  }
+  if (field === "inbound_proof") {
+    return row.evidence.inbound.status
+      ? `inbound proof status is ${row.evidence.inbound.status}`
+      : "no targeted inbound proof evidence was found";
+  }
+  if (field === "outbound_proof") {
+    return row.evidence.outbound.status
+      ? `outbound proof status is ${row.evidence.outbound.status}`
+      : "no outbound reply audit proof evidence was found";
+  }
+  return null;
 }
 
 function gapReadiness(field: ReceiptGap["field"]): ReceiptGap["readiness"] {
@@ -350,12 +378,34 @@ function checkRouting(actual: string[] | undefined, expected: string[] | undefin
 
 function checkInboundMx(actual: string[] | undefined): Status {
   if (!actual) return "not_checked";
-  const normalized = actual.map((value) => value.replace(/\.$/, "").toLowerCase());
-  return ["route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"].every((mx) =>
+  const normalized = normalizedMxRecords(actual);
+  return cloudflareEmailRoutingMx().every((mx) =>
     normalized.includes(mx),
   )
     ? "ok"
     : "drift";
+}
+
+function cloudflareEmailRoutingMx(): string[] {
+  return ["route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"];
+}
+
+function normalizedMxRecords(actual: string[] | undefined): string[] {
+  return (actual ?? []).map((value) => value.replace(/\.$/, "").toLowerCase()).sort();
+}
+
+function inboundMxProvider(actual: string[] | undefined): string | null {
+  const normalized = normalizedMxRecords(actual);
+  if (normalized.length === 0) return null;
+  if (cloudflareEmailRoutingMx().every((mx) => normalized.includes(mx))) return "cloudflare_email_routing";
+  if (
+    normalized.every((mx) =>
+      mx === "aspmx.l.google.com" || /^alt[1-4]\.aspmx\.l\.google\.com$/.test(mx),
+    )
+  ) {
+    return "google_workspace";
+  }
+  return "mixed_or_external";
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {
