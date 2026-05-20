@@ -130,6 +130,13 @@ That is not a failure. It means the public template can prove local coherence
 without credentials while private instances can add live evidence gathered by
 `cfctl`.
 
+Domains default to Cloudflare Email Routing at the root MX. If a private
+instance intentionally keeps a primary mailbox domain on another provider, set
+`inbound_mx_provider` on that domain in desired state, for example
+`google_workspace`. The verifier then treats the external MX set as intentional
+edge state, while proof planning still blocks Cloudflare inbound proof probes
+for that domain because the Worker cannot receive root-domain mail.
+
 When live `zones` evidence is present, every Cloudflare-held zone is included in
 the receipt. A held zone missing from local policy or desired state is reported
 as drift instead of being silently ignored.

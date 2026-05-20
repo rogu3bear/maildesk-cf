@@ -35,7 +35,10 @@ interface DesiredDomain {
   name: string;
   role_aliases: string[];
   personal_aliases: string[];
+  inbound_mx_provider?: InboundMxProvider;
 }
+
+type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external";
 
 interface LiveEvidence {
   zones?: string[];
@@ -286,7 +289,7 @@ function buildRows(
       zone_held: checkIncludes(live.zones, domainName),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
-      inbound_mx: checkInboundMx(live.dns_mx?.[domainName]),
+      inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain),
       r2_policy: live.r2_policy_sha256 ? (live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift") : "not_checked",
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
@@ -376,14 +379,12 @@ function checkRouting(actual: string[] | undefined, expected: string[] | undefin
   return expected.every((alias) => actual.includes(alias)) ? "ok" : "missing";
 }
 
-function checkInboundMx(actual: string[] | undefined): Status {
+function checkInboundMx(actual: string[] | undefined, desiredDomain: DesiredDomain | undefined): Status {
   if (!actual) return "not_checked";
-  const normalized = normalizedMxRecords(actual);
-  return cloudflareEmailRoutingMx().every((mx) =>
-    normalized.includes(mx),
-  )
-    ? "ok"
-    : "drift";
+  const expectedProvider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
+  const actualProvider = inboundMxProvider(actual);
+  if (expectedProvider === "external") return actualProvider === "mixed_or_external" ? "ok" : "drift";
+  return actualProvider === expectedProvider ? "ok" : "drift";
 }
 
 function cloudflareEmailRoutingMx(): string[] {

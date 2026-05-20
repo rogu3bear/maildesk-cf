@@ -9,6 +9,7 @@ interface Receipt {
 interface DomainRow {
   domain: string;
   inbound_mx?: Status;
+  inbound_mx_provider?: string | null;
   inbound_proof: Status;
   outbound_sender: Status;
   outbound_proof: Status;
@@ -91,7 +92,14 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
     if (!row || !policyDomain) continue;
 
     if (gap.field === "inbound_proof") {
-      if (row.inbound_mx && row.inbound_mx !== "ok") {
+      if (row.inbound_mx_provider && row.inbound_mx_provider !== "cloudflare_email_routing") {
+        actions.push({
+          kind: "blocked",
+          domain: gap.domain,
+          blocked_by: "inbound_provider",
+          description: "root-domain MX is intentionally handled outside Cloudflare Email Routing",
+        });
+      } else if (row.inbound_mx && row.inbound_mx !== "ok") {
         actions.push({
           kind: "blocked",
           domain: gap.domain,
@@ -126,7 +134,7 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
           blocked_by: "inbound_mx",
           description: "repair root-domain MX before attempting outbound reply proof",
         });
-      } else if (row.inbound_proof !== "ok") {
+      } else if (row.inbound_mx_provider === "cloudflare_email_routing" && row.inbound_proof !== "ok") {
         actions.push({
           kind: "blocked",
           domain: gap.domain,
@@ -211,6 +219,6 @@ type ProofAction =
   | {
       kind: "blocked";
       domain: string;
-      blocked_by: "inbound_mx" | "inbound_proof" | "sender_domain_not_verified";
+      blocked_by: "inbound_mx" | "inbound_provider" | "inbound_proof" | "sender_domain_not_verified";
       description: string;
     };
