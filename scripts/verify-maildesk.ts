@@ -89,6 +89,24 @@ interface DomainRow {
   outbound_sender: Status;
 }
 
+interface ReceiptGap {
+  domain: string;
+  field: keyof Pick<
+    DomainRow,
+    | "policy_desired"
+    | "zone_held"
+    | "role_aliases_wired"
+    | "personal_aliases_wired"
+    | "r2_policy"
+    | "worker_bindings"
+    | "d1_queue"
+    | "inbound_proof"
+    | "outbound_sender"
+  >;
+  status: Status;
+  readiness: "local" | "edge" | "mail";
+}
+
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const argSet = new Set(args);
@@ -106,6 +124,7 @@ const desiredState = readJson<DesiredState>(desiredStatePath);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
 const rows = buildRows(policy, desiredState, evidence, policySha256);
+const gaps = buildGaps(rows);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
 const edgeFailures = rows.filter((row) =>
   [
@@ -141,6 +160,7 @@ const receipt = {
     mail_ready: mailFailures.length === 0 && hasLiveEvidence(evidence),
     live_evidence_present: hasLiveEvidence(evidence),
   },
+  gaps,
   rows,
 };
 
@@ -214,6 +234,37 @@ function buildRows(
       outbound_sender: checkSender(domainName, desired, live),
     };
   });
+}
+
+function buildGaps(rows: DomainRow[]): ReceiptGap[] {
+  const fields: Array<ReceiptGap["field"]> = [
+    "policy_desired",
+    "zone_held",
+    "role_aliases_wired",
+    "personal_aliases_wired",
+    "r2_policy",
+    "worker_bindings",
+    "d1_queue",
+    "inbound_proof",
+    "outbound_sender",
+  ];
+
+  return rows.flatMap((row) =>
+    fields
+      .filter((field) => row[field] !== "ok")
+      .map((field) => ({
+        domain: row.domain,
+        field,
+        status: row[field],
+        readiness: gapReadiness(field),
+      })),
+  );
+}
+
+function gapReadiness(field: ReceiptGap["field"]): ReceiptGap["readiness"] {
+  if (field === "policy_desired") return "local";
+  if (field === "inbound_proof" || field === "outbound_sender") return "mail";
+  return "edge";
 }
 
 function comparePolicyAndDesired(

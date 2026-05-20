@@ -47,6 +47,9 @@ The command emits one row per domain and reports:
 - inbound proof status;
 - outbound sender readiness.
 
+JSON output also includes `gaps`: one machine-readable entry for every non-`ok`
+field, classified as `local`, `edge`, or `mail` readiness work.
+
 Template mode intentionally reports live Cloudflare checks as `not_checked`.
 That is not a failure. It means the public template can prove local coherence
 without credentials while private instances can add live evidence gathered by
