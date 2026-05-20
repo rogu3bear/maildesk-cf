@@ -11,7 +11,7 @@ export default {
 async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promise<void> {
   const messageId = message.headers.get("message-id") ?? crypto.randomUUID();
   const rawR2Key = rawMailKey(messageId);
-  const route = routeMessage(message, env);
+  const route = await routeMessage(message, env);
 
   if (route instanceof Error) {
     message.setReject(route.message);
@@ -64,12 +64,16 @@ async function enqueueInbound(
   });
 }
 
-function routeMessage(message: ForwardableEmailMessage, env: Env): RouteDecision | Error | null {
-  if (!env.MAILDESK_POLICY_JSON) return null;
+async function routeMessage(
+  message: ForwardableEmailMessage,
+  env: Env,
+): Promise<RouteDecision | Error | null> {
+  const policyJson = await loadPolicyJson(env);
+  if (!policyJson) return null;
 
   let policy: RouterPolicy;
   try {
-    policy = JSON.parse(env.MAILDESK_POLICY_JSON) as RouterPolicy;
+    policy = JSON.parse(policyJson) as RouterPolicy;
   } catch (error) {
     return new Error(`maildesk policy is invalid JSON: ${errorDetail(error)}`);
   }
@@ -103,6 +107,14 @@ function routeMessage(message: ForwardableEmailMessage, env: Env): RouteDecision
   }
 
   return new Error(`alias is not configured: ${message.to}`);
+}
+
+async function loadPolicyJson(env: Env): Promise<string | null> {
+  if (env.MAILDESK_POLICY_JSON) return env.MAILDESK_POLICY_JSON;
+  if (!env.MAILDESK_POLICY_R2_KEY) return null;
+
+  const policyObject = await env.RAW_MAIL.get(env.MAILDESK_POLICY_R2_KEY);
+  return policyObject?.text() ?? null;
 }
 
 async function forwardToOperators(

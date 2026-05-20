@@ -60,6 +60,10 @@ Private instances should provision both production and preview D1/R2 resources
 so Wrangler preview and targeted checks do not reuse production mail storage.
 Top-level Worker configs should bind production resources only; preview resources
 belong in explicit preview/dev flows, not in the production deploy path.
+Runtime policy may be supplied inline through `MAILDESK_POLICY_JSON` for small
+fixtures, but production instances should store policy JSON in R2 at
+`MAILDESK_POLICY_R2_KEY` so larger multi-domain policies do not hit Worker text
+binding limits.
 
 ## Mail Flow
 
