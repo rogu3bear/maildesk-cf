@@ -219,7 +219,11 @@ function buildRows(
   localPolicySha256: string,
 ): DomainRow[] {
   const desiredByDomain = new Map(desired.domains.map((domain) => [domain.name, domain]));
-  const domainNames = unique([...Object.keys(policyFile.domains), ...desired.domains.map((domain) => domain.name)]).sort();
+  const domainNames = unique([
+    ...Object.keys(policyFile.domains),
+    ...desired.domains.map((domain) => domain.name),
+    ...(live.zones ?? []),
+  ]).sort();
   return domainNames.map((domainName) => {
     const policyDomain = policyFile.domains[domainName];
     const desiredDomain = desiredByDomain.get(domainName);

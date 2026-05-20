@@ -56,6 +56,10 @@ That is not a failure. It means the public template can prove local coherence
 without credentials while private instances can add live evidence gathered by
 `cfctl`.
 
+When live `zones` evidence is present, every Cloudflare-held zone is included in
+the receipt. A held zone missing from local policy or desired state is reported
+as drift instead of being silently ignored.
+
 Use `--require-live` when the evidence file is meant to prove production
 readiness and any non-`ok` live status should fail the command.
 
