@@ -41,6 +41,11 @@ The supported pattern is:
 5. an outbound job sends through an authenticated sender adapter;
 6. the audit log records the provider result.
 
+The API route for this is `POST /api/replies`. It accepts only authenticated
+requests using `Authorization: Bearer <MAILDESK_API_TOKEN>` or
+`x-maildesk-token: <MAILDESK_API_TOKEN>`, then re-loads policy before queueing
+the outbound job.
+
 ## Sender Adapter Order
 
 The default sender strategy is Cloudflare-first:
@@ -55,6 +60,18 @@ The default sender strategy is Cloudflare-first:
 Do not silently fall back to a personal mailbox. A fallback that changes the
 visible sender domain is a product failure, even if the message technically
 sends.
+
+Runtime sender mode is selected with `MAILDESK_OUTBOUND_MODE`:
+
+- `disabled`: authorize and audit the request, but do not send.
+- `cloudflare_email_service`: send through a Worker `send_email` binding named
+  `EMAIL`.
+- `resend`: send through Resend using the `RESEND_API_KEY` Worker secret.
+
+Enabled modes also require `MAILDESK_VERIFIED_SENDER_DOMAINS`, a
+comma-separated allowlist produced from provider readback. The router may allow
+an identity, but the sender adapter must still refuse domains that are not
+verified by the configured provider.
 
 ## Authorization Bar
 

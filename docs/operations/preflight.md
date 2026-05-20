@@ -38,6 +38,10 @@ It verifies the template checks plus production-only requirements.
 | `CLOUDFLARE_API_TOKEN` | production auth option | scoped API token used by the control plane |
 | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
+| `MAILDESK_API_TOKEN` | production | bearer token for the reply API |
+| `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` |
+| `MAILDESK_VERIFIED_SENDER_DOMAINS` | required when outbound is enabled | comma-separated sender domains approved by provider readback |
+| `RESEND_API_KEY` | required for `resend` mode | Resend API key stored as a Worker secret |
 | `MAILDESK_PROJECT_NAME` | production | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
 
@@ -49,6 +53,13 @@ explicitly selected global/emergency lane.
 Production mode also fails if `wrangler.toml` still contains placeholder
 Cloudflare resource IDs. That is intentional. Placeholder IDs are acceptable in
 the public template and unacceptable before real provisioning.
+
+Outbound mode is deliberately explicit. `disabled` proves inbound and reply
+authorization without sending mail. `cloudflare_email_service` requires a
+Worker `send_email` binding named `EMAIL`, and `resend` requires a Worker
+secret named `RESEND_API_KEY`. Both enabled modes require
+`MAILDESK_VERIFIED_SENDER_DOMAINS`; build it from provider readback, not from
+the local policy alone.
 
 ## Policy Files
 

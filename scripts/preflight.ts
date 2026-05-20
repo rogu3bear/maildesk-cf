@@ -40,6 +40,8 @@ if (mode === "production") {
   checkRequiredEnv("CLOUDFLARE_ACCOUNT_ID");
   checkCloudflareAuthEnv();
   checkRequiredEnv("MAILDESK_PROJECT_NAME");
+  checkRequiredEnv("MAILDESK_API_TOKEN");
+  checkOutboundEnv();
   checkWranglerPlaceholders();
 } else {
   checkTemplateExamples();
@@ -119,6 +121,24 @@ function checkCloudflareAuthEnv() {
   failures.push(
     "missing Cloudflare auth: set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY plus CLOUDFLARE_EMAIL",
   );
+}
+
+function checkOutboundEnv() {
+  const outboundMode = process.env.MAILDESK_OUTBOUND_MODE?.trim() || "disabled";
+  const validModes = new Set(["disabled", "cloudflare_email_service", "resend"]);
+  if (!validModes.has(outboundMode)) {
+    failures.push(
+      "MAILDESK_OUTBOUND_MODE must be disabled, cloudflare_email_service, or resend",
+    );
+    return;
+  }
+
+  if (outboundMode === "disabled") return;
+
+  checkRequiredEnv("MAILDESK_VERIFIED_SENDER_DOMAINS");
+  if (outboundMode === "resend") {
+    checkRequiredEnv("RESEND_API_KEY");
+  }
 }
 
 function checkWranglerPlaceholders() {

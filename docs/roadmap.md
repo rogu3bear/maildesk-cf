@@ -30,6 +30,7 @@ complete elsewhere.
 - [x] Queue consumer records job audit events.
 - [ ] Queue consumer parses MIME and records parse status.
 - [ ] API Worker exposes authenticated thread and identity endpoints.
+- [x] API Worker exposes a token-gated reply queue endpoint.
 - [ ] `cfctl` can provision required D1, R2, Queue, Worker, DNS, and Email
       Routing resources.
 
@@ -38,10 +39,11 @@ complete elsewhere.
 - [ ] Leptos-compatible shell with route list, thread view, message view, reply
       composer, and audit panel.
 - [ ] Reply composer defaults to the policy-selected identity.
-- [ ] API Worker validates operator and reply identity through the Rust router.
+- [x] API Worker validates operator and reply identity through the route policy.
 - [ ] Outbound reply jobs are persisted before send.
-- [ ] Sender adapter sends authorized replies from verified domain identities.
-- [ ] Delivery results update audit events.
+- [x] Sender adapter can send authorized replies through configured provider
+      modes.
+- [x] Delivery results update audit events.
 
 ## Milestone 3: Production Hardening
 

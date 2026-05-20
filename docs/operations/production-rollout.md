@@ -118,3 +118,11 @@ Before enabling replies, verify each sending domain has:
 
 If any item is missing, keep inbound forwarding enabled but do not claim
 domain-consistent outbound replies are complete.
+
+The public template defaults to `MAILDESK_OUTBOUND_MODE=disabled`. To enable
+Cloudflare sending, add a Wrangler `send_email` binding named `EMAIL` only
+after Cloudflare Email Service readback proves the sender domain is available.
+To enable Resend, set `MAILDESK_OUTBOUND_MODE=resend` and store
+`RESEND_API_KEY` as a Worker secret. In either case,
+`MAILDESK_VERIFIED_SENDER_DOMAINS` must contain only domains verified by the
+active sender provider.

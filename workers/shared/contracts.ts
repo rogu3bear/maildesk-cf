@@ -2,8 +2,13 @@ export interface MaildeskEnv {
   DB: D1Database;
   RAW_MAIL: R2Bucket;
   MAIL_JOBS: Queue<MailJob>;
+  EMAIL?: SendEmail;
+  RESEND_API_KEY?: string;
+  MAILDESK_API_TOKEN?: string;
+  MAILDESK_OUTBOUND_MODE?: "disabled" | "cloudflare_email_service" | "resend";
   MAILDESK_POLICY_JSON?: string;
   MAILDESK_POLICY_R2_KEY?: string;
+  MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
 }
 
 export type MailJob = InboundEmailReceivedJob | InboundEmailPersistedJob | OutboundReplyRequestedJob;
@@ -41,6 +46,16 @@ export interface OutboundReplyRequestedJob {
   messageId: string;
   threadId: string;
   operator: string;
+  envelopeTo: string;
+  fromIdentity: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  replyTo?: string;
+  subject: string;
+  text?: string;
+  html?: string;
+  headers?: Record<string, string>;
   requestedIdentity?: string;
   queuedAt: string;
 }
@@ -81,11 +96,37 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     { name: "raw_mail_binding", ok: Boolean(env.RAW_MAIL) },
     { name: "mail_jobs_binding", ok: Boolean(env.MAIL_JOBS) },
     {
+      name: "api_token",
+      ok: Boolean(env.MAILDESK_API_TOKEN),
+      detail: "required for reply API",
+    },
+    {
       name: "policy_config",
       ok: Boolean(env.MAILDESK_POLICY_JSON || env.MAILDESK_POLICY_R2_KEY),
       detail: "optional in template",
     },
   ];
+
+  const outboundMode = env.MAILDESK_OUTBOUND_MODE ?? "disabled";
+  if (outboundMode === "cloudflare_email_service") {
+    checks.push({
+      name: "outbound_sender",
+      ok: Boolean(env.EMAIL),
+      detail: "cloudflare_email_service",
+    });
+  } else if (outboundMode === "resend") {
+    checks.push({
+      name: "outbound_sender",
+      ok: Boolean(env.RESEND_API_KEY),
+      detail: "resend",
+    });
+  } else {
+    checks.push({
+      name: "outbound_sender",
+      ok: true,
+      detail: "disabled",
+    });
+  }
 
   if (env.DB) {
     try {

@@ -4,6 +4,8 @@ compatibility_date = "2026-05-19"
 
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
+MAILDESK_OUTBOUND_MODE = "disabled"
+MAILDESK_VERIFIED_SENDER_DOMAINS = "example.com"
 
 [[d1_databases]]
 binding = "DB"
