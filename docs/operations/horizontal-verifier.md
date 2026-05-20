@@ -32,6 +32,18 @@ Resend CLI when available, `/readyz` when `MAILDESK_READYZ_URL` is set, and D1
 schema/audit counts through Wrangler when a D1 database is configured. It does
 not send mail and does not mutate Cloudflare.
 
+Plan the remaining proof work from a receipt:
+
+```bash
+bun run verify:maildesk -- --evidence var/maildesk-live-evidence.json --json \
+  > var/maildesk-receipt.json
+bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json --json
+```
+
+The proof planner does not send mail. It converts mail-readiness gaps into a
+minimal set of targeted inbound probes, outbound reply probes, and blocked
+provider repairs.
+
 ## Receipt Shape
 
 The command emits one row per domain and reports:

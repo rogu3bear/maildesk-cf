@@ -10,6 +10,7 @@
     "preflight:production": "bun run scripts/preflight.ts --mode production",
     "typecheck": "tsc --noEmit",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
+    "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
     "verify:maildesk": "bun run scripts/verify-maildesk.ts"
   },
   "devDependencies": {
