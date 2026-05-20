@@ -79,10 +79,23 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
     "example.com": "verified"
   },
   "inbound_proofs": {
-    "example.com": { "status": "ok" }
+    "example.com": {
+      "status": "ok",
+      "envelope_to": "founders@example.com",
+      "route_kind": "role_alias",
+      "forwarded_to": ["operator-a@example.com", "operator-b@example.com"],
+      "forward_errors": [],
+      "default_reply_identity": "founders@example.com",
+      "raw_r2_key": "raw/2026-05-20/example.eml",
+      "audit_event_at": "2026-05-20T00:00:00Z"
+    }
   }
 }
 ```
 
-The verifier does not send mail and does not mutate Cloudflare. Broad live
-sends remain outside the default verification path.
+Inbound proof is policy-checked. A bare `status: ok` is not enough: the proof
+must identify the routed mailbox, forwarded operators, reply identity, stored
+raw mail key, and absence of forward errors.
+
+The verifier does not send mail and does not mutate Cloudflare. Broad live sends
+remain outside the default verification path.

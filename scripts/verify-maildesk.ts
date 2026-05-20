@@ -58,6 +58,14 @@ interface RoutingEvidence {
 interface ProofEvidence {
   status?: string;
   detail?: string;
+  alias?: string;
+  envelope_to?: string;
+  route_kind?: "role_alias" | "personal_alias";
+  forwarded_to?: string[];
+  forward_errors?: Array<{ recipient?: string; error?: string }>;
+  default_reply_identity?: string;
+  raw_r2_key?: string;
+  audit_event_at?: string;
 }
 
 interface DomainRow {
@@ -196,7 +204,7 @@ function buildRows(
       r2_policy: live.r2_policy_sha256 ? (live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift") : "not_checked",
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
-      inbound_proof: checkProof(live.inbound_proofs?.[domainName]),
+      inbound_proof: checkInboundProof(domainName, policyDomain, live.inbound_proofs?.[domainName]),
       outbound_sender: checkSender(domainName, desired, live),
     };
   });
@@ -241,9 +249,54 @@ function requiredReadyzChecks(live: LiveEvidence, names: string[]): boolean {
   return names.every((name) => live.readyz?.checks?.some((check) => check.name === name && check.ok));
 }
 
-function checkProof(proof: ProofEvidence | undefined): Status {
+function checkInboundProof(
+  domainName: string,
+  policyDomain: PolicyDomain | undefined,
+  proof: ProofEvidence | undefined,
+): Status {
   if (!proof) return "not_checked";
-  return proof.status === "ok" || proof.status === "delivered" ? "ok" : "drift";
+  if (!isOkProofStatus(proof.status)) return "drift";
+  if (!policyDomain) return "missing";
+
+  const target = proof.envelope_to ?? proof.alias;
+  if (!target) return "drift";
+  const mailbox = parseMailbox(target);
+  if (!mailbox || mailbox.domain !== domainName) return "drift";
+
+  const roleAlias = policyDomain.role_aliases[mailbox.localPart];
+  if (roleAlias) {
+    return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity);
+  }
+
+  const personalAlias = policyDomain.personal_aliases[mailbox.localPart];
+  if (personalAlias) {
+    return proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity);
+  }
+
+  return "drift";
+}
+
+function proofMatchesRoute(
+  proof: ProofEvidence,
+  expectedRouteKind: "role_alias" | "personal_alias",
+  expectedOperators: string[],
+  expectedReplyIdentity: string,
+): Status {
+  if (proof.route_kind && proof.route_kind !== expectedRouteKind) return "drift";
+  if (proof.default_reply_identity && normalizeMailbox(proof.default_reply_identity) !== normalizeMailbox(expectedReplyIdentity)) {
+    return "drift";
+  }
+  if (proof.forward_errors && proof.forward_errors.length > 0) return "drift";
+  if (!proof.raw_r2_key) return "drift";
+  if (!proof.forwarded_to) return "drift";
+
+  const actualRecipients = proof.forwarded_to.map(normalizeMailbox);
+  const expectedRecipients = expectedOperators.map(normalizeMailbox);
+  return expectedRecipients.every((recipient) => actualRecipients.includes(recipient)) ? "ok" : "drift";
+}
+
+function isOkProofStatus(status: string | undefined): boolean {
+  return status === "ok" || status === "delivered";
 }
 
 function checkSender(domainName: string, desired: DesiredState, live: LiveEvidence): Status {
@@ -275,6 +328,20 @@ function same(left: string[], right: string[]): boolean {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function parseMailbox(address: string): { localPart: string; domain: string } | null {
+  const normalized = normalizeMailbox(address);
+  const atIndex = normalized.lastIndexOf("@");
+  if (atIndex <= 0 || atIndex === normalized.length - 1) return null;
+  return {
+    localPart: normalized.slice(0, atIndex),
+    domain: normalized.slice(atIndex + 1),
+  };
+}
+
+function normalizeMailbox(address: string): string {
+  return address.trim().toLowerCase();
 }
 
 function hasLiveEvidence(live: LiveEvidence): boolean {
