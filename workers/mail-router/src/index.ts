@@ -11,6 +11,12 @@ export default {
 async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promise<void> {
   const messageId = message.headers.get("message-id") ?? crypto.randomUUID();
   const rawR2Key = rawMailKey(messageId);
+  const route = routeMessage(message, env);
+
+  if (route instanceof Error) {
+    message.setReject(route.message);
+    return;
+  }
 
   try {
     await env.RAW_MAIL.put(rawR2Key, message.raw, {
@@ -27,13 +33,21 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
     return;
   }
 
-  return enqueueInbound(message, messageId, rawR2Key, env);
+  try {
+    await forwardToOperators(message, route);
+  } catch (error) {
+    message.setReject(`maildesk forward unavailable: ${errorDetail(error)}`);
+    return;
+  }
+
+  return enqueueInbound(message, messageId, rawR2Key, route, env);
 }
 
 async function enqueueInbound(
   message: ForwardableEmailMessage,
   messageId: string,
   rawR2Key: string,
+  route: RouteDecision | null,
   env: Env,
 ): Promise<void> {
   await env.MAIL_JOBS.send({
@@ -41,10 +55,117 @@ async function enqueueInbound(
     messageId,
     envelopeTo: message.to,
     envelopeFrom: message.from,
+    routeKind: route?.routeKind,
+    forwardedTo: route?.operators,
+    defaultReplyIdentity: route?.defaultReplyIdentity,
     rawR2Key,
     rawSize: message.rawSize,
     receivedAt: new Date().toISOString(),
   });
 }
 
+function routeMessage(message: ForwardableEmailMessage, env: Env): RouteDecision | Error | null {
+  if (!env.MAILDESK_POLICY_JSON) return null;
+
+  let policy: RouterPolicy;
+  try {
+    policy = JSON.parse(env.MAILDESK_POLICY_JSON) as RouterPolicy;
+  } catch (error) {
+    return new Error(`maildesk policy is invalid JSON: ${errorDetail(error)}`);
+  }
+
+  const recipient = parseMailbox(message.to);
+  if (!recipient) return new Error(`recipient is not a valid mailbox address: ${message.to}`);
+
+  const domainPolicy = policy.domains[recipient.domain];
+  if (!domainPolicy) return new Error(`domain is not configured: ${recipient.domain}`);
+
+  const roleAlias = domainPolicy.role_aliases[recipient.localPart];
+  if (roleAlias) {
+    if (roleAlias.operators.length === 0) {
+      return new Error(`policy has an empty operator set for: ${message.to}`);
+    }
+
+    return {
+      routeKind: "role_alias",
+      operators: unique(roleAlias.operators),
+      defaultReplyIdentity: roleAlias.reply_identity,
+    };
+  }
+
+  const personalAlias = domainPolicy.personal_aliases[recipient.localPart];
+  if (personalAlias) {
+    return {
+      routeKind: "personal_alias",
+      operators: [personalAlias.operator],
+      defaultReplyIdentity: personalAlias.reply_identity,
+    };
+  }
+
+  return new Error(`alias is not configured: ${message.to}`);
+}
+
+async function forwardToOperators(
+  message: ForwardableEmailMessage,
+  route: RouteDecision | null,
+): Promise<void> {
+  if (!route) return;
+
+  for (const operator of route.operators) {
+    await message.forward(
+      operator,
+      new Headers({
+        "X-Maildesk-Original-To": message.to,
+        "X-Maildesk-Route-Kind": route.routeKind,
+        "X-Maildesk-Reply-Identity": route.defaultReplyIdentity,
+      }),
+    );
+  }
+}
+
+function parseMailbox(address: string): ParsedMailbox | null {
+  const normalized = address.trim().toLowerCase();
+  const atIndex = normalized.lastIndexOf("@");
+  if (atIndex <= 0 || atIndex === normalized.length - 1) return null;
+
+  return {
+    localPart: normalized.slice(0, atIndex),
+    domain: normalized.slice(atIndex + 1),
+  };
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+}
+
 type Env = MaildeskEnv;
+
+interface ParsedMailbox {
+  localPart: string;
+  domain: string;
+}
+
+interface RouterPolicy {
+  domains: Record<string, DomainPolicy>;
+}
+
+interface DomainPolicy {
+  role_aliases: Record<string, RoleAliasPolicy>;
+  personal_aliases: Record<string, PersonalAliasPolicy>;
+}
+
+interface RoleAliasPolicy {
+  operators: string[];
+  reply_identity: string;
+}
+
+interface PersonalAliasPolicy {
+  operator: string;
+  reply_identity: string;
+}
+
+interface RouteDecision {
+  routeKind: "role_alias" | "personal_alias";
+  operators: string[];
+  defaultReplyIdentity: string;
+}

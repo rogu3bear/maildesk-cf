@@ -12,6 +12,9 @@ export interface InboundEmailReceivedJob {
   messageId: string;
   envelopeTo: string;
   envelopeFrom: string;
+  routeKind?: "role_alias" | "personal_alias";
+  forwardedTo?: string[];
+  defaultReplyIdentity?: string;
   rawR2Key: string;
   rawSize: number;
   receivedAt: string;
