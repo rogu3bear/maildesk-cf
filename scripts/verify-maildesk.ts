@@ -45,9 +45,15 @@ interface LiveEvidence {
     ok?: boolean;
     checks?: Array<{ name: string; ok: boolean; detail?: string }>;
   };
+  d1?: D1Evidence;
   sender_domains?: Record<string, string> | string[];
   inbound_proofs?: Record<string, ProofEvidence>;
   outbound_proofs?: Record<string, ProofEvidence>;
+}
+
+interface D1Evidence {
+  tables?: string[];
+  audit_event_counts?: Record<string, number>;
 }
 
 interface RoutingEvidence {
@@ -242,7 +248,19 @@ function checkWorkerBindings(live: LiveEvidence): Status {
 
 function checkD1Queue(live: LiveEvidence): Status {
   if (!live.readyz?.checks) return "not_checked";
-  return requiredReadyzChecks(live, ["db_query", "mail_jobs_binding"]) ? "ok" : "drift";
+  if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding"])) return "drift";
+  if (!live.d1) return "ok";
+  if (!live.d1.tables) return "drift";
+
+  const requiredTables = [
+    "audit_events",
+    "messages",
+    "threads",
+    "alias_routes",
+    "identities",
+    "operators",
+  ];
+  return requiredTables.every((table) => live.d1?.tables?.includes(table)) ? "ok" : "drift";
 }
 
 function requiredReadyzChecks(live: LiveEvidence, names: string[]): boolean {
@@ -350,6 +368,7 @@ function hasLiveEvidence(live: LiveEvidence): boolean {
       live.email_routing ||
       live.r2_policy_sha256 ||
       live.readyz ||
+      live.d1 ||
       live.sender_domains ||
       live.inbound_proofs ||
       live.outbound_proofs,

@@ -75,6 +75,13 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
       { "name": "db_query", "ok": true }
     ]
   },
+  "d1": {
+    "tables": ["audit_events", "messages", "threads", "alias_routes", "identities", "operators"],
+    "audit_event_counts": {
+      "inbound_email_received": 1,
+      "outbound_reply_delivered": 1
+    }
+  },
   "sender_domains": {
     "example.com": "verified"
   },
@@ -96,6 +103,10 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
 Inbound proof is policy-checked. A bare `status: ok` is not enough: the proof
 must identify the routed mailbox, forwarded operators, reply identity, stored
 raw mail key, and absence of forward errors.
+
+D1 proof is stricter when present. `/readyz` proves the binding can query; the
+optional `d1.tables` readback proves the audit schema actually exists. When
+`d1` evidence is supplied, the verifier requires the core audit/routing tables.
 
 The verifier does not send mail and does not mutate Cloudflare. Broad live sends
 remain outside the default verification path.
