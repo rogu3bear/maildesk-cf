@@ -19,6 +19,13 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
   }
 
   try {
+    await forwardToOperators(message, route);
+  } catch (error) {
+    message.setReject(`maildesk forward unavailable: ${errorDetail(error)}`);
+    return;
+  }
+
+  try {
     await env.RAW_MAIL.put(rawR2Key, message.raw, {
       httpMetadata: {
         contentType: "message/rfc822",
@@ -29,14 +36,7 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
       },
     });
   } catch (error) {
-    message.setReject(`maildesk storage unavailable: ${errorDetail(error)}`);
-    return;
-  }
-
-  try {
-    await forwardToOperators(message, route);
-  } catch (error) {
-    message.setReject(`maildesk forward unavailable: ${errorDetail(error)}`);
+    await enqueueInbound(message, messageId, rawR2Key, route, env, errorDetail(error));
     return;
   }
 
@@ -49,6 +49,7 @@ async function enqueueInbound(
   rawR2Key: string,
   route: RouteDecision | null,
   env: Env,
+  storageError?: string,
 ): Promise<void> {
   await env.MAIL_JOBS.send({
     kind: "inbound_email_received",
@@ -60,6 +61,7 @@ async function enqueueInbound(
     defaultReplyIdentity: route?.defaultReplyIdentity,
     rawR2Key,
     rawSize: message.rawSize,
+    storageError,
     receivedAt: new Date().toISOString(),
   });
 }

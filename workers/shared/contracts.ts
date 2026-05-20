@@ -18,6 +18,7 @@ export interface InboundEmailReceivedJob {
   defaultReplyIdentity?: string;
   rawR2Key: string;
   rawSize: number;
+  storageError?: string;
   receivedAt: string;
 }
 
