@@ -22,7 +22,9 @@
   },
   "storage": {
     "d1_database": "maildesk-cf-db",
+    "d1_preview_database": "maildesk-cf-preview-db",
     "r2_raw_mail_bucket": "maildesk-cf-raw-mail",
+    "r2_raw_mail_preview_bucket": "maildesk-cf-raw-mail-preview",
     "queue": "maildesk-cf-jobs"
   },
   "sender": {

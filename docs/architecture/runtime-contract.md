@@ -56,6 +56,8 @@ retries. The app should never rely on a personal mailbox as the source of truth.
 
 The template ships placeholder `wrangler.toml` values. Production provisioning
 must replace them through `cfctl` before `preflight:production` can pass.
+Private instances should provision both production and preview D1/R2 resources
+so Wrangler preview and targeted checks do not reuse production mail storage.
 
 ## Mail Flow
 

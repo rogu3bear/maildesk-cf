@@ -31,7 +31,9 @@ The template fixture is `config/desired-state.example.json`.
 - Email Worker deployment and bindings.
 - API/UI Worker deployment and bindings.
 - D1 database and migrations.
+- D1 preview database for non-production checks.
 - R2 bucket for raw MIME and attachments.
+- R2 preview bucket for non-production checks.
 - Queue for async mail jobs.
 - Cloudflare Email Service sender posture.
 - DNS records for SPF, DKIM, DMARC, MTA-STS, and TLS reporting when configured.

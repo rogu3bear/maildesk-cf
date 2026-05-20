@@ -42,7 +42,9 @@ workers:
   mail_api_script
 storage:
   d1_database
+  d1_preview_database
   r2_raw_mail_bucket
+  r2_raw_mail_preview_bucket
   queue
 sender:
   mode
