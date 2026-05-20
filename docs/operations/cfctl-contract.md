@@ -23,6 +23,8 @@ The surface should accept a desired-state file generated from the same policy
 shape validated by `maildesk-policy-check`. `cfctl` owns account resources; the
 application owns runtime behavior.
 
+The template fixture is `config/desired-state.example.json`.
+
 ## Resources To Own
 
 - Email Routing rules for configured aliases.

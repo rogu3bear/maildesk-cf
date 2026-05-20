@@ -52,6 +52,9 @@ sender:
 The exact serialization can evolve, but plan/apply/verify should preserve these
 boundaries.
 
+`config/desired-state.example.json` is the current template fixture for this
+shape.
+
 ## Outputs
 
 - preview artifact;

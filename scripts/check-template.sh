@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/preflight.ts docs/roadmap.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/operations/cfctl-contract.md docs/operations/preflight.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json; do
+for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/preflight.ts docs/roadmap.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/operations/cfctl-contract.md docs/operations/preflight.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json config/desired-state.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done

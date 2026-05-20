@@ -15,6 +15,7 @@ complete elsewhere.
 - [x] Email Worker and API Worker skeletons.
 - [x] Separate API Worker and Email Worker Wrangler targets.
 - [x] Shared TypeScript edge contract for readiness and queue jobs.
+- [x] Template desired-state fixture for future `cfctl maildesk-cf` surface.
 - [x] `cfctl` surface draft.
 
 ## Milestone 1: Deployable Edge Skeleton

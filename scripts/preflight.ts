@@ -23,7 +23,9 @@ checkFile("Cargo.toml");
 checkFile("wrangler.toml");
 checkFile("wrangler.mail-router.toml");
 checkFile("config/policy.example.json");
+checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
+checkJson("config/desired-state.example.json");
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -88,6 +90,14 @@ function checkPolicy(path: string) {
   failures.push(
     `policy validation failed for ${path}: ${result.stderr.trim() || result.stdout.trim()}`,
   );
+}
+
+function checkJson(path: string) {
+  try {
+    JSON.parse(readFileSync(resolve(root, path), "utf8"));
+  } catch (error) {
+    failures.push(`invalid JSON in ${path}: ${errorDetail(error)}`);
+  }
 }
 
 function checkRequiredEnv(name: string) {
