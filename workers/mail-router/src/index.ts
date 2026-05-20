@@ -21,7 +21,8 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
   const forwardResults = await forwardToOperators(message, route);
 
   try {
-    await env.RAW_MAIL.put(rawR2Key, message.raw, {
+    const rawBytes = await new Response(message.raw).arrayBuffer();
+    await env.RAW_MAIL.put(rawR2Key, rawBytes, {
       httpMetadata: {
         contentType: "message/rfc822",
       },

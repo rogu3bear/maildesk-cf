@@ -96,6 +96,9 @@ binding limits.
 - R2 write failure after forwarding: enqueue an inbound job with explicit
   storage error metadata so operators receive the message and recovery has
   evidence.
+- Raw MIME storage must provide R2 a known-length body, such as an
+  `ArrayBuffer`, rather than passing the Email Worker raw stream through
+  directly.
 - D1 write failure: enqueue no follow-up work unless recovery is explicit.
 - Sender failure: retry through Queue policy and preserve audit evidence.
 
