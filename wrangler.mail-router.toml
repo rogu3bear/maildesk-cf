@@ -5,7 +5,6 @@ compatibility_date = "2026-05-19"
 [[r2_buckets]]
 binding = "RAW_MAIL"
 bucket_name = "maildesk-cf-raw-mail"
-preview_bucket_name = "maildesk-cf-raw-mail-preview"
 
 [[queues.producers]]
 binding = "MAIL_JOBS"

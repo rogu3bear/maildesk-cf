@@ -37,6 +37,10 @@ The template fixture is `config/desired-state.example.json`.
 - Queue for async mail jobs.
 - Cloudflare Email Service sender posture.
 - DNS records for SPF, DKIM, DMARC, MTA-STS, and TLS reporting when configured.
+
+The desired-state fixture may include preview storage resources, but production
+`wrangler.toml` files must bind only production storage. `cfctl` verification
+should catch accidental preview bindings before deploy.
 - Worker secrets and identity policy config.
 
 ## Verification Bar
