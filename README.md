@@ -115,6 +115,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
+bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
 bash scripts/check-template.sh
 cargo run --bin maildesk-policy-check -- config/policy.example.json
@@ -131,6 +132,8 @@ workflow and writes the three receipt artifacts under `var/`.
 `bun run collect:maildesk-evidence` builds that optional evidence file from
 available readbacks without mutating Cloudflare.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.
+`bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
+requires `--execute` before it sends mail.
 
 ## De-Templating
 

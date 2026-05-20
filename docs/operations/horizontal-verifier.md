@@ -61,6 +61,21 @@ The proof planner does not send mail. It converts mail-readiness gaps into a
 minimal set of targeted inbound probes, outbound reply probes, and blocked
 provider repairs.
 
+Dry-run the first targeted inbound probe from a plan:
+
+```bash
+bun run send:maildesk-probes -- --from proof@example.com --json
+```
+
+Send only when the sender identity is verified and the target set is intentional:
+
+```bash
+bun run send:maildesk-probes -- --execute --from proof@example.com --domain example.com
+```
+
+The probe executor defaults to dry-run and a limit of one target. Use
+`--limit <n>` or `--all` only for a deliberate proof pass.
+
 ## Receipt Shape
 
 The command emits one row per domain and reports:
