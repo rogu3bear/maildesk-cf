@@ -38,7 +38,7 @@ checkPolicy(policyPath);
 
 if (mode === "production") {
   checkRequiredEnv("CLOUDFLARE_ACCOUNT_ID");
-  checkRequiredEnv("CLOUDFLARE_API_TOKEN");
+  checkCloudflareAuthEnv();
   checkRequiredEnv("MAILDESK_PROJECT_NAME");
   checkWranglerPlaceholders();
 } else {
@@ -105,6 +105,20 @@ function checkRequiredEnv(name: string) {
   if (!value || value.startsWith("<") || value.includes("replace-me")) {
     failures.push(`missing or placeholder environment variable: ${name}`);
   }
+}
+
+function hasUsableEnv(name: string): boolean {
+  const value = process.env[name]?.trim();
+  return Boolean(value && !value.startsWith("<") && !value.includes("replace-me"));
+}
+
+function checkCloudflareAuthEnv() {
+  if (hasUsableEnv("CLOUDFLARE_API_TOKEN")) return;
+  if (hasUsableEnv("CLOUDFLARE_API_KEY") && hasUsableEnv("CLOUDFLARE_EMAIL")) return;
+
+  failures.push(
+    "missing Cloudflare auth: set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY plus CLOUDFLARE_EMAIL",
+  );
 }
 
 function checkWranglerPlaceholders() {

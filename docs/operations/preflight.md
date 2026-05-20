@@ -35,10 +35,16 @@ It verifies the template checks plus production-only requirements.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `CLOUDFLARE_ACCOUNT_ID` | production | Cloudflare account target for `cfctl` and Workers |
-| `CLOUDFLARE_API_TOKEN` | production | scoped API token used by the control plane |
+| `CLOUDFLARE_API_TOKEN` | production auth option | scoped API token used by the control plane |
+| `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_PROJECT_NAME` | production | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
+
+Production mode requires one Cloudflare auth option: either `CLOUDFLARE_API_TOKEN`
+or both `CLOUDFLARE_API_KEY` and `CLOUDFLARE_EMAIL`. Prefer scoped tokens for
+normal operation; the key/email path exists so `cfctl` can still run an
+explicitly selected global/emergency lane.
 
 Production mode also fails if `wrangler.toml` still contains placeholder
 Cloudflare resource IDs. That is intentional. Placeholder IDs are acceptable in
