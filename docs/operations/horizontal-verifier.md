@@ -46,6 +46,7 @@ The command emits one row per domain and reports:
 - D1 and Queue readiness;
 - inbound proof status;
 - outbound sender readiness.
+- outbound reply audit proof status.
 
 JSON output also includes `gaps`: one machine-readable entry for every non-`ok`
 field, classified as `local`, `edge`, or `mail` readiness work.
@@ -60,7 +61,8 @@ readiness and any non-`ok` live status should fail the command.
 
 `edge_ready` covers Cloudflare-held zones, Email Routing aliases, R2 policy,
 Worker bindings, and D1/Queue reachability. `mail_ready` is stricter: it also
-requires inbound proof and outbound sender readiness.
+requires inbound proof, outbound sender readiness, and outbound reply audit
+proof.
 
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra
@@ -112,6 +114,15 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
       "raw_r2_key": "raw/2026-05-20/example.eml",
       "audit_event_at": "2026-05-20T00:00:00Z"
     }
+  },
+  "outbound_proofs": {
+    "example.com": {
+      "status": "delivered",
+      "from_identity": "founders@example.com",
+      "provider": "resend",
+      "provider_message_id": "provider-message-id",
+      "audit_event_at": "2026-05-20T00:00:00Z"
+    }
   }
 }
 ```
@@ -123,6 +134,10 @@ raw mail key, and absence of forward errors.
 D1 proof is stricter when present. `/readyz` proves the binding can query; the
 optional `d1.tables` readback proves the audit schema actually exists. When
 `d1` evidence is supplied, the verifier requires the core audit/routing tables.
+
+Outbound proof is separate from sender-domain readiness. `sender_domains` proves
+the provider can send for the domain; `outbound_proofs` proves an actual
+authorized reply path produced audit evidence.
 
 The verifier does not send mail and does not mutate Cloudflare. Broad live sends
 remain outside the default verification path.

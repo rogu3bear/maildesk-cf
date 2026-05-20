@@ -72,6 +72,9 @@ interface ProofEvidence {
   default_reply_identity?: string;
   raw_r2_key?: string;
   audit_event_at?: string;
+  from_identity?: string;
+  provider?: string;
+  provider_message_id?: string;
 }
 
 interface DomainRow {
@@ -87,6 +90,7 @@ interface DomainRow {
   d1_queue: Status;
   inbound_proof: Status;
   outbound_sender: Status;
+  outbound_proof: Status;
 }
 
 interface ReceiptGap {
@@ -102,6 +106,7 @@ interface ReceiptGap {
     | "d1_queue"
     | "inbound_proof"
     | "outbound_sender"
+    | "outbound_proof"
   >;
   status: Status;
   readiness: "local" | "edge" | "mail";
@@ -146,6 +151,7 @@ const mailFailures = rows.filter((row) =>
     row.d1_queue,
     row.inbound_proof,
     row.outbound_sender,
+    row.outbound_proof,
   ].some((status) => status !== "ok"),
 );
 const receipt = {
@@ -232,6 +238,7 @@ function buildRows(
       d1_queue: checkD1Queue(live),
       inbound_proof: checkInboundProof(domainName, policyDomain, live.inbound_proofs?.[domainName]),
       outbound_sender: checkSender(domainName, desired, live),
+      outbound_proof: checkOutboundProof(domainName, live.outbound_proofs?.[domainName]),
     };
   });
 }
@@ -247,6 +254,7 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
     "d1_queue",
     "inbound_proof",
     "outbound_sender",
+    "outbound_proof",
   ];
 
   return rows.flatMap((row) =>
@@ -263,7 +271,7 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
 
 function gapReadiness(field: ReceiptGap["field"]): ReceiptGap["readiness"] {
   if (field === "policy_desired") return "local";
-  if (field === "inbound_proof" || field === "outbound_sender") return "mail";
+  if (field === "inbound_proof" || field === "outbound_sender" || field === "outbound_proof") return "mail";
   return "edge";
 }
 
@@ -377,6 +385,15 @@ function checkSender(domainName: string, desired: DesiredState, live: LiveEviden
   }
   const status = live.sender_domains[domainName];
   return status === "verified" || status === "ok" ? "ok" : status ? "drift" : "missing";
+}
+
+function checkOutboundProof(domainName: string, proof: ProofEvidence | undefined): Status {
+  if (!proof) return "not_checked";
+  if (!isOkProofStatus(proof.status)) return "drift";
+  if (!proof.from_identity) return "drift";
+  const mailbox = parseMailbox(proof.from_identity);
+  if (!mailbox || mailbox.domain !== domainName) return "drift";
+  return proof.provider || proof.provider_message_id || proof.audit_event_at ? "ok" : "drift";
 }
 
 function domainOperators(domain: PolicyDomain): string[] {

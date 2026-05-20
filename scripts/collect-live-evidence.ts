@@ -27,6 +27,7 @@ interface Evidence {
   };
   sender_domains?: Record<string, string>;
   inbound_proofs?: Record<string, InboundProof>;
+  outbound_proofs?: Record<string, OutboundProof>;
 }
 
 interface InboundProof {
@@ -37,6 +38,14 @@ interface InboundProof {
   forward_errors: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
   raw_r2_key?: string;
+  audit_event_at?: string;
+}
+
+interface OutboundProof {
+  status: "delivered";
+  from_identity: string;
+  provider?: string;
+  provider_message_id?: string;
   audit_event_at?: string;
 }
 
@@ -98,6 +107,10 @@ if (d1Name) {
   const inboundProofs = collectInboundProofs(d1Name);
   if (Object.keys(inboundProofs).length > 0) {
     evidence.inbound_proofs = inboundProofs;
+  }
+  const outboundProofs = collectOutboundProofs(d1Name);
+  if (Object.keys(outboundProofs).length > 0) {
+    evidence.outbound_proofs = outboundProofs;
   }
 }
 
@@ -209,6 +222,32 @@ function collectInboundProofs(databaseName: string): Record<string, InboundProof
   return proofs;
 }
 
+function collectOutboundProofs(databaseName: string): Record<string, OutboundProof> {
+  const rows = wranglerD1Results(
+    databaseName,
+    "SELECT detail_json, created_at FROM audit_events WHERE action = 'outbound_reply_delivered' ORDER BY created_at DESC LIMIT 200;",
+  );
+  const proofs: Record<string, OutboundProof> = {};
+
+  for (const row of rows) {
+    if (typeof row.detail_json !== "string") continue;
+    const detail = parseJson<OutboundAuditDetail>(row.detail_json);
+    if (!detail?.fromIdentity || proofs[domainPart(detail.fromIdentity)]) continue;
+
+    const domain = domainPart(detail.fromIdentity);
+    if (!domain) continue;
+    proofs[domain] = {
+      status: "delivered",
+      from_identity: detail.fromIdentity,
+      provider: detail.result?.provider,
+      provider_message_id: detail.result?.id,
+      audit_event_at: typeof row.created_at === "string" ? row.created_at : undefined,
+    };
+  }
+
+  return proofs;
+}
+
 function wranglerD1Results(databaseName: string, sql: string): Array<Record<string, unknown>> {
   const result = spawnSync("wrangler", ["d1", "execute", databaseName, "--remote", "--command", sql], {
     cwd: root,
@@ -307,4 +346,12 @@ interface InboundAuditDetail {
   defaultReplyIdentity?: string;
   rawR2Key?: string;
   storageError?: string;
+}
+
+interface OutboundAuditDetail {
+  fromIdentity?: string;
+  result?: {
+    provider?: string;
+    id?: string;
+  };
 }
