@@ -72,6 +72,8 @@ Prevent avoidable bounces before deploy:
 - fail sends when the requested identity has no verified sender adapter;
 - keep forwarding and raw-mail persistence ordered so the Email Worker does not
   consume the raw MIME stream before forwarding;
+- record per-recipient forward failures without rejecting the original sender
+  when the route itself is known and accepted;
 - keep unknown aliases explicit instead of silently dropping mail.
 
 ## What Not To Do

@@ -15,11 +15,17 @@ export interface InboundEmailReceivedJob {
   envelopeFrom: string;
   routeKind?: "role_alias" | "personal_alias";
   forwardedTo?: string[];
+  forwardErrors?: ForwardError[];
   defaultReplyIdentity?: string;
   rawR2Key: string;
   rawSize: number;
   storageError?: string;
   receivedAt: string;
+}
+
+export interface ForwardError {
+  recipient: string;
+  error: string;
 }
 
 export interface InboundEmailPersistedJob {

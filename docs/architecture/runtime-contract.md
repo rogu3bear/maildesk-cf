@@ -15,6 +15,8 @@ The Email Worker receives Cloudflare Email Routing events. It should:
 - forward accepted mail to configured operators before attempting raw MIME
   storage, because the Cloudflare raw message stream may not be reusable after
   storage;
+- treat per-recipient forward failures as audit/recovery metadata for accepted
+  routes instead of rejecting the original sender's SMTP transaction;
 - store raw MIME content in R2 before parsing work begins;
 - persist the route decision and initial message metadata in D1;
 - enqueue parsing, indexing, notification, and delivery jobs;
@@ -89,6 +91,8 @@ binding limits.
 - Empty operator set: fail preflight before deploy.
 - Unauthorized operator: reject API request.
 - Unauthorized reply identity: reject API request.
+- Forward failure for a known route: record per-recipient forward errors and
+  keep recovery evidence instead of bouncing the sender.
 - R2 write failure after forwarding: enqueue an inbound job with explicit
   storage error metadata so operators receive the message and recovery has
   evidence.

@@ -18,12 +18,7 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
     return;
   }
 
-  try {
-    await forwardToOperators(message, route);
-  } catch (error) {
-    message.setReject(`maildesk forward unavailable: ${errorDetail(error)}`);
-    return;
-  }
+  const forwardResults = await forwardToOperators(message, route);
 
   try {
     await env.RAW_MAIL.put(rawR2Key, message.raw, {
@@ -36,11 +31,11 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
       },
     });
   } catch (error) {
-    await enqueueInbound(message, messageId, rawR2Key, route, env, errorDetail(error));
+    await enqueueInbound(message, messageId, rawR2Key, route, forwardResults, env, errorDetail(error));
     return;
   }
 
-  return enqueueInbound(message, messageId, rawR2Key, route, env);
+  return enqueueInbound(message, messageId, rawR2Key, route, forwardResults, env);
 }
 
 async function enqueueInbound(
@@ -48,6 +43,7 @@ async function enqueueInbound(
   messageId: string,
   rawR2Key: string,
   route: RouteDecision | null,
+  forwardResults: ForwardResult[],
   env: Env,
   storageError?: string,
 ): Promise<void> {
@@ -57,7 +53,15 @@ async function enqueueInbound(
     envelopeTo: message.to,
     envelopeFrom: message.from,
     routeKind: route?.routeKind,
-    forwardedTo: route?.operators,
+    forwardedTo: forwardResults
+      .filter((result) => result.ok)
+      .map((result) => result.recipient),
+    forwardErrors: forwardResults
+      .filter((result) => !result.ok)
+      .map((result) => ({
+        recipient: result.recipient,
+        error: result.error ?? "unknown forward error",
+      })),
     defaultReplyIdentity: route?.defaultReplyIdentity,
     rawR2Key,
     rawSize: message.rawSize,
@@ -122,19 +126,28 @@ async function loadPolicyJson(env: Env): Promise<string | null> {
 async function forwardToOperators(
   message: ForwardableEmailMessage,
   route: RouteDecision | null,
-): Promise<void> {
-  if (!route) return;
+): Promise<ForwardResult[]> {
+  if (!route) return [];
 
-  for (const operator of route.operators) {
-    await message.forward(
-      operator,
-      new Headers({
-        "X-Maildesk-Original-To": message.to,
-        "X-Maildesk-Route-Kind": route.routeKind,
-        "X-Maildesk-Reply-Identity": route.defaultReplyIdentity,
-      }),
-    );
-  }
+  const recipients = route.operators;
+  const settled = await Promise.allSettled(
+    recipients.map((operator) =>
+      message.forward(
+        operator,
+        new Headers({
+          "X-Maildesk-Original-To": message.to,
+          "X-Maildesk-Route-Kind": route.routeKind,
+          "X-Maildesk-Reply-Identity": route.defaultReplyIdentity,
+        }),
+      ),
+    ),
+  );
+
+  return settled.map((result, index) => ({
+    recipient: recipients[index] ?? "unknown",
+    ok: result.status === "fulfilled",
+    error: result.status === "rejected" ? errorDetail(result.reason) : undefined,
+  }));
 }
 
 function parseMailbox(address: string): ParsedMailbox | null {
@@ -182,4 +195,10 @@ interface RouteDecision {
   routeKind: "role_alias" | "personal_alias";
   operators: string[];
   defaultReplyIdentity: string;
+}
+
+interface ForwardResult {
+  recipient: string;
+  ok: boolean;
+  error?: string;
 }
