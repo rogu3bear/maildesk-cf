@@ -6,6 +6,7 @@
   "domains": [
     {
       "name": "example.com",
+      "inbound_mx_provider": "cloudflare_email_routing",
       "role_aliases": ["abuse", "dmarc", "founders", "info", "legal", "noreply", "postmaster", "security"],
       "personal_aliases": ["operator-a", "operator-b"]
     }
