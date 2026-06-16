@@ -16,9 +16,13 @@
     "verify:maildesk": "bun run scripts/verify-maildesk.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260519.0",
-    "@types/node": "^25.9.1",
+    "@cloudflare/workers-types": "^4.20260616.1",
+    "@types/node": "^25.9.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.98.0"
+    "wrangler": "^4.100.0"
+  },
+  "overrides": {
+    "ws": "8.21.0",
+    "esbuild": "0.28.1"
   }
 }
