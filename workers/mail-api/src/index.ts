@@ -217,6 +217,18 @@ function routeAddress(policy: RouterPolicy, address: string): RouteDecision | Er
     };
   }
 
+  const catchAll = domainPolicy.catch_all;
+  if (catchAll) {
+    return {
+      operators: unique(catchAll.operators),
+      defaultReplyIdentity: normalizeMailbox(catchAll.reply_identity),
+      allowedReplyIdentities: unique([
+        catchAll.reply_identity,
+        ...catchAll.allowed_reply_identities,
+      ]),
+    };
+  }
+
   return new Error(`alias is not configured: ${address}`);
 }
 
@@ -359,6 +371,7 @@ interface RouterPolicy {
 interface DomainPolicy {
   role_aliases: Record<string, RoleAliasPolicy>;
   personal_aliases: Record<string, PersonalAliasPolicy>;
+  catch_all?: CatchAllPolicy;
 }
 
 interface RoleAliasPolicy {
@@ -370,6 +383,12 @@ interface RoleAliasPolicy {
 interface PersonalAliasPolicy {
   operator: string;
   reply_identity: string;
+}
+
+interface CatchAllPolicy {
+  operators: string[];
+  reply_identity: string;
+  allowed_reply_identities: string[];
 }
 
 interface RouteDecision {

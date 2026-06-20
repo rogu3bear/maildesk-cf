@@ -20,10 +20,23 @@ pub struct RouterPolicy {
 pub struct DomainPolicy {
     pub role_aliases: BTreeMap<String, RoleAliasPolicy>,
     pub personal_aliases: BTreeMap<String, PersonalAliasPolicy>,
+    /// Optional fallback for any recipient that matches no role or personal
+    /// alias. When present, the domain never rejects unknown local-parts; the
+    /// message is forwarded to these operators instead.
+    #[serde(default)]
+    pub catch_all: Option<CatchAllPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleAliasPolicy {
+    pub operators: Vec<String>,
+    pub reply_identity: String,
+    #[serde(default)]
+    pub allowed_reply_identities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchAllPolicy {
     pub operators: Vec<String>,
     pub reply_identity: String,
     #[serde(default)]
@@ -64,6 +77,7 @@ pub struct ReplyAuthorization {
 pub enum RouteKind {
     RoleAlias,
     PersonalAlias,
+    CatchAll,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -114,6 +128,10 @@ pub fn route_message(
         return personal_decision(domain, local_part, personal_policy);
     }
 
+    if let Some(catch_all_policy) = &domain_policy.catch_all {
+        return catch_all_decision(domain, local_part, catch_all_policy);
+    }
+
     Err(RouteError::UnknownAlias(local_part, domain))
 }
 
@@ -157,7 +175,10 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
 
     let mut route_count = 0usize;
     for (domain, domain_policy) in &policy.domains {
-        if domain_policy.role_aliases.is_empty() && domain_policy.personal_aliases.is_empty() {
+        if domain_policy.role_aliases.is_empty()
+            && domain_policy.personal_aliases.is_empty()
+            && domain_policy.catch_all.is_none()
+        {
             return Err(PolicyError::EmptyDomain(domain.clone()));
         }
 
@@ -181,6 +202,24 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
             if personal_policy.reply_identity != expected_identity {
                 return Err(PolicyError::PersonalReplyIdentityMismatch(
                     local_part.clone(),
+                    domain.clone(),
+                ));
+            }
+            route_count += 1;
+        }
+
+        if let Some(catch_all_policy) = &domain_policy.catch_all {
+            let decision =
+                catch_all_decision(domain.clone(), "*".to_string(), catch_all_policy)
+                    .map_err(|error| {
+                        PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
+                    })?;
+            if !decision
+                .allowed_reply_identities
+                .contains(&catch_all_policy.reply_identity)
+            {
+                return Err(PolicyError::MissingRoleReplyIdentity(
+                    "*".to_string(),
                     domain.clone(),
                 ));
             }
@@ -227,6 +266,29 @@ fn role_decision(
         route_kind: RouteKind::RoleAlias,
         operators: role_policy.operators.clone(),
         default_reply_identity: role_policy.reply_identity.clone(),
+        allowed_reply_identities: identities.into_iter().collect(),
+    })
+}
+
+fn catch_all_decision(
+    domain: String,
+    local_part: String,
+    catch_all_policy: &CatchAllPolicy,
+) -> Result<RouteDecision, RouteError> {
+    if catch_all_policy.operators.is_empty() {
+        return Err(RouteError::EmptyOperators(local_part, domain));
+    }
+
+    let mut identities = BTreeSet::new();
+    identities.insert(catch_all_policy.reply_identity.clone());
+    identities.extend(catch_all_policy.allowed_reply_identities.iter().cloned());
+
+    Ok(RouteDecision {
+        domain,
+        local_part,
+        route_kind: RouteKind::CatchAll,
+        operators: catch_all_policy.operators.clone(),
+        default_reply_identity: catch_all_policy.reply_identity.clone(),
         allowed_reply_identities: identities.into_iter().collect(),
     })
 }
@@ -416,6 +478,101 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn routes_unknown_alias_to_catch_all_when_present() -> Result<(), RouteError> {
+        let policy = catch_all_policy();
+        let decision = route_message(
+            &policy,
+            &InboundMessage {
+                envelope_to: "Anything-Unlisted@Example.com".to_string(),
+                header_from: "customer@example.net".to_string(),
+                message_id: None,
+                subject: None,
+            },
+        )?;
+
+        assert_eq!(decision.route_kind, RouteKind::CatchAll);
+        assert_eq!(decision.local_part, "anything-unlisted");
+        assert_eq!(decision.operators, vec!["operator-a@example.com"]);
+        assert_eq!(decision.default_reply_identity, "info@example.com");
+        assert!(decision
+            .allowed_reply_identities
+            .contains(&"info@example.com".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn role_alias_still_wins_over_catch_all() -> Result<(), RouteError> {
+        let policy = catch_all_policy();
+        let decision = route_message(
+            &policy,
+            &InboundMessage {
+                envelope_to: "info@example.com".to_string(),
+                header_from: "customer@example.net".to_string(),
+                message_id: None,
+                subject: None,
+            },
+        )?;
+
+        assert_eq!(decision.route_kind, RouteKind::RoleAlias);
+        Ok(())
+    }
+
+    #[test]
+    fn catch_all_only_domain_validates() -> Result<(), PolicyError> {
+        let mut domains = BTreeMap::new();
+        domains.insert(
+            "example.com".to_string(),
+            DomainPolicy {
+                role_aliases: BTreeMap::new(),
+                personal_aliases: BTreeMap::new(),
+                catch_all: Some(CatchAllPolicy {
+                    operators: vec!["operator-a@example.com".to_string()],
+                    reply_identity: "info@example.com".to_string(),
+                    allowed_reply_identities: vec![],
+                }),
+            },
+        );
+        let policy = RouterPolicy {
+            default_reply_mode: ReplyMode::RoleFirst,
+            domains,
+        };
+        assert_eq!(validate_policy(&policy)?, 1);
+        Ok(())
+    }
+
+    fn catch_all_policy() -> RouterPolicy {
+        let mut role_aliases = BTreeMap::new();
+        role_aliases.insert(
+            "info".to_string(),
+            RoleAliasPolicy {
+                operators: vec!["operator-a@example.com".to_string()],
+                reply_identity: "info@example.com".to_string(),
+                allowed_reply_identities: vec!["operator-a@example.com".to_string()],
+            },
+        );
+
+        let mut domains = BTreeMap::new();
+        domains.insert(
+            "example.com".to_string(),
+            DomainPolicy {
+                role_aliases,
+                personal_aliases: BTreeMap::new(),
+                catch_all: Some(CatchAllPolicy {
+                    operators: vec!["operator-a@example.com".to_string()],
+                    reply_identity: "info@example.com".to_string(),
+                    allowed_reply_identities: vec!["operator-a@example.com".to_string()],
+                }),
+            },
+        );
+
+        RouterPolicy {
+            default_reply_mode: ReplyMode::RoleFirst,
+            domains,
+        }
+    }
+
     fn example_policy() -> RouterPolicy {
         let mut role_aliases = BTreeMap::new();
         role_aliases.insert(
@@ -448,6 +605,7 @@ mod tests {
             DomainPolicy {
                 role_aliases,
                 personal_aliases,
+                catch_all: None,
             },
         );
 

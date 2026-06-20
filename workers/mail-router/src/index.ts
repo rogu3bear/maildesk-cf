@@ -113,6 +113,19 @@ async function routeMessage(
     };
   }
 
+  const catchAll = domainPolicy.catch_all;
+  if (catchAll) {
+    if (catchAll.operators.length === 0) {
+      return new Error(`policy has an empty catch-all operator set for: ${recipient.domain}`);
+    }
+
+    return {
+      routeKind: "catch_all",
+      operators: unique(catchAll.operators),
+      defaultReplyIdentity: catchAll.reply_identity,
+    };
+  }
+
   return new Error(`alias is not configured: ${message.to}`);
 }
 
@@ -180,6 +193,7 @@ interface RouterPolicy {
 interface DomainPolicy {
   role_aliases: Record<string, RoleAliasPolicy>;
   personal_aliases: Record<string, PersonalAliasPolicy>;
+  catch_all?: CatchAllPolicy;
 }
 
 interface RoleAliasPolicy {
@@ -192,8 +206,13 @@ interface PersonalAliasPolicy {
   reply_identity: string;
 }
 
+interface CatchAllPolicy {
+  operators: string[];
+  reply_identity: string;
+}
+
 interface RouteDecision {
-  routeKind: "role_alias" | "personal_alias";
+  routeKind: "role_alias" | "personal_alias" | "catch_all";
   operators: string[];
   defaultReplyIdentity: string;
 }
