@@ -19,7 +19,7 @@ export interface InboundEmailReceivedJob {
   messageId: string;
   envelopeTo: string;
   envelopeFrom: string;
-  routeKind?: "role_alias" | "personal_alias";
+  routeKind?: "role_alias" | "personal_alias" | "catch_all";
   forwardedTo?: string[];
   forwardErrors?: ForwardError[];
   defaultReplyIdentity?: string;

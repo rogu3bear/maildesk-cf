@@ -97,6 +97,15 @@
           "operator": "operator-b@example.com",
           "reply_identity": "operator-b@example.com"
         }
+      },
+      "catch_all": {
+        "operators": [
+          "operator-a@example.com"
+        ],
+        "reply_identity": "info@example.com",
+        "allowed_reply_identities": [
+          "operator-a@example.com"
+        ]
       }
     }
   }
