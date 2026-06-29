@@ -1,6 +1,7 @@
 name = "maildesk-cf"
 main = "workers/mail-api/src/index.ts"
-compatibility_date = "2026-05-19"
+compatibility_date = "2026-06-29"
+upload_source_maps = true
 
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
@@ -23,3 +24,5 @@ queue = "maildesk-cf-jobs"
 
 [[queues.consumers]]
 queue = "maildesk-cf-jobs"
+max_retries = 5
+dead_letter_queue = "maildesk-cf-jobs-dlq"

@@ -10,7 +10,8 @@ export default {
 
 async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promise<void> {
   const messageId = message.headers.get("message-id") ?? crypto.randomUUID();
-  const rawR2Key = rawMailKey(messageId);
+  const deliveryId = crypto.randomUUID();
+  const rawR2Key = rawMailKey(messageId, deliveryId);
   const route = await routeMessage(message, env);
 
   if (route instanceof Error) {
@@ -32,43 +33,55 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
       },
     });
   } catch (error) {
-    await enqueueInbound(message, messageId, rawR2Key, route, forwardResults, env, errorDetail(error));
+    await enqueueInbound(message, messageId, deliveryId, rawR2Key, route, forwardResults, env, errorDetail(error));
     return;
   }
 
-  return enqueueInbound(message, messageId, rawR2Key, route, forwardResults, env);
+  return enqueueInbound(message, messageId, deliveryId, rawR2Key, route, forwardResults, env);
 }
 
 async function enqueueInbound(
   message: ForwardableEmailMessage,
   messageId: string,
+  deliveryId: string,
   rawR2Key: string,
   route: RouteDecision | null,
   forwardResults: ForwardResult[],
   env: Env,
   storageError?: string,
 ): Promise<void> {
-  await env.MAIL_JOBS.send({
-    kind: "inbound_email_received",
-    messageId,
-    envelopeTo: message.to,
-    envelopeFrom: message.from,
-    routeKind: route?.routeKind,
-    forwardedTo: forwardResults
-      .filter((result) => result.ok)
-      .map((result) => result.recipient),
-    forwardErrors: forwardResults
-      .filter((result) => !result.ok)
-      .map((result) => ({
-        recipient: result.recipient,
-        error: result.error ?? "unknown forward error",
-      })),
-    defaultReplyIdentity: route?.defaultReplyIdentity,
-    rawR2Key,
-    rawSize: message.rawSize,
-    storageError,
-    receivedAt: new Date().toISOString(),
-  });
+  // Forwarding already happened before this point. If the queue send fails we
+  // must NOT rethrow: an exception here propagates out of email(), Cloudflare
+  // temp-fails the sender, and the retried inbound re-forwards — a duplicate in
+  // the operator inbox. Swallow + log instead; the mail is already delivered,
+  // and the audit row is best-effort (deliveryId makes the consumer idempotent
+  // if the job does land more than once).
+  try {
+    await env.MAIL_JOBS.send({
+      kind: "inbound_email_received",
+      messageId,
+      deliveryId,
+      envelopeTo: message.to,
+      envelopeFrom: message.from,
+      routeKind: route?.routeKind,
+      forwardedTo: forwardResults
+        .filter((result) => result.ok)
+        .map((result) => result.recipient),
+      forwardErrors: forwardResults
+        .filter((result) => !result.ok)
+        .map((result) => ({
+          recipient: result.recipient,
+          error: result.error ?? "unknown forward error",
+        })),
+      defaultReplyIdentity: route?.defaultReplyIdentity,
+      rawR2Key,
+      rawSize: message.rawSize,
+      storageError,
+      receivedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error(`maildesk enqueue failed for ${messageId}: ${errorDetail(error)}`);
+  }
 }
 
 async function routeMessage(
@@ -76,7 +89,11 @@ async function routeMessage(
   env: Env,
 ): Promise<RouteDecision | Error | null> {
   const policyJson = await loadPolicyJson(env);
-  if (!policyJson) return null;
+  // Fail closed: a missing/unreadable policy must temp-reject (sender retries)
+  // rather than silently accept-and-drop. Returning null here would store +
+  // enqueue + return 250 OK with no forward — a silent black hole for every
+  // domain at once. setReject lets the sender retry until policy is restored.
+  if (!policyJson) return new Error("maildesk policy unavailable");
 
   let policy: RouterPolicy;
   try {
@@ -93,6 +110,14 @@ async function routeMessage(
 
   const roleAlias = domainPolicy.role_aliases[recipient.localPart];
   if (roleAlias) {
+    if (roleAlias.sink) {
+      return {
+        routeKind: "sink",
+        operators: [],
+        defaultReplyIdentity: roleAlias.reply_identity,
+      };
+    }
+
     if (roleAlias.operators.length === 0) {
       return new Error(`policy has an empty operator set for: ${message.to}`);
     }
@@ -115,6 +140,14 @@ async function routeMessage(
 
   const catchAll = domainPolicy.catch_all;
   if (catchAll) {
+    if (catchAll.sink) {
+      return {
+        routeKind: "sink",
+        operators: [],
+        defaultReplyIdentity: catchAll.reply_identity,
+      };
+    }
+
     if (catchAll.operators.length === 0) {
       return new Error(`policy has an empty catch-all operator set for: ${recipient.domain}`);
     }
@@ -142,6 +175,7 @@ async function forwardToOperators(
   route: RouteDecision | null,
 ): Promise<ForwardResult[]> {
   if (!route) return [];
+  if (route.routeKind === "sink") return [];
 
   const recipients = route.operators;
   const settled = await Promise.allSettled(
@@ -199,6 +233,8 @@ interface DomainPolicy {
 interface RoleAliasPolicy {
   operators: string[];
   reply_identity: string;
+  /** When true, archive inbound mail (R2 + D1) but never forward to operators. */
+  sink?: boolean;
 }
 
 interface PersonalAliasPolicy {
@@ -209,10 +245,12 @@ interface PersonalAliasPolicy {
 interface CatchAllPolicy {
   operators: string[];
   reply_identity: string;
+  /** When true, archive unmatched mail but never forward to operators. */
+  sink?: boolean;
 }
 
 interface RouteDecision {
-  routeKind: "role_alias" | "personal_alias" | "catch_all";
+  routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
   operators: string[];
   defaultReplyIdentity: string;
 }
