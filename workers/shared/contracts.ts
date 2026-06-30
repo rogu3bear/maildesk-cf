@@ -17,9 +17,11 @@ export type MailJob = InboundEmailReceivedJob | InboundEmailPersistedJob | Outbo
 export interface InboundEmailReceivedJob {
   kind: "inbound_email_received";
   messageId: string;
+  /** Stable per-acceptance id; the idempotency key for audit + raw-archive. */
+  deliveryId: string;
   envelopeTo: string;
   envelopeFrom: string;
-  routeKind?: "role_alias" | "personal_alias" | "catch_all";
+  routeKind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
   forwardedTo?: string[];
   forwardErrors?: ForwardError[];
   defaultReplyIdentity?: string;
@@ -86,9 +88,11 @@ export function methodNotAllowed(): Response {
   return json({ error: "method_not_allowed" }, { status: 405 });
 }
 
-export function rawMailKey(messageId: string): string {
+export function rawMailKey(messageId: string, deliveryId: string): string {
   const safeId = messageId.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `raw/${new Date().toISOString().slice(0, 10)}/${safeId}.eml`;
+  // deliveryId disambiguates same-day retries that reuse a Message-ID, so a
+  // retried delivery never overwrites the prior raw archive.
+  return `raw/${new Date().toISOString().slice(0, 10)}/${safeId}__${deliveryId}.eml`;
 }
 
 export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {

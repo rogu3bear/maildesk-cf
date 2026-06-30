@@ -24,7 +24,8 @@
             "security@example.com",
             "operator-a@example.com",
             "operator-b@example.com"
-          ]
+          ],
+          "sink": true
         },
         "founders": {
           "operators": [

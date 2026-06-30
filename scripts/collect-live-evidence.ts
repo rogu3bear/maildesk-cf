@@ -34,7 +34,7 @@ interface Evidence {
 interface InboundProof {
   status: "ok";
   envelope_to: string;
-  route_kind?: "role_alias" | "personal_alias";
+  route_kind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
   forwarded_to: string[];
   forward_errors: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
@@ -408,7 +408,7 @@ interface DnsRecord {
 
 interface InboundAuditDetail {
   envelopeTo?: string;
-  routeKind?: "role_alias" | "personal_alias";
+  routeKind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
   forwardedTo?: string[];
   forwardErrors?: Array<{ recipient?: string; error?: string }>;
   defaultReplyIdentity?: string;

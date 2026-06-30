@@ -33,6 +33,12 @@ pub struct RoleAliasPolicy {
     pub reply_identity: String,
     #[serde(default)]
     pub allowed_reply_identities: Vec<String>,
+    /// When true, inbound mail to this alias is accepted and archived (R2 + D1)
+    /// but never forwarded to operators. Intended for bulk machine mail such as
+    /// DMARC aggregate reports. A sink alias may declare an empty operator set;
+    /// any operators it does list are ignored while `sink` is true.
+    #[serde(default)]
+    pub sink: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +47,10 @@ pub struct CatchAllPolicy {
     pub reply_identity: String,
     #[serde(default)]
     pub allowed_reply_identities: Vec<String>,
+    /// See `RoleAliasPolicy::sink`. A sink catch-all archives unmatched mail
+    /// without forwarding it.
+    #[serde(default)]
+    pub sink: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +88,8 @@ pub enum RouteKind {
     RoleAlias,
     PersonalAlias,
     CatchAll,
+    /// Store-only: the message is archived but not forwarded to any operator.
+    Sink,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -209,11 +221,10 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
         }
 
         if let Some(catch_all_policy) = &domain_policy.catch_all {
-            let decision =
-                catch_all_decision(domain.clone(), "*".to_string(), catch_all_policy)
-                    .map_err(|error| {
-                        PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
-                    })?;
+            let decision = catch_all_decision(domain.clone(), "*".to_string(), catch_all_policy)
+                .map_err(|error| {
+                    PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
+                })?;
             if !decision
                 .allowed_reply_identities
                 .contains(&catch_all_policy.reply_identity)
@@ -252,13 +263,25 @@ fn role_decision(
     local_part: String,
     role_policy: &RoleAliasPolicy,
 ) -> Result<RouteDecision, RouteError> {
-    if role_policy.operators.is_empty() {
-        return Err(RouteError::EmptyOperators(local_part, domain));
-    }
-
     let mut identities = BTreeSet::new();
     identities.insert(role_policy.reply_identity.clone());
     identities.extend(role_policy.allowed_reply_identities.iter().cloned());
+    let allowed_reply_identities: Vec<String> = identities.into_iter().collect();
+
+    if role_policy.sink {
+        return Ok(RouteDecision {
+            domain,
+            local_part,
+            route_kind: RouteKind::Sink,
+            operators: Vec::new(),
+            default_reply_identity: role_policy.reply_identity.clone(),
+            allowed_reply_identities,
+        });
+    }
+
+    if role_policy.operators.is_empty() {
+        return Err(RouteError::EmptyOperators(local_part, domain));
+    }
 
     Ok(RouteDecision {
         domain,
@@ -266,7 +289,7 @@ fn role_decision(
         route_kind: RouteKind::RoleAlias,
         operators: role_policy.operators.clone(),
         default_reply_identity: role_policy.reply_identity.clone(),
-        allowed_reply_identities: identities.into_iter().collect(),
+        allowed_reply_identities,
     })
 }
 
@@ -275,13 +298,25 @@ fn catch_all_decision(
     local_part: String,
     catch_all_policy: &CatchAllPolicy,
 ) -> Result<RouteDecision, RouteError> {
-    if catch_all_policy.operators.is_empty() {
-        return Err(RouteError::EmptyOperators(local_part, domain));
-    }
-
     let mut identities = BTreeSet::new();
     identities.insert(catch_all_policy.reply_identity.clone());
     identities.extend(catch_all_policy.allowed_reply_identities.iter().cloned());
+    let allowed_reply_identities: Vec<String> = identities.into_iter().collect();
+
+    if catch_all_policy.sink {
+        return Ok(RouteDecision {
+            domain,
+            local_part,
+            route_kind: RouteKind::Sink,
+            operators: Vec::new(),
+            default_reply_identity: catch_all_policy.reply_identity.clone(),
+            allowed_reply_identities,
+        });
+    }
+
+    if catch_all_policy.operators.is_empty() {
+        return Err(RouteError::EmptyOperators(local_part, domain));
+    }
 
     Ok(RouteDecision {
         domain,
@@ -289,7 +324,7 @@ fn catch_all_decision(
         route_kind: RouteKind::CatchAll,
         operators: catch_all_policy.operators.clone(),
         default_reply_identity: catch_all_policy.reply_identity.clone(),
-        allowed_reply_identities: identities.into_iter().collect(),
+        allowed_reply_identities,
     })
 }
 
@@ -531,6 +566,7 @@ mod tests {
                     operators: vec!["operator-a@example.com".to_string()],
                     reply_identity: "info@example.com".to_string(),
                     allowed_reply_identities: vec![],
+                    sink: false,
                 }),
             },
         );
@@ -542,6 +578,62 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn routes_sink_role_alias_without_forwarding() -> Result<(), RouteError> {
+        let policy = sink_policy();
+        let decision = route_message(
+            &policy,
+            &InboundMessage {
+                envelope_to: "DMARC@Example.com".to_string(),
+                header_from: "noreply-dmarc-support@google.com".to_string(),
+                message_id: Some("<report-1@google.com>".to_string()),
+                subject: Some("Report domain: example.com".to_string()),
+            },
+        )?;
+
+        assert_eq!(decision.route_kind, RouteKind::Sink);
+        assert_eq!(decision.local_part, "dmarc");
+        assert!(decision.operators.is_empty());
+        assert_eq!(decision.default_reply_identity, "dmarc@example.com");
+
+        Ok(())
+    }
+
+    #[test]
+    fn validates_policy_with_sink_alias() -> Result<(), PolicyError> {
+        // A sink alias is valid even though it forwards to no operator.
+        assert_eq!(validate_policy(&sink_policy())?, 1);
+        Ok(())
+    }
+
+    fn sink_policy() -> RouterPolicy {
+        let mut role_aliases = BTreeMap::new();
+        role_aliases.insert(
+            "dmarc".to_string(),
+            RoleAliasPolicy {
+                operators: vec![],
+                reply_identity: "dmarc@example.com".to_string(),
+                allowed_reply_identities: vec![],
+                sink: true,
+            },
+        );
+
+        let mut domains = BTreeMap::new();
+        domains.insert(
+            "example.com".to_string(),
+            DomainPolicy {
+                role_aliases,
+                personal_aliases: BTreeMap::new(),
+                catch_all: None,
+            },
+        );
+
+        RouterPolicy {
+            default_reply_mode: ReplyMode::RoleFirst,
+            domains,
+        }
+    }
+
     fn catch_all_policy() -> RouterPolicy {
         let mut role_aliases = BTreeMap::new();
         role_aliases.insert(
@@ -550,6 +642,7 @@ mod tests {
                 operators: vec!["operator-a@example.com".to_string()],
                 reply_identity: "info@example.com".to_string(),
                 allowed_reply_identities: vec!["operator-a@example.com".to_string()],
+                sink: false,
             },
         );
 
@@ -563,6 +656,7 @@ mod tests {
                     operators: vec!["operator-a@example.com".to_string()],
                     reply_identity: "info@example.com".to_string(),
                     allowed_reply_identities: vec!["operator-a@example.com".to_string()],
+                    sink: false,
                 }),
             },
         );
@@ -587,6 +681,7 @@ mod tests {
                     "operator-a@example.com".to_string(),
                     "operator-b@example.com".to_string(),
                 ],
+                sink: false,
             },
         );
 

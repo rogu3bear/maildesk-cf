@@ -46,7 +46,12 @@ async function queueReply(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid_json" }, { status: 400 });
+  }
 
   if (!isOutboundReplyRequestedJob(body)) {
     return json({ error: "invalid_reply_request" }, { status: 400 });
@@ -101,33 +106,61 @@ function isOutboundReplyRequestedJob(value: unknown): value is OutboundReplyRequ
 }
 
 async function recordQueueEvent(job: MailJob, env: Env): Promise<void> {
-  await recordAuditEvent(env, "system", job.kind, job);
+  const base = dedupeBase(job);
+
+  await recordAuditEvent(env, "system", job.kind, job, base ? `${base}:${job.kind}` : undefined);
 
   if (job.kind !== "outbound_reply_requested") return;
 
-  await recordAuditEvent(env, job.operator, "outbound_reply_authorized", {
-    messageId: job.messageId,
-    threadId: job.threadId,
-    fromIdentity: job.fromIdentity,
-    to: job.to,
-  });
+  await recordAuditEvent(
+    env,
+    job.operator,
+    "outbound_reply_authorized",
+    {
+      messageId: job.messageId,
+      threadId: job.threadId,
+      fromIdentity: job.fromIdentity,
+      to: job.to,
+    },
+    `${job.messageId}:outbound_reply_authorized`,
+  );
 
-  await recordAuditEvent(env, job.operator, "outbound_reply_send_attempted", {
-    messageId: job.messageId,
-    threadId: job.threadId,
-    fromIdentity: job.fromIdentity,
-    to: job.to,
-    provider: env.MAILDESK_OUTBOUND_MODE ?? "disabled",
-  });
+  await recordAuditEvent(
+    env,
+    job.operator,
+    "outbound_reply_send_attempted",
+    {
+      messageId: job.messageId,
+      threadId: job.threadId,
+      fromIdentity: job.fromIdentity,
+      to: job.to,
+      provider: env.MAILDESK_OUTBOUND_MODE ?? "disabled",
+    },
+    `${job.messageId}:outbound_reply_send_attempted`,
+  );
 
   const sendResult = await sendOutboundReply(job, env);
-  await recordAuditEvent(env, job.operator, sendResult.ok ? "outbound_reply_delivered" : "outbound_reply_failed", {
-    messageId: job.messageId,
-    threadId: job.threadId,
-    fromIdentity: job.fromIdentity,
-    to: job.to,
-    result: sendResult,
-  });
+  await recordAuditEvent(
+    env,
+    job.operator,
+    sendResult.ok ? "outbound_reply_delivered" : "outbound_reply_failed",
+    {
+      messageId: job.messageId,
+      threadId: job.threadId,
+      fromIdentity: job.fromIdentity,
+      to: job.to,
+      result: sendResult,
+    },
+    `${job.messageId}:outbound_reply_result`,
+  );
+}
+
+// Stable idempotency base for a job: the inbound deliveryId (set by the router)
+// or the outbound messageId. Returns undefined for jobs without one (no dedup).
+function dedupeBase(job: MailJob): string | undefined {
+  if (job.kind === "inbound_email_received") return job.deliveryId;
+  if (job.kind === "outbound_reply_requested") return job.messageId;
+  return undefined;
 }
 
 async function recordAuditEvent(
@@ -135,11 +168,16 @@ async function recordAuditEvent(
   actor: string,
   action: string,
   detail: unknown,
+  dedupeKey?: string,
 ): Promise<void> {
+  // INSERT OR IGNORE against a partial UNIQUE(dedupe_key) makes the at-least-once
+  // queue consumer idempotent: a redelivered job re-inserts the same dedupe_key
+  // and is silently dropped. Rows with a null dedupe_key are unconstrained by the
+  // partial index, so legacy/ad-hoc events still always insert.
   await env.DB.prepare(
-    "INSERT INTO audit_events (id, actor, action, detail_json) VALUES (?1, ?2, ?3, ?4)",
+    "INSERT OR IGNORE INTO audit_events (id, dedupe_key, actor, action, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)",
   )
-    .bind(crypto.randomUUID(), actor, action, JSON.stringify(detail))
+    .bind(crypto.randomUUID(), dedupeKey ?? null, actor, action, JSON.stringify(detail))
     .run();
 }
 
@@ -163,7 +201,13 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
   const policyJson = env.MAILDESK_POLICY_JSON ?? (await loadPolicyFromR2(env));
   if (!policyJson) return null;
-  return JSON.parse(policyJson) as RouterPolicy;
+  // Malformed policy JSON must not 500; return null so callers emit a clean
+  // 503 policy_unavailable (mirrors the router's fail-closed handling).
+  try {
+    return JSON.parse(policyJson) as RouterPolicy;
+  } catch {
+    return null;
+  }
 }
 
 async function loadPolicyFromR2(env: Env): Promise<string | null> {
@@ -198,6 +242,9 @@ function routeAddress(policy: RouterPolicy, address: string): RouteDecision | Er
 
   const roleAlias = domainPolicy.role_aliases[parsed.localPart];
   if (roleAlias) {
+    if (roleAlias.sink) {
+      return new Error(`alias is a store-only sink, not a reply route: ${address}`);
+    }
     return {
       operators: unique(roleAlias.operators),
       defaultReplyIdentity: normalizeMailbox(roleAlias.reply_identity),
@@ -219,6 +266,9 @@ function routeAddress(policy: RouterPolicy, address: string): RouteDecision | Er
 
   const catchAll = domainPolicy.catch_all;
   if (catchAll) {
+    if (catchAll.sink) {
+      return new Error(`alias is a store-only sink, not a reply route: ${address}`);
+    }
     return {
       operators: unique(catchAll.operators),
       defaultReplyIdentity: normalizeMailbox(catchAll.reply_identity),
@@ -378,6 +428,7 @@ interface RoleAliasPolicy {
   operators: string[];
   reply_identity: string;
   allowed_reply_identities: string[];
+  sink?: boolean;
 }
 
 interface PersonalAliasPolicy {
@@ -389,6 +440,7 @@ interface CatchAllPolicy {
   operators: string[];
   reply_identity: string;
   allowed_reply_identities: string[];
+  sink?: boolean;
 }
 
 interface RouteDecision {
