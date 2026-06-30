@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "ci": "bash scripts/ci.sh",
     "check": "bun run typecheck",
     "preflight": "bun run scripts/preflight.ts",
     "preflight:template": "bun run scripts/preflight.ts --mode template",
