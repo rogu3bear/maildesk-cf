@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Local CI gate: run the full check suite before every push.
+# Activate once per clone:  git config core.hooksPath .githooks
+# Bypass a single push with: git push --no-verify
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec bash "$ROOT_DIR/scripts/ci.sh"
