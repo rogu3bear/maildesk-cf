@@ -15,8 +15,8 @@ complete elsewhere.
 - [x] Email Worker and API Worker skeletons.
 - [x] Separate API Worker and Email Worker Wrangler targets.
 - [x] Shared TypeScript edge contract for readiness and queue jobs.
-- [x] Template desired-state fixture for future `cfctl maildesk-cf` surface.
-- [x] `cfctl` surface draft.
+- [x] Template desired-state fixture for `cfctl maildesk-cf`.
+- [x] `cfctl` surface contract.
 - [x] Production rollout, deliverability, and outbound identity runbooks.
 
 ## Milestone 1: Deployable Edge Skeleton
@@ -47,7 +47,7 @@ complete elsewhere.
 
 ## Milestone 3: Production Hardening
 
-- [ ] `cfctl maildesk-cf verify` reads live Cloudflare state and reports drift.
+- [x] `cfctl maildesk-cf verify` reads live Cloudflare state and reports drift.
 - [x] Local horizontal verifier emits a per-domain policy/readiness receipt.
 - [ ] DNS authentication checks cover SPF, DKIM, DMARC, MTA-STS, and TLS
       reporting when configured.
@@ -59,15 +59,16 @@ complete elsewhere.
 
 ### cfctl
 
-`cfctl` needs a first-class `maildesk-cf` surface before production
-provisioning can be called template-native.
+`cfctl` has a first-class `maildesk-cf` lifecycle surface. Production
+provisioning is template-native when each component operation remains
+preview-gated through `cfctl`.
 
 Required surfaces:
 
 - desired-state schema for domains, aliases, operators, identities, bindings,
   and sender mode;
 - plan/apply/verify lifecycle;
-- DNS and Email Routing readback;
+- DNS, Email Routing, and sender-domain readback;
 - D1, R2, Queue, Worker, and secret provisioning;
 - verification receipt that avoids broad live sends.
 

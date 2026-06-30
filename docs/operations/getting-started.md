@@ -35,14 +35,15 @@ Use `cfctl` for Cloudflare account resources:
 
 ```bash
 cfctl doctor
-cfctl maildesk-cf provision --plan
-cfctl maildesk-cf provision --ack-plan <operation-id>
-cfctl maildesk-cf verify --domain example.com
+cfctl maildesk-cf provision --file config/desired-state.example.json --plan
+cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
+cfctl maildesk-cf verify --file config/desired-state.example.json
 ```
 
-If the first-class `maildesk-cf` surface is not available yet, use the existing
-primitive `cfctl` surfaces for DNS records, Worker scripts, D1, R2, Queues,
-secrets, and Email Routing.
+Review the provision plan before acknowledging it. If the plan emits component
+commands for DNS, Email Routing, sender domains, Worker scripts, D1, R2,
+Queues, or secrets, run those through the named primitive `cfctl` surface rather
+than using ad hoc Cloudflare API calls.
 
 ## 4. Run Local Checks
 

@@ -54,17 +54,22 @@ Provision through `cfctl`, using plan and acknowledge phases for mutations:
 
 ```bash
 cfctl doctor
-cfctl list email.routing_rule --zone example.com
+cfctl maildesk-cf provision --file config/desired-state.local.json --plan
+cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>
+cfctl maildesk-cf verify --file config/desired-state.local.json
+```
+
+Keep desired state in ignored private files and verify every mutation with
+readback. If the composite plan emits component commands, run those through the
+named primitive surface. For example:
+
+```bash
 cfctl apply email.routing_rule upsert --zone example.com \
   --name founders@example.com \
   --service maildesk-cf-router \
   --plan
-cfctl apply email.routing_rule upsert --ack-plan <operation-id>
+cfctl apply sender_domain enable --zone example.com --name example.com --plan
 ```
-
-When a first-class `maildesk-cf` surface exists, prefer that over primitive
-surfaces. Until then, keep desired state checked into ignored private files and
-verify every mutation with readback.
 
 ## 4. Runtime Config
 
