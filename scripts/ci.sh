@@ -25,6 +25,9 @@ cargo clippy --all-targets -- -D warnings
 step "bun run typecheck"
 bun run typecheck
 
+step "bun run test:workers"
+bun run test:workers
+
 step "scripts/check-template.sh"
 bash scripts/check-template.sh
 

@@ -37,6 +37,13 @@ async function acceptInbound(message: ForwardableEmailMessage, env: Env): Promis
     return;
   }
 
+  try {
+    await persistInboundMetadata(message, messageId, deliveryId, rawR2Key, route, forwardResults, env);
+  } catch (error) {
+    console.error(`maildesk metadata persist failed for ${messageId}: ${errorDetail(error)}`);
+    return;
+  }
+
   return enqueueInbound(message, messageId, deliveryId, rawR2Key, route, forwardResults, env);
 }
 
@@ -162,6 +169,106 @@ async function routeMessage(
   return new Error(`alias is not configured: ${message.to}`);
 }
 
+async function persistInboundMetadata(
+  message: ForwardableEmailMessage,
+  messageId: string,
+  deliveryId: string,
+  rawR2Key: string,
+  route: RouteDecision | null,
+  forwardResults: ForwardResult[],
+  env: Env,
+): Promise<void> {
+  const recipient = parseMailbox(message.to);
+  if (!recipient || !route) return;
+
+  const domainId = stableId("domain", recipient.domain);
+  const identityId = stableId("identity", route.defaultReplyIdentity);
+  const routeId = stableId("route", recipient.domain, recipient.localPart);
+  const threadId = stableId("thread", messageId);
+  const messageRowId = stableId("message", deliveryId);
+  const routeKind = route.routeKind === "personal_alias" ? "personal" : "role";
+  const subject = message.headers.get("subject");
+  const inReplyTo = message.headers.get("in-reply-to");
+
+  await env.DB.prepare("INSERT OR IGNORE INTO domains (id, domain) VALUES (?1, ?2)")
+    .bind(domainId, recipient.domain)
+    .run();
+
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO identities (id, domain_id, address, kind) VALUES (?1, ?2, ?3, ?4)",
+  )
+    .bind(identityId, domainId, route.defaultReplyIdentity, routeKind)
+    .run();
+
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+  )
+    .bind(routeId, domainId, recipient.localPart, routeKind, identityId)
+    .run();
+
+  for (const operator of route.operators) {
+    const operatorId = stableId("operator", operator);
+    await env.DB.prepare("INSERT OR IGNORE INTO operators (id, email) VALUES (?1, ?2)")
+      .bind(operatorId, operator)
+      .run();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO alias_route_operators (route_id, operator_id) VALUES (?1, ?2)",
+    )
+      .bind(routeId, operatorId)
+      .run();
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO threads (id, domain_id, route_id, external_sender, subject, status) VALUES (?1, ?2, ?3, ?4, ?5, 'open') ON CONFLICT(id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+  )
+    .bind(threadId, domainId, routeId, normalizeMailbox(message.from), subject)
+    .run();
+
+  await env.DB.prepare(
+    "INSERT INTO messages (id, thread_id, direction, envelope_from, envelope_to, header_message_id, in_reply_to, raw_r2_key) VALUES (?1, ?2, 'inbound', ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING",
+  )
+    .bind(
+      messageRowId,
+      threadId,
+      normalizeMailbox(message.from),
+      normalizeMailbox(message.to),
+      messageId,
+      inReplyTo,
+      rawR2Key,
+    )
+    .run();
+
+  await env.DB.prepare(
+    "INSERT INTO audit_events (id, dedupe_key, thread_id, actor, action, detail_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+  )
+    .bind(
+      crypto.randomUUID(),
+      `${deliveryId}:inbound_email_accepted`,
+      threadId,
+      "system",
+      "inbound_email_accepted",
+      JSON.stringify({
+        messageId,
+        deliveryId,
+        envelopeFrom: normalizeMailbox(message.from),
+        envelopeTo: normalizeMailbox(message.to),
+        routeKind: route.routeKind,
+        forwardedTo: forwardResults
+          .filter((result) => result.ok)
+          .map((result) => result.recipient),
+        forwardErrors: forwardResults
+          .filter((result) => !result.ok)
+          .map((result) => ({
+            recipient: result.recipient,
+            error: result.error ?? "unknown forward error",
+          })),
+        defaultReplyIdentity: route.defaultReplyIdentity,
+        rawR2Key,
+      }),
+    )
+    .run();
+}
+
 async function loadPolicyJson(env: Env): Promise<string | null> {
   if (env.MAILDESK_POLICY_JSON) return env.MAILDESK_POLICY_JSON;
   if (!env.MAILDESK_POLICY_R2_KEY) return null;
@@ -199,7 +306,7 @@ async function forwardToOperators(
 }
 
 function parseMailbox(address: string): ParsedMailbox | null {
-  const normalized = address.trim().toLowerCase();
+  const normalized = normalizeMailbox(address);
   const atIndex = normalized.lastIndexOf("@");
   if (atIndex <= 0 || atIndex === normalized.length - 1) return null;
 
@@ -209,8 +316,20 @@ function parseMailbox(address: string): ParsedMailbox | null {
   };
 }
 
+function normalizeMailbox(address: string): string {
+  return address.trim().toLowerCase();
+}
+
 function unique(values: string[]): string[] {
-  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))];
+  return [...new Set(values.map(normalizeMailbox).filter(Boolean))];
+}
+
+function stableId(prefix: string, ...parts: string[]): string {
+  return [prefix, ...parts.map(stablePart)].join(":");
+}
+
+function stablePart(value: string): string {
+  return normalizeMailbox(value).replace(/[^a-z0-9._-]+/g, "_");
 }
 
 type Env = MaildeskEnv;
