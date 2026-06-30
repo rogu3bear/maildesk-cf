@@ -46,7 +46,12 @@ async function queueReply(request: Request, env: Env): Promise<Response> {
     return json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid_json" }, { status: 400 });
+  }
 
   if (!isOutboundReplyRequestedJob(body)) {
     return json({ error: "invalid_reply_request" }, { status: 400 });
@@ -196,7 +201,13 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
   const policyJson = env.MAILDESK_POLICY_JSON ?? (await loadPolicyFromR2(env));
   if (!policyJson) return null;
-  return JSON.parse(policyJson) as RouterPolicy;
+  // Malformed policy JSON must not 500; return null so callers emit a clean
+  // 503 policy_unavailable (mirrors the router's fail-closed handling).
+  try {
+    return JSON.parse(policyJson) as RouterPolicy;
+  } catch {
+    return null;
+  }
 }
 
 async function loadPolicyFromR2(env: Env): Promise<string | null> {

@@ -17,6 +17,8 @@ interface RoleAlias {
   operators: string[];
   reply_identity: string;
   allowed_reply_identities: string[];
+  /** When true, mail is archived but never forwarded (e.g. dmarc@ reports). */
+  sink?: boolean;
 }
 
 interface PersonalAlias {
@@ -70,7 +72,7 @@ interface ProofEvidence {
   detail?: string;
   alias?: string;
   envelope_to?: string;
-  route_kind?: "role_alias" | "personal_alias";
+  route_kind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
   forwarded_to?: string[];
   forward_errors?: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
@@ -458,6 +460,9 @@ function checkInboundProof(
   const roleAlias = policyDomain.role_aliases[mailbox.localPart];
   const requireRawR2Key = (desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing") === "cloudflare_email_routing";
   if (roleAlias) {
+    if (roleAlias.sink) {
+      return proofMatchesSink(proof, requireRawR2Key);
+    }
     return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, requireRawR2Key);
   }
 
@@ -488,6 +493,18 @@ function proofMatchesRoute(
   const actualRecipients = proof.forwarded_to.map(normalizeMailbox);
   const expectedRecipients = expectedOperators.map(normalizeMailbox);
   return expectedRecipients.every((recipient) => actualRecipients.includes(recipient)) ? "ok" : "drift";
+}
+
+function proofMatchesSink(proof: ProofEvidence, requireRawR2Key: boolean): Status {
+  // A sink alias is accepted and archived but never forwarded. Expect
+  // route_kind "sink" (older rows may predate the field), an empty
+  // forwarded_to, no forward errors, and the raw archive present when inbound
+  // is Cloudflare-routed.
+  if (proof.route_kind && proof.route_kind !== "sink") return "drift";
+  if (proof.forward_errors && proof.forward_errors.length > 0) return "drift";
+  if (requireRawR2Key && !proof.raw_r2_key) return "drift";
+  if ((proof.forwarded_to ?? []).length > 0) return "drift";
+  return "ok";
 }
 
 function isOkProofStatus(status: string | undefined): boolean {
