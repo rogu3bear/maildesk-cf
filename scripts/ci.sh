@@ -28,6 +28,9 @@ bun run typecheck
 step "bun run test:workers"
 bun run test:workers
 
+step "bun run test:scripts"
+bun run test:scripts
+
 step "scripts/check-template.sh"
 bash scripts/check-template.sh
 

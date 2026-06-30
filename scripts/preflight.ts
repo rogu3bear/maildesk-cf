@@ -137,8 +137,13 @@ function checkOutboundEnv() {
 
   checkRequiredEnv("MAILDESK_VERIFIED_SENDER_DOMAINS");
   if (outboundMode === "resend") {
-    checkRequiredEnv("RESEND_API_KEY");
+    checkRequiredEnvAny(["RESEND_API_KEY", "RESEND"]);
   }
+}
+
+function checkRequiredEnvAny(names: string[]) {
+  if (names.some((name) => hasUsableEnv(name))) return;
+  failures.push(`missing environment variable: set one of ${names.join(", ")}`);
 }
 
 function checkWranglerPlaceholders() {
