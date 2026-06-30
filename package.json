@@ -9,6 +9,7 @@
     "preflight": "bun run scripts/preflight.ts",
     "preflight:template": "bun run scripts/preflight.ts --mode template",
     "preflight:production": "bun run scripts/preflight.ts --mode production",
+    "test:scripts": "bun test ./tests/scripts",
     "test:workers": "bun test ./tests/workers",
     "typecheck": "tsc --noEmit",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",

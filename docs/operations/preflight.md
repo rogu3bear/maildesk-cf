@@ -42,7 +42,7 @@ It verifies the template checks plus production-only requirements.
 | `MAILDESK_PROOF_API_TOKEN` | optional | secondary bearer token for receipt/proof runs without rotating the primary API token |
 | `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` |
 | `MAILDESK_VERIFIED_SENDER_DOMAINS` | required when outbound is enabled | comma-separated sender domains approved by provider readback |
-| `RESEND_API_KEY` | required for `resend` mode | Resend API key stored as a Worker secret |
+| `RESEND_API_KEY` or `RESEND` | required for `resend` mode | Resend API key; `RESEND_API_KEY` is the preferred Worker secret name and `RESEND` is accepted as a local compatibility alias |
 | `MAILDESK_PROJECT_NAME` | production | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
 
@@ -57,8 +57,9 @@ the public template and unacceptable before real provisioning.
 
 Outbound mode is deliberately explicit. `disabled` proves inbound and reply
 authorization without sending mail. `cloudflare_email_service` requires a
-Worker `send_email` binding named `EMAIL`, and `resend` requires a Worker
-secret named `RESEND_API_KEY`. Both enabled modes require
+Worker `send_email` binding named `EMAIL`, and `resend` requires a Resend API
+key from `RESEND_API_KEY` or the local compatibility alias `RESEND`. Both
+enabled modes require
 `MAILDESK_VERIFIED_SENDER_DOMAINS`; build it from provider readback, not from
 the local policy alone.
 
