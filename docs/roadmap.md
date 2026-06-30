@@ -25,7 +25,7 @@ complete elsewhere.
 - [x] Email Worker accepts Cloudflare email events into the edge job contract.
 - [x] Email Worker writes raw MIME to R2.
 - [x] Email Worker forwards accepted inbound mail to policy-selected operators.
-- [ ] Email Worker persists accepted inbound metadata in D1.
+- [x] Email Worker persists accepted inbound metadata in D1.
 - [x] API Worker exposes health and readiness endpoints.
 - [x] Queue consumer records job audit events.
 - [ ] Queue consumer parses MIME and records parse status.
