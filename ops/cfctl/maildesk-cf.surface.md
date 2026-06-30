@@ -1,16 +1,16 @@
-# maildesk-cf cfctl Surface Draft
+# maildesk-cf cfctl Surface
 
-This draft describes the desired `cfctl` extension surface for `maildesk-cf`.
+This document describes the `cfctl` extension surface for `maildesk-cf` and
+the remaining component surfaces that a production instance may need.
 
 ## Commands
 
 ```bash
 cfctl maildesk-cf init --domain example.com
-cfctl maildesk-cf diff --domain example.com
-cfctl maildesk-cf provision --plan
-cfctl maildesk-cf provision --ack-plan <operation-id>
-cfctl maildesk-cf verify --domain example.com
-cfctl maildesk-cf snapshot
+cfctl maildesk-cf verify --file config/desired-state.example.json
+cfctl maildesk-cf diff --file config/desired-state.example.json
+cfctl maildesk-cf provision --file config/desired-state.example.json --plan
+cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
 ```
 
 ## Inputs
@@ -75,6 +75,16 @@ shape.
 
 ## Rule
 
-Until this surface exists, agents must use existing `cfctl` primitive surfaces
-for DNS records, Worker scripts, Worker routes, D1, R2, Queues, secrets, and
-Email Routing rather than bypassing `cfctl`.
+Use `cfctl maildesk-cf` for lifecycle readback and planning. When the plan
+emits component operations, use the named primitive `cfctl` surface for the
+actual preview/ack flow rather than bypassing `cfctl`.
+
+Current component surfaces include Email Routing rules and Email Sending sender
+domains. Sender-domain authentication is previewed through:
+
+```bash
+cfctl apply sender_domain enable --zone example.com --name example.com --plan
+```
+
+Cloudflare writes still require a reviewed preview receipt and explicit
+`--ack-plan <operation-id>`.

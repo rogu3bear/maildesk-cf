@@ -83,7 +83,7 @@ Cloudflare account writes should still follow:
 
 ```bash
 cfctl doctor
-cfctl maildesk-cf provision --plan
-cfctl maildesk-cf provision --ack-plan <operation-id>
-cfctl maildesk-cf verify --domain example.com
+cfctl maildesk-cf provision --file config/desired-state.local.json --plan
+cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>
+cfctl maildesk-cf verify --file config/desired-state.local.json
 ```
