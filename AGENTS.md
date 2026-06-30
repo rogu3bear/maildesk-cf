@@ -69,6 +69,8 @@ Stop condition: <done/blocker>
 
 ## Cloudflare Control Plane
 
+Governance status: `cfctl-native`.
+
 `cfctl` is required. Account-level Cloudflare mutation must go through the
 operator's configured `cfctl` installation, not through raw dashboard steps,
 ad hoc API scripts, or unreviewed `wrangler` commands.
