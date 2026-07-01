@@ -40,6 +40,26 @@ The refresher executes only the `cfctl apply sender_domain enable ... --plan`
 commands already present in the proof plan, stores the preview receipts, and
 constructs protected `--ack-plan` commands for review.
 
+Dry-run the reviewed sender-domain apply handoff before any protected apply:
+
+```bash
+bun run apply:maildesk-acks -- \
+  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --json
+```
+
+Applying sender-domain ack commands is a protected action. It requires both
+`--execute` and `--confirm-ack-plan`, and it defaults to one apply at a time
+unless `--all` or a larger `--limit` is passed:
+
+```bash
+bun run apply:maildesk-acks -- \
+  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --execute \
+  --confirm-ack-plan \
+  --limit 1
+```
+
 For template-only or offline receipt checks, skip live collection:
 
 ```bash

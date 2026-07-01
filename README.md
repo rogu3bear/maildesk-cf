@@ -115,6 +115,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-rece
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
+bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
 bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
 bash scripts/check-template.sh
@@ -137,6 +138,9 @@ available readbacks without mutating Cloudflare.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
+`bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by
+default and requires `--execute --confirm-ack-plan` before it applies any
+`cfctl --ack-plan` operation.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
 requires `--execute` before it sends mail.
 
