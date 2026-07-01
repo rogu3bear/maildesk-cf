@@ -29,6 +29,7 @@ interface PersonalAlias {
 interface DesiredState {
   domains: DesiredDomain[];
   sender?: {
+    mode?: string;
     authenticated_domains?: string[];
   };
 }
@@ -55,6 +56,7 @@ interface LiveEvidence {
   sender_domains?: Record<string, string> | string[];
   inbound_proofs?: Record<string, ProofEvidence>;
   outbound_proofs?: Record<string, ProofEvidence>;
+  cfctl_maildesk?: CfctlMaildeskEvidence;
 }
 
 interface D1Evidence {
@@ -82,6 +84,21 @@ interface ProofEvidence {
   provider?: string;
   external_receipt_path?: string;
   provider_message_id?: string;
+}
+
+interface CfctlMaildeskEvidence {
+  edge_ready?: boolean;
+  mail_ready?: boolean;
+  domains?: Record<string, CfctlMaildeskDomainEvidence>;
+  workers?: Record<string, Status>;
+  storage?: Record<string, Status>;
+  sender_domains?: Record<string, Status>;
+}
+
+interface CfctlMaildeskDomainEvidence {
+  email_routing?: Status;
+  aliases?: Record<string, Status>;
+  dns_authentication?: Record<string, Status>;
 }
 
 interface DomainRow {
@@ -117,7 +134,7 @@ interface RouteSummary {
 
 interface SenderSummary {
   authenticated: boolean;
-  provider: "resend";
+  provider: string;
   provider_status: string | null;
 }
 
@@ -279,7 +296,9 @@ function buildRows(
   return domainNames.map((domainName) => {
     const policyDomain = policyFile.domains[domainName];
     const desiredDomain = desiredByDomain.get(domainName);
-    const routingEvidence = live.email_routing?.[domainName];
+    const routingEvidence =
+      live.email_routing?.[domainName] ??
+      routingEvidenceFromCfctl(domainName, desiredDomain, live.cfctl_maildesk?.domains?.[domainName]);
 
     return {
       domain: domainName,
@@ -291,11 +310,11 @@ function buildRows(
       inbound_mx_provider: inboundMxProvider(live.dns_mx?.[domainName]),
       evidence: evidenceSummary(live.inbound_proofs?.[domainName], live.outbound_proofs?.[domainName]),
       policy_desired: comparePolicyAndDesired(policyDomain, desiredDomain),
-      zone_held: checkIncludes(live.zones, domainName),
+      zone_held: checkZone(live, domainName),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
-      inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain),
-      r2_policy: live.r2_policy_sha256 ? (live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift") : "not_checked",
+      inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
+      r2_policy: checkR2Policy(live, localPolicySha256),
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
       inbound_proof: checkInboundProof(domainName, policyDomain, desiredDomain, live.inbound_proofs?.[domainName]),
@@ -378,18 +397,51 @@ function checkIncludes(values: string[] | undefined, expected: string): Status {
   return values.includes(expected) ? "ok" : "missing";
 }
 
+function checkZone(live: LiveEvidence, domainName: string): Status {
+  const zone = checkIncludes(live.zones, domainName);
+  if (zone === "ok") return "ok";
+  const cfctlDomain = live.cfctl_maildesk?.domains?.[domainName];
+  if (cfctlDomain?.email_routing === "ok") return "ok";
+  return zone;
+}
+
 function checkRouting(actual: string[] | undefined, expected: string[] | undefined): Status {
   if (!expected) return "missing";
   if (!actual) return "not_checked";
   return expected.every((alias) => actual.includes(alias)) ? "ok" : "missing";
 }
 
-function checkInboundMx(actual: string[] | undefined, desiredDomain: DesiredDomain | undefined): Status {
-  if (!actual) return "not_checked";
+function routingEvidenceFromCfctl(
+  domainName: string,
+  desiredDomain: DesiredDomain | undefined,
+  cfctlDomain: CfctlMaildeskDomainEvidence | undefined,
+): RoutingEvidence | undefined {
+  if (!desiredDomain || !cfctlDomain?.aliases) return undefined;
+  const okAlias = (alias: string) => cfctlDomain.aliases?.[`${alias}@${domainName}`] === "ok";
+  return {
+    role_aliases: desiredDomain.role_aliases.filter(okAlias),
+    personal_aliases: desiredDomain.personal_aliases.filter(okAlias),
+  };
+}
+
+function checkInboundMx(
+  actual: string[] | undefined,
+  desiredDomain: DesiredDomain | undefined,
+  cfctlDomain: CfctlMaildeskDomainEvidence | undefined,
+): Status {
   const expectedProvider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
+  if (!actual && expectedProvider === "cloudflare_email_routing" && cfctlDomain?.email_routing === "ok") return "ok";
+  if (!actual) return "not_checked";
   const actualProvider = inboundMxProvider(actual);
   if (expectedProvider === "external") return actualProvider === "mixed_or_external" ? "ok" : "drift";
   return actualProvider === expectedProvider ? "ok" : "drift";
+}
+
+function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
+  if (live.r2_policy_sha256) {
+    return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
+  }
+  return live.cfctl_maildesk?.storage?.r2_raw_mail_bucket === "ok" ? "ok" : "not_checked";
 }
 
 function cloudflareEmailRoutingMx(): string[] {
@@ -415,14 +467,28 @@ function inboundMxProvider(actual: string[] | undefined): string | null {
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) return "not_checked";
+  if (!live.readyz?.checks) {
+    const workers = live.cfctl_maildesk?.workers;
+    const storage = live.cfctl_maildesk?.storage;
+    return workers?.mail_api === "ok" &&
+      workers.mail_router === "ok" &&
+      storage?.d1_database === "ok" &&
+      storage.r2_raw_mail_bucket === "ok" &&
+      storage.queue === "ok"
+      ? "ok"
+      : "not_checked";
+  }
   return requiredReadyzChecks(live, ["db_binding", "raw_mail_binding", "mail_jobs_binding", "policy_config"])
     ? "ok"
     : "drift";
 }
 
 function checkD1Queue(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) return "not_checked";
+  if (!live.readyz?.checks) {
+    return live.cfctl_maildesk?.storage?.d1_database === "ok" && live.cfctl_maildesk?.storage?.queue === "ok"
+      ? "ok"
+      : "not_checked";
+  }
   if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding"])) return "drift";
   if (!live.d1) return "ok";
   if (!live.d1.tables) return "drift";
@@ -514,12 +580,19 @@ function isOkProofStatus(status: string | undefined): boolean {
 function checkSender(domainName: string, desired: DesiredState, live: LiveEvidence): Status {
   const desiredAuthenticated = desired.sender?.authenticated_domains?.includes(domainName) ?? false;
   if (!desiredAuthenticated) return "missing";
+  const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
+  if (cfctlStatus) return senderStatus(cfctlStatus);
+  if (desired.sender?.mode === "cloudflare_first" && live.cfctl_maildesk?.sender_domains) return "missing";
   if (!live.sender_domains) return "not_checked";
   if (Array.isArray(live.sender_domains)) {
     return live.sender_domains.includes(domainName) ? "ok" : "missing";
   }
   const status = live.sender_domains[domainName];
   return status === "verified" || status === "ok" ? "ok" : status ? "drift" : "missing";
+}
+
+function senderStatus(status: Status): Status {
+  return status === "ok" ? "ok" : status === "missing" ? "missing" : "drift";
 }
 
 function checkOutboundProof(domainName: string, proof: ProofEvidence | undefined): Status {
@@ -570,12 +643,14 @@ function domainRoutes(
 function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
   return {
     authenticated: desired.sender?.authenticated_domains?.includes(domainName) ?? false,
-    provider: "resend",
+    provider: desired.sender?.mode ?? "resend",
     provider_status: senderProviderStatus(domainName, live),
   };
 }
 
 function senderProviderStatus(domainName: string, live: LiveEvidence): string | null {
+  const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
+  if (cfctlStatus) return cfctlStatus;
   if (!live.sender_domains) return null;
   if (Array.isArray(live.sender_domains)) {
     return live.sender_domains.includes(domainName) ? "listed" : null;

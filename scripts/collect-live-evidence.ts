@@ -29,6 +29,24 @@ interface Evidence {
   sender_domains?: Record<string, string>;
   inbound_proofs?: Record<string, InboundProof>;
   outbound_proofs?: Record<string, OutboundProof>;
+  cfctl_maildesk?: CfctlMaildeskEvidence;
+}
+
+type Status = "ok" | "drift" | "missing" | "not_checked";
+
+interface CfctlMaildeskEvidence {
+  edge_ready?: boolean;
+  mail_ready?: boolean;
+  domains?: Record<string, CfctlMaildeskDomainEvidence>;
+  workers?: Record<string, Status>;
+  storage?: Record<string, Status>;
+  sender_domains?: Record<string, Status>;
+}
+
+interface CfctlMaildeskDomainEvidence {
+  email_routing?: Status;
+  aliases?: Record<string, Status>;
+  dns_authentication?: Record<string, Status>;
 }
 
 interface InboundProof {
@@ -69,9 +87,18 @@ const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
 
+const cfctlMaildesk = collectCfctlMaildeskEvidence();
+if (cfctlMaildesk) {
+  evidence.cfctl_maildesk = cfctlMaildesk.evidence;
+  mergeCfctlMaildeskArtifacts(cfctlMaildesk.raw);
+}
+
 const zones = cfctlJson(["list", "zone", "--json"]);
 if (zones.ok && Array.isArray(zones.value.result)) {
-  evidence.zones = zones.value.result.map((zone: { name?: string }) => zone.name).filter(Boolean).sort();
+  evidence.zones = unique([
+    ...(evidence.zones ?? []),
+    ...zones.value.result.map((zone: { name?: string }) => zone.name).filter(Boolean),
+  ]).sort();
 }
 
 const routing: Evidence["email_routing"] = {};
@@ -102,10 +129,10 @@ for (const domain of desiredState.domains.map((entry) => entry.name).sort()) {
   }
 }
 if (Object.keys(routing).length > 0) {
-  evidence.email_routing = routing;
+  evidence.email_routing = { ...(evidence.email_routing ?? {}), ...routing };
 }
 if (Object.keys(dnsMx).length > 0) {
-  evidence.dns_mx = dnsMx;
+  evidence.dns_mx = { ...(evidence.dns_mx ?? {}), ...dnsMx };
 }
 
 if (r2PolicyPath) {
@@ -180,6 +207,131 @@ function cfctlJson(cfctlArgs: string[]): { ok: true; value: any } | { ok: false 
   } catch {
     return { ok: false };
   }
+}
+
+function collectCfctlMaildeskEvidence():
+  | { evidence: CfctlMaildeskEvidence; raw: CfctlMaildeskVerifyResponse }
+  | null {
+  const result = cfctlJson(["maildesk-cf", "verify", "--file", desiredStatePath]);
+  if (!result.ok || !result.value?.ok) return null;
+
+  const raw = result.value as CfctlMaildeskVerifyResponse;
+  const checks = raw.result?.checks;
+  const evidence: CfctlMaildeskEvidence = {
+    edge_ready: Boolean(raw.result?.readiness?.edge_ready ?? raw.summary?.edge_ready),
+    mail_ready: Boolean(raw.result?.readiness?.mail_ready ?? raw.summary?.mail_ready),
+  };
+
+  if (checks?.domains) {
+    evidence.domains = Object.fromEntries(
+      Object.entries(checks.domains).map(([domain, domainChecks]) => [
+        domain,
+        {
+          email_routing: statusFromCheck(domainChecks.email_routing),
+          aliases: Object.fromEntries(
+            Object.entries(domainChecks.aliases ?? {}).map(([mailbox, check]) => [
+              mailbox,
+              statusFromCheck(check),
+            ]),
+          ),
+          dns_authentication: Object.fromEntries(
+            Object.entries(domainChecks.dns_authentication ?? {}).map(([name, check]) => [
+              name,
+              statusFromCheck(check),
+            ]),
+          ),
+        },
+      ]),
+    );
+  }
+  if (checks?.workers) {
+    evidence.workers = Object.fromEntries(
+      Object.entries(checks.workers).map(([name, check]) => [name, statusFromCheck(check)]),
+    );
+  }
+  if (checks?.storage) {
+    evidence.storage = Object.fromEntries(
+      Object.entries(checks.storage).map(([name, check]) => [name, statusFromCheck(check)]),
+    );
+  }
+  if (checks?.sender) {
+    evidence.sender_domains = Object.fromEntries(
+      Object.entries(checks.sender)
+        .filter(([domain]) => domain !== "mode")
+        .map(([domain, check]) => [domain, statusFromCheck(check)]),
+    );
+  }
+
+  return { evidence, raw };
+}
+
+function mergeCfctlMaildeskArtifacts(raw: CfctlMaildeskVerifyResponse) {
+  const domainEvidence = raw.result?.evidence?.domains;
+  if (!domainEvidence) return;
+
+  const artifactZones: string[] = [];
+  const routing: Evidence["email_routing"] = {};
+  const dnsMx: Evidence["dns_mx"] = {};
+
+  for (const [domain, surfaces] of Object.entries(domainEvidence)) {
+    artifactZones.push(domain);
+
+    const routingArtifact = readArtifact(surfaces["email.routing_rule"]?.artifact_path);
+    if (Array.isArray(routingArtifact?.result)) {
+      const aliases = routingArtifact.result
+        .filter((rule: RoutingRule) => rule.enabled !== false && routesToMaildesk(rule, routerService))
+        .map((rule: RoutingRule) => localPart(rule.recipient ?? matcherValue(rule)))
+        .filter(Boolean)
+        .sort();
+      if (aliases.length > 0) {
+        routing[domain] = {
+          role_aliases: unique(aliases),
+          personal_aliases: unique(aliases),
+        };
+      }
+    }
+
+    const dnsArtifact = readArtifact(surfaces["dns.record"]?.artifact_path);
+    if (Array.isArray(dnsArtifact?.result)) {
+      const mxRecords = dnsArtifact.result
+        .filter((record: DnsRecord) => record.type === "MX" && normalizeName(record.name) === domain)
+        .map((record: DnsRecord) => record.content)
+        .filter((content): content is string => typeof content === "string")
+        .sort();
+      if (mxRecords.length > 0) dnsMx[domain] = mxRecords;
+    }
+  }
+
+  if (artifactZones.length > 0) {
+    evidence.zones = unique([...(evidence.zones ?? []), ...artifactZones]).sort();
+  }
+  if (Object.keys(routing).length > 0) {
+    evidence.email_routing = { ...(evidence.email_routing ?? {}), ...routing };
+  }
+  if (Object.keys(dnsMx).length > 0) {
+    evidence.dns_mx = { ...(evidence.dns_mx ?? {}), ...dnsMx };
+  }
+}
+
+function readArtifact(path: string | undefined): { result?: unknown } | null {
+  if (!path || !existsSync(path)) return null;
+  return parseJson<{ result?: unknown }>(readFileSync(path, "utf8"));
+}
+
+function statusFromCheck(check: unknown): Status {
+  if (!check) return "missing";
+  if (typeof check === "string") return statusValue(check);
+  if (typeof check !== "object") return "not_checked";
+
+  const value = check as { ok?: unknown; status?: unknown };
+  if (typeof value.status === "string") return statusValue(value.status);
+  return value.ok === true ? "ok" : value.ok === false ? "drift" : "not_checked";
+}
+
+function statusValue(value: string): Status {
+  return value === "ok" || value === "drift" || value === "missing" || value === "not_checked"
+    ? value
+    : "drift";
 }
 
 function fetchJson(fetchArgs: string[]): { ok: true; value: unknown } | { ok: false } {
@@ -433,5 +585,41 @@ interface OutboundAuditDetail {
   result?: {
     provider?: string;
     id?: string;
+  };
+}
+
+interface CfctlMaildeskVerifyResponse {
+  ok?: boolean;
+  summary?: {
+    edge_ready?: boolean;
+    mail_ready?: boolean;
+  };
+  result?: {
+    readiness?: {
+      edge_ready?: boolean;
+      mail_ready?: boolean;
+    };
+    checks?: {
+      domains?: Record<
+        string,
+        {
+          aliases?: Record<string, unknown>;
+          dns_authentication?: Record<string, unknown>;
+          email_routing?: unknown;
+        }
+      >;
+      sender?: Record<string, unknown>;
+      storage?: Record<string, unknown>;
+      workers?: Record<string, unknown>;
+    };
+    evidence?: {
+      domains?: Record<
+        string,
+        {
+          "dns.record"?: { artifact_path?: string };
+          "email.routing_rule"?: { artifact_path?: string };
+        }
+      >;
+    };
   };
 }
