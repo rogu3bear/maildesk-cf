@@ -9,7 +9,7 @@ logging, and keep live mutation behind explicit operator action.
 | `scripts/check-template.sh` | gated | Public template hygiene check. Verifies required files, reserved examples, router tests, policy fixture, typecheck, preflight, and verifier. |
 | `scripts/preflight.ts` | gated | Template and production input validation. Production mode must fail on missing Cloudflare/cfctl inputs or placeholder resource IDs. |
 | `scripts/verify-maildesk.ts` | gated | Non-mutating readiness verifier for policy, desired state, and optional live evidence. |
-| `scripts/receipt-maildesk.ts` | operator-receipt | Runs non-mutating collection, verification, and proof planning into ignored receipt artifacts. |
+| `scripts/receipt-maildesk.ts` | operator-receipt | Runs non-mutating collection, verification, and proof planning into ignored receipt artifacts. Can require sender-domain ack readiness from a reviewed manifest without applying it. |
 | `scripts/collect-live-evidence.ts` | operator-readback | Reads available Cloudflare/cfctl state into ignored evidence files. Must not mutate account state. |
 | `scripts/plan-mail-proofs.ts` | operator-planning | Converts verifier gaps into targeted proof steps. Does not send mail or mutate Cloudflare. |
 | `scripts/send-mail-probes.ts` | protected-probe | Dry-runs targeted probes by default. Requires explicit `--execute` before sending mail. |
