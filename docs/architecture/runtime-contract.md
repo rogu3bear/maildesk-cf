@@ -81,7 +81,7 @@ binding limits.
 7. Queue jobs parse MIME and notify operators.
 8. Operator opens a thread in the UI.
 9. API Worker asks the router to authorize the reply identity.
-10. Outbound job sends through the configured Cloudflare-first sender path.
+10. Outbound job sends through the configured sender mode.
 11. Audit events record the send request, provider result, and final status.
 
 ## Failure Policy

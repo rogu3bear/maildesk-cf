@@ -9,6 +9,7 @@
     "preflight": "bun run scripts/preflight.ts",
     "preflight:template": "bun run scripts/preflight.ts --mode template",
     "preflight:production": "bun run scripts/preflight.ts --mode production",
+    "check:cfctl-provisioning": "bun run scripts/check-cfctl-provisioning.ts",
     "check:maildesk-closeout": "bun run scripts/check-maildesk-closeout.ts",
     "apply:maildesk-acks": "bun run scripts/apply-sender-domain-ack-manifest.ts",
     "test:scripts": "bun test ./tests/scripts",

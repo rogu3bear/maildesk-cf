@@ -31,8 +31,9 @@ complete elsewhere.
 - [ ] Queue consumer parses MIME and records parse status.
 - [ ] API Worker exposes authenticated thread and identity endpoints.
 - [x] API Worker exposes a token-gated reply queue endpoint.
-- [ ] `cfctl` can provision required D1, R2, Queue, Worker, DNS, and Email
-      Routing resources.
+- [x] Public `cfctl maildesk-cf` provisioning lane has a desired-state schema,
+      template fixture, local proof hook, and plan/ack/verify handoff for D1,
+      R2, Queue, Worker, DNS, and Email Routing resources.
 
 ## Milestone 2: Operator Desk
 
@@ -65,12 +66,17 @@ preview-gated through `cfctl`.
 
 Required surfaces:
 
-- desired-state schema for domains, aliases, operators, identities, bindings,
-  and sender mode;
-- plan/apply/verify lifecycle;
-- DNS, Email Routing, and sender-domain readback;
-- D1, R2, Queue, Worker, and secret provisioning;
-- verification receipt that avoids broad live sends.
+- checked in this repo: desired-state schema for domains, aliases, Worker
+  bindings, storage bindings, sender mode, and verification posture;
+- checked in this repo: non-mutating local proof hook that emits the
+  `cfctl maildesk-cf` plan/ack/verify handoff;
+- blocked outside this checkout: installed `cfctl` with the `maildesk-cf`
+  lifecycle surface, a healthy `cfctl doctor` lane, real account/domain desired
+  state, reviewed preview operation id, and post-mutation live readback;
+- still owned by `cfctl`: plan/apply/verify lifecycle, DNS, Email Routing,
+  sender-domain readback, D1, R2, Queue, Worker, and secret provisioning;
+- still required for production closeout: verification receipt that avoids
+  broad live sends.
 
 ### leptos-cf
 

@@ -34,11 +34,16 @@ The router should pass tests before edge adapters are connected.
 Use `cfctl` for Cloudflare account resources:
 
 ```bash
+bun run check:cfctl-provisioning
 cfctl doctor
 cfctl maildesk-cf provision --file config/desired-state.example.json --plan
 cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
 cfctl maildesk-cf verify --file config/desired-state.example.json
 ```
+
+`bun run check:cfctl-provisioning` is local and non-mutating. It proves the
+desired-state file is a valid input to the `cfctl maildesk-cf` lifecycle before
+any live account planning.
 
 Review the provision plan before acknowledging it. If the plan emits component
 commands for DNS, Email Routing, sender domains, Worker scripts, D1, R2,

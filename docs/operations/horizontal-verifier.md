@@ -25,8 +25,10 @@ bun run receipt:maildesk -- \
   --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json
 ```
 
-That remains a no-mutation workflow. It fails the receipt only when
-sender-domain blockers are missing exact ack commands.
+That remains a no-mutation workflow. It fails the receipt only when Cloudflare
+Email Service sender-domain blockers are missing exact ack commands. Resend
+sender-domain blockers are provider-readback blockers and do not have
+`cfctl --ack-plan` commands.
 
 Run the closeout gate when the next question is whether the instance can be
 called done:
@@ -60,13 +62,13 @@ redacted output does not include domains, addresses, operation IDs, or
 `cfctl --ack-plan` commands.
 
 The closeout JSON also includes `protected_command_handoff`, a sanitized set of
-argv arrays for the next protected command. Sender-domain commands call
-`apply:maildesk-acks` with the reviewed manifest and default to `--limit 1`.
-Probe commands call `send:maildesk-probes` with placeholder values such as
-`<verified-sender>`, `<maildesk-api-url>`, `<reply-api-token>`, and
-`<proof-recipient>` that must be replaced before any live send. The handoff
-does not include domains, addresses, operation IDs, tokens, or raw
-`cfctl --ack-plan` commands.
+argv arrays for the next protected command. Cloudflare sender-domain commands
+call `apply:maildesk-acks` with the reviewed manifest and default to
+`--limit 1`. Probe commands call `send:maildesk-probes` with placeholder values
+such as `<probe-provider>`, `<verified-sender>`, `<maildesk-api-url>`,
+`<reply-api-token>`, and `<proof-recipient>` that must be replaced before any
+live send. The handoff does not include domains, addresses, operation IDs,
+tokens, or raw `cfctl --ack-plan` commands.
 
 Use `--purge-duplicate-previews` when `--refresh-acks` has been run repeatedly.
 The cleanup is local `cfctl` preview-ledger hygiene: it removes duplicate active
@@ -90,9 +92,11 @@ bun run refresh:maildesk-acks -- \
   --out var/proof/maildesk-sender-domain-ack-manifest.local.json
 ```
 
-The refresher executes only the `cfctl apply sender_domain enable ... --plan`
-commands already present in the proof plan, stores the preview receipts, and
-constructs protected `--ack-plan` commands for review.
+The refresher executes only the Cloudflare
+`cfctl apply sender_domain enable ... --plan` commands already present in the
+proof plan, stores the preview receipts, and constructs protected `--ack-plan`
+commands for review. A Resend sender-domain blocker will not appear in this
+manifest; repair it in Resend and recollect provider readback instead.
 
 Dry-run the reviewed sender-domain apply handoff before any protected apply:
 
@@ -157,10 +161,13 @@ MAILDESK_READYZ_URL=https://maildesk.example.workers.dev/readyz \
 bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 ```
 
-The collector reads Cloudflare state through `cfctl`, sender domains through the
-Resend CLI when available, `/readyz` when `MAILDESK_READYZ_URL` is set, and D1
-schema/audit counts through Wrangler when a D1 database is configured. It does
-not send mail and does not mutate Cloudflare.
+The collector reads Cloudflare state through `cfctl`, `/readyz` when
+`MAILDESK_READYZ_URL` is set, and D1 schema/audit counts through Wrangler when
+a D1 database is configured. Sender-domain readback follows desired-state
+`sender.mode`: `cloudflare_email_service` uses the `cfctl maildesk-cf verify`
+sender evidence, `resend` uses the Resend CLI when available, and `disabled`
+skips outbound sender-provider readback. It does not send mail and does not
+mutate Cloudflare.
 
 Plan the remaining proof work from a receipt:
 
@@ -180,10 +187,13 @@ Dry-run the first targeted inbound probe from a plan:
 bun run send:maildesk-probes -- --from proof@example.com --json
 ```
 
-Send only when the sender identity is verified and the target set is intentional:
+Dry-run mode is local and does not require Resend. Send only when the sender
+identity is verified, the transport is explicit, and the target set is
+intentional:
 
 ```bash
 bun run send:maildesk-probes -- \
+  --inbound-provider resend \
   --execute \
   --confirm-live-send \
   --from proof@example.com \
@@ -269,18 +279,25 @@ readiness and any non-`ok` live status should fail the command.
 
 `edge_ready` covers Cloudflare-held zones, Email Routing aliases, root-domain MX
 readiness for Cloudflare Email Routing, R2 policy, Worker bindings, and D1/Queue
-reachability. `mail_ready` is stricter: it also requires inbound proof, outbound
-sender readiness, and outbound reply audit proof.
+reachability. `mail_ready` is stricter: it also requires inbound proof and the
+outbound proof required by the selected sender mode. In `disabled` mode,
+outbound sender readiness and outbound reply proof are considered intentionally
+satisfied by the disabled contract. In enabled modes, sender readiness must come
+from the active provider and outbound reply proof must match that provider when
+the proof records a provider name.
 
 `bun run plan:maildesk-proofs` turns `mail_ready` gaps into the next safe
-operator action. Sender-domain readiness gaps remain blocked actions because
-they require Cloudflare mutation, but the JSON plan includes the `cfctl`
-preview command, protected `--ack-plan` command template, and follow-up verify
-command so a reviewed handoff can stay inside the control-plane flow.
+operator action. Cloudflare Email Service sender-domain readiness gaps remain
+blocked actions because they require Cloudflare mutation, and the JSON plan
+includes the `cfctl` preview command, protected `--ack-plan` command template,
+and follow-up verify command so a reviewed handoff can stay inside the
+control-plane flow. Resend sender-domain readiness gaps remain blocked until
+Resend readback reports the domain as verified; they do not create Cloudflare
+ack commands. `disabled` mode does not create sender-domain repair work.
 When a reviewed preview receipt has already been built, pass it with
-`--ack-manifest <path>` to copy exact, unexpired sender-domain `ack_command`
-values into the proof plan without applying them.
-Add `--require-ack-ready` when the handoff should fail unless every
+`--ack-manifest <path>` to copy exact, unexpired Cloudflare sender-domain
+`ack_command` values into the proof plan without applying them.
+Add `--require-ack-ready` when the handoff should fail unless every Cloudflare
 sender-domain blocker has an exact operation id and ack command.
 
 Email Routing evidence may include more rules than the policy requires. The
@@ -345,7 +362,7 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
     "example.com": {
       "status": "delivered",
       "from_identity": "founders@example.com",
-      "provider": "resend",
+      "provider": "cloudflare_email_service",
       "provider_message_id": "provider-message-id",
       "audit_event_at": "2026-05-20T00:00:00Z"
     }
@@ -361,9 +378,10 @@ D1 proof is stricter when present. `/readyz` proves the binding can query; the
 optional `d1.tables` readback proves the audit schema actually exists. When
 `d1` evidence is supplied, the verifier requires the core audit/routing tables.
 
-Outbound proof is separate from sender-domain readiness. `sender_domains` proves
-the provider can send for the domain; `outbound_proofs` proves an actual
-authorized reply path produced audit evidence.
+Outbound proof is separate from sender-domain readiness. In enabled modes,
+`sender_domains` proves the active provider can send for the domain;
+`outbound_proofs` proves an actual authorized reply path produced audit
+evidence. In `disabled` mode those outbound checks are intentionally skipped.
 
 The verifier does not send mail and does not mutate Cloudflare. Broad live sends
 remain outside the default verification path.

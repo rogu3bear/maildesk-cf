@@ -362,6 +362,8 @@ function inboundProbeCommands(
     commandPath(proofPlanPath),
     "--kind",
     "inbound",
+    "--inbound-provider",
+    "<probe-provider>",
     "--from",
     "<verified-sender>",
   ];

@@ -63,15 +63,22 @@ sends.
 
 Runtime sender mode is selected with `MAILDESK_OUTBOUND_MODE`:
 
-- `disabled`: authorize and audit the request, but do not send.
+- `disabled`: authorize and audit the request, but do not send. This is the
+  public-template default and does not require sender-domain provider readback.
 - `cloudflare_email_service`: send through a Worker `send_email` binding named
-  `EMAIL`.
-- `resend`: send through Resend using the `RESEND_API_KEY` Worker secret.
+  `EMAIL`; sender-domain readiness comes from Cloudflare Email Service readback
+  through `cfctl`.
+- `resend`: send through Resend using the `RESEND_API_KEY` Worker secret;
+  sender-domain readiness comes from Resend provider readback.
 
 Enabled modes also require `MAILDESK_VERIFIED_SENDER_DOMAINS`, a
 comma-separated allowlist produced from provider readback. The router may allow
 an identity, but the sender adapter must still refuse domains that are not
 verified by the configured provider.
+
+`config/desired-state*.json` uses the same literal mode values as runtime:
+`disabled`, `cloudflare_email_service`, or `resend`. Production preflight must
+fail when desired state and `MAILDESK_OUTBOUND_MODE` disagree.
 
 ## Authorization Bar
 

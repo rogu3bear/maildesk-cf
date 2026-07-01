@@ -2,6 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
+import {
+  isSenderMode,
+  senderModeList,
+  senderModeNeedsProviderReadback,
+  senderModeOrDefault,
+  type SenderMode,
+} from "./sender-mode";
 
 type Mode = "template" | "production";
 
@@ -10,6 +17,10 @@ interface DesiredState {
     name?: unknown;
     account_id?: unknown;
     account_id_env?: unknown;
+  };
+  sender?: {
+    mode?: unknown;
+    authenticated_domains?: unknown;
   };
 }
 
@@ -44,6 +55,7 @@ const desiredStatePath =
     ? "config/desired-state.local.json"
     : "config/desired-state.example.json");
 const desiredState = checkJson<DesiredState>(desiredStatePath);
+checkDesiredSenderMode(desiredState);
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -60,7 +72,7 @@ if (mode === "production") {
   checkCloudflareAuthEnv(cfctlDoctor);
   checkProjectName(desiredState);
   checkRequiredEnvAny(["MAILDESK_API_TOKEN", "MAILDESK_PROOF_API_TOKEN"]);
-  checkOutboundEnv();
+  checkOutboundEnv(desiredState);
   checkWranglerPlaceholders();
 } else {
   checkTemplateExamples();
@@ -176,19 +188,42 @@ function checkCloudflareAuthEnv(cfctlDoctor: CfctlDoctorSummary | null) {
   );
 }
 
-function checkOutboundEnv() {
+function checkDesiredSenderMode(desiredState: DesiredState | null) {
+  const mode = desiredState?.sender?.mode;
+  if (mode === undefined) return;
+  if (!isSenderMode(mode)) {
+    failures.push(`desired-state sender.mode must be ${senderModeList()}`);
+  }
+  const authenticatedDomains = desiredState?.sender?.authenticated_domains;
+  if (authenticatedDomains !== undefined && !isStringArray(authenticatedDomains)) {
+    failures.push("desired-state sender.authenticated_domains must be an array of domains");
+  }
+}
+
+function desiredSenderMode(desiredState: DesiredState | null): SenderMode {
+  return senderModeOrDefault(desiredState?.sender?.mode);
+}
+
+function checkOutboundEnv(desiredState: DesiredState | null) {
   const outboundMode = process.env.MAILDESK_OUTBOUND_MODE?.trim() || "disabled";
-  const validModes = new Set(["disabled", "cloudflare_email_service", "resend"]);
-  if (!validModes.has(outboundMode)) {
-    failures.push(
-      "MAILDESK_OUTBOUND_MODE must be disabled, cloudflare_email_service, or resend",
-    );
+  if (!isSenderMode(outboundMode)) {
+    failures.push(`MAILDESK_OUTBOUND_MODE must be ${senderModeList()}`);
     return;
   }
 
-  if (outboundMode === "disabled") return;
+  const desiredMode = desiredSenderMode(desiredState);
+  if (outboundMode !== desiredMode) {
+    failures.push(
+      `MAILDESK_OUTBOUND_MODE (${outboundMode}) must match desired-state sender.mode (${desiredMode})`,
+    );
+  }
+
+  if (!senderModeNeedsProviderReadback(outboundMode)) return;
 
   checkRequiredEnv("MAILDESK_VERIFIED_SENDER_DOMAINS");
+  if (outboundMode === "cloudflare_email_service") {
+    checkSendEmailBinding();
+  }
   if (outboundMode === "resend") {
     checkRequiredEnvAny(["RESEND_API_KEY", "RESEND"]);
   }
@@ -205,6 +240,13 @@ function checkWranglerPlaceholders() {
     if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
       failures.push(`${file} still contains placeholder Cloudflare resource IDs`);
     }
+  }
+}
+
+function checkSendEmailBinding() {
+  const wrangler = readFileSync(resolve(root, "wrangler.toml"), "utf8");
+  if (!/^\s*send_email\s*=/m.test(wrangler) || !/\bname\s*=\s*"EMAIL"/.test(wrangler)) {
+    failures.push('cloudflare_email_service mode requires wrangler.toml send_email binding named "EMAIL"');
   }
 }
 
@@ -241,6 +283,10 @@ function stringValue(value: unknown): string | null {
 function isUsableValue(value: unknown): boolean {
   const text = stringValue(value);
   return Boolean(text && !text.startsWith("<") && !text.includes("replace-me"));
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
 interface CfctlDoctorSummary {
