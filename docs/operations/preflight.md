@@ -34,22 +34,33 @@ It verifies the template checks plus production-only requirements.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | production | Cloudflare account target for `cfctl` and Workers |
+| `CLOUDFLARE_ACCOUNT_ID` | production account option | Cloudflare account target for `cfctl` and Workers |
 | `CLOUDFLARE_API_TOKEN` | production auth option | scoped API token used by the control plane |
 | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
+| `CF_DEV_TOKEN` or `CF_GLOBAL_TOKEN` | production auth option | `cfctl` lane token used by cfctl-native setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
+| `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
 | `MAILDESK_API_TOKEN` | production | bearer token for the reply API |
 | `MAILDESK_PROOF_API_TOKEN` | optional | secondary bearer token for receipt/proof runs without rotating the primary API token |
 | `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` |
 | `MAILDESK_VERIFIED_SENDER_DOMAINS` | required when outbound is enabled | comma-separated sender domains approved by provider readback |
 | `RESEND_API_KEY` or `RESEND` | required for `resend` mode | Resend API key; `RESEND_API_KEY` is the preferred Worker secret name and `RESEND` is accepted as a local compatibility alias |
-| `MAILDESK_PROJECT_NAME` | production | de-templated project/resource prefix |
+| `MAILDESK_PROJECT_NAME` | production project option | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
 
-Production mode requires one Cloudflare auth option: either `CLOUDFLARE_API_TOKEN`
-or both `CLOUDFLARE_API_KEY` and `CLOUDFLARE_EMAIL`. Prefer scoped tokens for
-normal operation; the key/email path exists so `cfctl` can still run an
-explicitly selected global/emergency lane.
+Production mode requires one Cloudflare auth option: `CLOUDFLARE_API_TOKEN`,
+`CF_DEV_TOKEN`, `CF_GLOBAL_TOKEN`, or both `CLOUDFLARE_API_KEY` and
+`CLOUDFLARE_EMAIL`. In cfctl-native environments, a healthy `cfctl doctor`
+lane also satisfies the Cloudflare account/auth proof because the account
+selector and credential source live in the operator's `cfctl` configuration.
+Prefer scoped tokens for normal operation; the key/email path exists so
+`cfctl` can still run an explicitly selected global/emergency lane.
+
+Production mode also requires a project/resource prefix. Set
+`MAILDESK_PROJECT_NAME`, or put `project.name` in the selected desired-state
+file. The account target can come from `CLOUDFLARE_ACCOUNT_ID`, a literal
+`project.account_id` in ignored desired state, an env name referenced by
+`project.account_id_env`, or the healthy `cfctl doctor` lane described above.
 
 Production mode also fails if `wrangler.toml` still contains placeholder
 Cloudflare resource IDs. That is intentional. Placeholder IDs are acceptable in
