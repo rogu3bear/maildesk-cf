@@ -379,4 +379,91 @@ describe("mail proof planner", () => {
         "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name mail.tenant.example.com --ack-plan 20260701T000000Z-00000-subdomain",
     });
   });
+
+  test("require ack ready fails when sender-domain blockers lack exact ack commands", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-"));
+    const receiptPath = join(dir, "receipt.json");
+    const policyPath = join(dir, "policy.json");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify(
+        {
+          rows: [
+            {
+              domain: "tenant.example.com",
+              inbound_mx: "ok",
+              inbound_mx_provider: "cloudflare_email_routing",
+              inbound_proof: "ok",
+              outbound_sender: "missing",
+              outbound_proof: "not_checked",
+            },
+          ],
+          gaps: [
+            {
+              domain: "tenant.example.com",
+              field: "outbound_sender",
+              status: "missing",
+              readiness: "mail",
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(
+      policyPath,
+      `${JSON.stringify(
+        {
+          domains: {
+            "tenant.example.com": {
+              role_aliases: {
+                founders: {
+                  operators: ["operator@tenant.example.com"],
+                  reply_identity: "founders@tenant.example.com",
+                },
+              },
+              personal_aliases: {},
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/plan-mail-proofs.ts",
+        "--",
+        "--receipt",
+        receiptPath,
+        "--policy",
+        policyPath,
+        "--require-ack-ready",
+        "--json",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const plan = JSON.parse(result.stdout) as {
+      summary: {
+        sender_domain_blocked_count?: number;
+        sender_domain_ack_ready_count?: number;
+        sender_domain_ack_missing_count?: number;
+      };
+    };
+    expect(plan.summary).toMatchObject({
+      sender_domain_blocked_count: 1,
+      sender_domain_ack_ready_count: 0,
+      sender_domain_ack_missing_count: 1,
+    });
+    expect(result.stderr).toContain("sender-domain ack commands are not ready");
+  });
 });
