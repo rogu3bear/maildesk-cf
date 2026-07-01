@@ -112,7 +112,7 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     },
   ];
 
-  const outboundMode = env.MAILDESK_OUTBOUND_MODE ?? "disabled";
+  const outboundMode = (env.MAILDESK_OUTBOUND_MODE ?? "disabled") as string;
   if (outboundMode === "cloudflare_email_service") {
     checks.push({
       name: "outbound_sender",
@@ -125,11 +125,17 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
       ok: Boolean(env.RESEND_API_KEY),
       detail: "resend",
     });
-  } else {
+  } else if (outboundMode === "disabled") {
     checks.push({
       name: "outbound_sender",
       ok: true,
       detail: "disabled",
+    });
+  } else {
+    checks.push({
+      name: "outbound_sender",
+      ok: false,
+      detail: `invalid outbound mode: ${outboundMode}`,
     });
   }
 

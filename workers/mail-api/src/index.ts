@@ -286,9 +286,17 @@ async function sendOutboundReply(
   job: OutboundReplyRequestedJob,
   env: Env,
 ): Promise<OutboundSendResult> {
-  const mode = env.MAILDESK_OUTBOUND_MODE ?? "disabled";
-  const verifiedDomain = senderDomain(job.fromIdentity);
+  const mode = (env.MAILDESK_OUTBOUND_MODE ?? "disabled") as string;
 
+  if (mode === "disabled") {
+    return { ok: false, provider: mode, error: "outbound sending is disabled" };
+  }
+
+  if (mode !== "cloudflare_email_service" && mode !== "resend") {
+    return { ok: false, provider: mode, error: `invalid outbound mode: ${mode}` };
+  }
+
+  const verifiedDomain = senderDomain(job.fromIdentity);
   if (!isVerifiedSenderDomain(verifiedDomain, env)) {
     return { ok: false, provider: mode, error: `sender domain is not verified: ${verifiedDomain}` };
   }
@@ -324,7 +332,7 @@ async function sendOutboundReply(
     return sendWithResend(job, env.RESEND_API_KEY);
   }
 
-  return { ok: false, provider: mode, error: "outbound sending is disabled" };
+  return { ok: false, provider: mode, error: "invalid outbound mode" };
 }
 
 async function sendWithResend(
