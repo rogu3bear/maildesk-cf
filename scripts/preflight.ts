@@ -4,6 +4,14 @@ import { spawnSync } from "node:child_process";
 
 type Mode = "template" | "production";
 
+interface DesiredState {
+  project?: {
+    name?: unknown;
+    account_id?: unknown;
+    account_id_env?: unknown;
+  };
+}
+
 const root = resolve(import.meta.dir, "..");
 const args = new Set(process.argv.slice(2));
 const failures: string[] = [];
@@ -25,7 +33,13 @@ checkFile("wrangler.mail-router.toml");
 checkFile("config/policy.example.json");
 checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
-checkJson("config/desired-state.example.json");
+
+const desiredStatePath =
+  process.env.MAILDESK_DESIRED_STATE_PATH ??
+  (mode === "production" && existsSync(resolve(root, "config/desired-state.local.json"))
+    ? "config/desired-state.local.json"
+    : "config/desired-state.example.json");
+const desiredState = checkJson<DesiredState>(desiredStatePath);
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -37,9 +51,10 @@ checkFile(policyPath);
 checkPolicy(policyPath);
 
 if (mode === "production") {
-  checkRequiredEnv("CLOUDFLARE_ACCOUNT_ID");
-  checkCloudflareAuthEnv();
-  checkRequiredEnv("MAILDESK_PROJECT_NAME");
+  const cfctlDoctor = readCfctlDoctor();
+  checkCloudflareAccountTarget(desiredState, cfctlDoctor);
+  checkCloudflareAuthEnv(cfctlDoctor);
+  checkProjectName(desiredState);
   checkRequiredEnv("MAILDESK_API_TOKEN");
   checkOutboundEnv();
   checkWranglerPlaceholders();
@@ -94,11 +109,12 @@ function checkPolicy(path: string) {
   );
 }
 
-function checkJson(path: string) {
+function checkJson<T>(path: string): T | null {
   try {
-    JSON.parse(readFileSync(resolve(root, path), "utf8"));
+    return JSON.parse(readFileSync(resolve(root, path), "utf8")) as T;
   } catch (error) {
     failures.push(`invalid JSON in ${path}: ${errorDetail(error)}`);
+    return null;
   }
 }
 
@@ -114,12 +130,39 @@ function hasUsableEnv(name: string): boolean {
   return Boolean(value && !value.startsWith("<") && !value.includes("replace-me"));
 }
 
-function checkCloudflareAuthEnv() {
-  if (hasUsableEnv("CLOUDFLARE_API_TOKEN")) return;
-  if (hasUsableEnv("CLOUDFLARE_API_KEY") && hasUsableEnv("CLOUDFLARE_EMAIL")) return;
+function checkProjectName(desiredState: DesiredState | null) {
+  if (hasUsableEnv("MAILDESK_PROJECT_NAME")) return;
+  if (isUsableValue(desiredState?.project?.name)) return;
 
   failures.push(
-    "missing Cloudflare auth: set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY plus CLOUDFLARE_EMAIL",
+    "missing project name: set MAILDESK_PROJECT_NAME or project.name in desired state",
+  );
+}
+
+function checkCloudflareAccountTarget(
+  desiredState: DesiredState | null,
+  cfctlDoctor: CfctlDoctorSummary | null,
+) {
+  if (hasUsableEnv("CLOUDFLARE_ACCOUNT_ID")) return;
+  if (isUsableValue(desiredState?.project?.account_id)) return;
+
+  const accountIdEnv = stringValue(desiredState?.project?.account_id_env);
+  if (accountIdEnv && hasUsableEnv(accountIdEnv)) return;
+  if (cfctlDoctor?.healthy) return;
+
+  failures.push(
+    "missing Cloudflare account target: set CLOUDFLARE_ACCOUNT_ID, desired-state project.account_id, or provide a healthy cfctl doctor lane",
+  );
+}
+
+function checkCloudflareAuthEnv(cfctlDoctor: CfctlDoctorSummary | null) {
+  if (hasUsableEnv("CLOUDFLARE_API_TOKEN")) return;
+  if (hasUsableEnv("CLOUDFLARE_API_KEY") && hasUsableEnv("CLOUDFLARE_EMAIL")) return;
+  if (hasUsableEnv("CF_DEV_TOKEN") || hasUsableEnv("CF_GLOBAL_TOKEN")) return;
+  if (cfctlDoctor?.healthy) return;
+
+  failures.push(
+    "missing Cloudflare auth: set CLOUDFLARE_API_TOKEN, CLOUDFLARE_API_KEY plus CLOUDFLARE_EMAIL, CF_DEV_TOKEN, CF_GLOBAL_TOKEN, or provide a healthy cfctl doctor lane",
   );
 }
 
@@ -160,4 +203,52 @@ function checkTemplateExamples() {
   if (!policy.includes("example.com")) {
     failures.push("template policy must use reserved example domains");
   }
+}
+
+function readCfctlDoctor(): CfctlDoctorSummary | null {
+  const command = process.env.CFCTL_BIN ?? "cfctl";
+  const result = spawnSync(command, ["doctor"], { cwd: root, encoding: "utf8" });
+  if (result.status !== 0 || !result.stdout.trim()) return null;
+
+  try {
+    const parsed = JSON.parse(result.stdout) as CfctlDoctorResponse;
+    const healthyLaneCount =
+      parsed.summary?.healthy_lane_count ??
+      parsed.summary?.healthy_lanes?.length ??
+      parsed.result?.lanes?.summary?.healthy_lane_count ??
+      parsed.result?.lanes?.summary?.healthy_lanes?.length ??
+      0;
+    return { healthy: parsed.ok === true && healthyLaneCount > 0 };
+  } catch {
+    return null;
+  }
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value.trim() : null;
+}
+
+function isUsableValue(value: unknown): boolean {
+  const text = stringValue(value);
+  return Boolean(text && !text.startsWith("<") && !text.includes("replace-me"));
+}
+
+interface CfctlDoctorSummary {
+  healthy: boolean;
+}
+
+interface CfctlDoctorResponse {
+  ok?: boolean;
+  summary?: {
+    healthy_lane_count?: number;
+    healthy_lanes?: string[];
+  };
+  result?: {
+    lanes?: {
+      summary?: {
+        healthy_lane_count?: number;
+        healthy_lanes?: string[];
+      };
+    };
+  };
 }
