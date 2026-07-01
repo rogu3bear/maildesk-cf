@@ -153,7 +153,8 @@ plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 default and requires `--execute --confirm-ack-plan` before it applies any
 `cfctl --ack-plan` operation.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
-requires `--execute` before it sends mail.
+requires `--execute --confirm-live-send` before it sends mail or calls the
+reply API.
 
 ## De-Templating
 

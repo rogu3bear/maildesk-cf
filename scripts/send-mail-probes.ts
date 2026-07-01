@@ -48,6 +48,7 @@ type ProofAction =
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const execute = args.includes("--execute");
+const confirmLiveSend = args.includes("--confirm-live-send");
 const jsonOutput = args.includes("--json");
 const kind = argValue("--kind") ?? "inbound";
 const planPath = resolve(root, argValue("--plan") ?? "var/maildesk-proof-plan.json");
@@ -61,6 +62,10 @@ const limit = args.includes("--all") ? Number.POSITIVE_INFINITY : Number(argValu
 
 if (kind !== "inbound" && kind !== "outbound") {
   console.error("invalid --kind; expected inbound or outbound");
+  process.exit(1);
+}
+if (execute && !confirmLiveSend) {
+  console.error("missing --confirm-live-send for --execute");
   process.exit(1);
 }
 if (kind === "inbound" && !from) {
