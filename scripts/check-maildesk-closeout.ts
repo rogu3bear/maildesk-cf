@@ -1,0 +1,237 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+interface ReceiptSummary {
+  local_truth_ok?: boolean;
+  live_evidence_present?: boolean;
+  edge_ready?: boolean;
+  mail_ready?: boolean;
+  domain_count?: number;
+  gap_count?: number;
+  local_gap_count?: number;
+  edge_gap_count?: number;
+  mail_gap_count?: number;
+  proof_actions?: number;
+  targeted_inbound_probes?: number;
+  targeted_outbound_reply_probes?: number;
+  blocked_proofs?: number;
+  sender_domain_blocked_count?: number;
+  sender_domain_ack_ready_count?: number;
+  sender_domain_ack_missing_count?: number;
+}
+
+interface AckDryRunSummary {
+  mode?: string;
+  ready_count?: number;
+  applied_count?: number;
+  dry_run_count?: number;
+  results?: unknown[];
+}
+
+interface Blocker {
+  kind: string;
+  count?: number;
+  detail?: string;
+}
+
+const root = resolve(import.meta.dir, "..");
+const args = process.argv.slice(2).filter((arg) => arg !== "--");
+const jsonOutput = args.includes("--json");
+const summaryPath =
+  argValue("--summary") ?? "var/proof/maildesk-receipt-require-ack-ready-summary.local.json";
+const ackManifestPath =
+  argValue("--ack-manifest") ?? "var/proof/maildesk-sender-domain-ack-manifest.local.json";
+const skipAckDryRun = args.includes("--skip-ack-dry-run");
+const skipProductionPreflight = args.includes("--skip-production-preflight");
+
+const summary = readJson<ReceiptSummary>(summaryPath);
+const productionPreflight = skipProductionPreflight ? null : runProductionPreflight();
+const ackDryRun =
+  skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
+const blockers = buildBlockers(summary, productionPreflight, ackDryRun);
+const ready =
+  blockers.length === 0 &&
+  productionPreflight?.ok !== false &&
+  summary.local_truth_ok === true &&
+  summary.live_evidence_present === true &&
+  summary.edge_ready === true &&
+  summary.mail_ready === true;
+
+const closeout = {
+  ready,
+  summary_path: relativePath(resolve(root, summaryPath)),
+  ack_manifest_path:
+    skipAckDryRun || !existsSync(resolve(root, ackManifestPath))
+      ? null
+      : relativePath(resolve(root, ackManifestPath)),
+  production_preflight: productionPreflight,
+  receipt: {
+    local_truth_ok: summary.local_truth_ok === true,
+    live_evidence_present: summary.live_evidence_present === true,
+    edge_ready: summary.edge_ready === true,
+    mail_ready: summary.mail_ready === true,
+    domain_count: summary.domain_count ?? 0,
+    gap_count: summary.gap_count ?? 0,
+    local_gap_count: summary.local_gap_count ?? 0,
+    edge_gap_count: summary.edge_gap_count ?? 0,
+    mail_gap_count: summary.mail_gap_count ?? 0,
+  },
+  proof_plan: {
+    proof_actions: summary.proof_actions ?? 0,
+    targeted_inbound_probes: summary.targeted_inbound_probes ?? 0,
+    targeted_outbound_reply_probes: summary.targeted_outbound_reply_probes ?? 0,
+    blocked_proofs: summary.blocked_proofs ?? 0,
+    sender_domain_blocked_count: summary.sender_domain_blocked_count ?? 0,
+    sender_domain_ack_ready_count: summary.sender_domain_ack_ready_count ?? 0,
+    sender_domain_ack_missing_count: summary.sender_domain_ack_missing_count ?? 0,
+  },
+  ack_dry_run: ackDryRun,
+  blockers,
+};
+
+if (jsonOutput) {
+  console.log(JSON.stringify(closeout, null, 2));
+} else {
+  console.log(`ready ${closeout.ready}`);
+  console.log(`summary ${closeout.summary_path}`);
+  console.log(`production_preflight ${productionPreflight?.ok ?? "skipped"}`);
+  console.log(`local_truth_ok ${closeout.receipt.local_truth_ok}`);
+  console.log(`live_evidence_present ${closeout.receipt.live_evidence_present}`);
+  console.log(`edge_ready ${closeout.receipt.edge_ready}`);
+  console.log(`mail_ready ${closeout.receipt.mail_ready}`);
+  console.log(
+    `sender_domain_ack_dry_run ${ackDryRun?.dry_run_count ?? 0}/${ackDryRun?.ready_count ?? 0}`,
+  );
+  for (const blocker of blockers) {
+    console.log(
+      `blocker ${blocker.kind}${blocker.count === undefined ? "" : ` count=${blocker.count}`}${
+        blocker.detail ? ` detail=${blocker.detail}` : ""
+      }`,
+    );
+  }
+}
+
+if (!ready) {
+  process.exit(1);
+}
+
+function buildBlockers(
+  receipt: ReceiptSummary,
+  preflight: { ok: boolean; failures: string[] } | null,
+  ack: AckDryRunSummary | null,
+): Blocker[] {
+  const blockers: Blocker[] = [];
+
+  if (preflight?.ok === false) {
+    for (const failure of preflight.failures) {
+      blockers.push({ kind: "production_preflight", detail: failure });
+    }
+  }
+  if (receipt.local_truth_ok !== true) {
+    blockers.push({ kind: "local_truth", count: receipt.local_gap_count ?? receipt.gap_count ?? 0 });
+  }
+  if (receipt.live_evidence_present !== true) {
+    blockers.push({ kind: "live_evidence_missing" });
+  }
+  if (receipt.edge_ready !== true) {
+    blockers.push({ kind: "edge_ready_false", count: receipt.edge_gap_count ?? 0 });
+  }
+  if (receipt.mail_ready !== true) {
+    blockers.push({ kind: "mail_ready_false", count: receipt.mail_gap_count ?? receipt.gap_count ?? 0 });
+  }
+
+  const missingAcks = receipt.sender_domain_ack_missing_count ?? 0;
+  if (missingAcks > 0) {
+    blockers.push({ kind: "sender_domain_ack_missing", count: missingAcks });
+  }
+
+  const blockedSenderDomains = receipt.sender_domain_blocked_count ?? 0;
+  if (blockedSenderDomains > 0 && missingAcks === 0) {
+    blockers.push({ kind: "protected_sender_domain_apply", count: blockedSenderDomains });
+  }
+
+  const expectedReadyAcks = receipt.sender_domain_ack_ready_count ?? 0;
+  if (ack && expectedReadyAcks > 0 && (ack.ready_count ?? 0) < expectedReadyAcks) {
+    blockers.push({ kind: "sender_domain_ack_dry_run_stale", count: expectedReadyAcks - (ack.ready_count ?? 0) });
+  }
+  if ((ack?.applied_count ?? 0) > 0) {
+    blockers.push({ kind: "unexpected_sender_domain_apply", count: ack?.applied_count ?? 0 });
+  }
+
+  const inboundProbes = receipt.targeted_inbound_probes ?? 0;
+  if (inboundProbes > 0) {
+    blockers.push({ kind: "protected_inbound_probe", count: inboundProbes });
+  }
+
+  const outboundProbes = receipt.targeted_outbound_reply_probes ?? 0;
+  if (outboundProbes > 0) {
+    blockers.push({ kind: "protected_outbound_reply_probe", count: outboundProbes });
+  }
+
+  return blockers;
+}
+
+function runProductionPreflight(): { ok: boolean; failures: string[]; status: number } {
+  const command = argValue("--preflight-command");
+  const result = command
+    ? spawnSync(command, { cwd: root, encoding: "utf8" })
+    : spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+        cwd: root,
+        encoding: "utf8",
+      });
+  const status = result.status ?? 1;
+  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  const failures = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("fail: "))
+    .map((line) => line.slice("fail: ".length));
+
+  return {
+    ok: status === 0,
+    status,
+    failures: status === 0 ? [] : failures.length > 0 ? failures : [`production preflight exited ${status}`],
+  };
+}
+
+function runAckDryRun(manifestPath: string): AckDryRunSummary {
+  const result = spawnSync(
+    "bun",
+    ["run", "scripts/apply-sender-domain-ack-manifest.ts", "--manifest", manifestPath, "--json"],
+    { cwd: root, encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    return {
+      mode: "dry_run",
+      ready_count: 0,
+      dry_run_count: 0,
+      applied_count: 0,
+      results: [],
+    };
+  }
+  return parseJson<AckDryRunSummary>(result.stdout, "sender-domain ack dry-run");
+}
+
+function argValue(name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index === -1) return undefined;
+  return args[index + 1];
+}
+
+function readJson<T>(path: string): T {
+  return parseJson<T>(readFileSync(resolve(root, path), "utf8"), path);
+}
+
+function parseJson<T>(value: string, label: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    console.error(`${label} did not produce valid JSON`);
+    throw error;
+  }
+}
+
+function relativePath(path: string): string {
+  return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+}
