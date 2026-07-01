@@ -273,4 +273,110 @@ describe("mail proof planner", () => {
         "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
     });
   });
+
+  test("matches sender-domain ack commands whose zone differs from name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-"));
+    const receiptPath = join(dir, "receipt.json");
+    const policyPath = join(dir, "policy.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify(
+        {
+          rows: [
+            {
+              domain: "mail.tenant.example.com",
+              inbound_mx: "ok",
+              inbound_mx_provider: "cloudflare_email_routing",
+              inbound_proof: "ok",
+              outbound_sender: "missing",
+              outbound_proof: "not_checked",
+            },
+          ],
+          gaps: [
+            {
+              domain: "mail.tenant.example.com",
+              field: "outbound_sender",
+              status: "missing",
+              readiness: "mail",
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(
+      policyPath,
+      `${JSON.stringify(
+        {
+          domains: {
+            "mail.tenant.example.com": {
+              role_aliases: {
+                founders: {
+                  operators: ["operator@mail.tenant.example.com"],
+                  reply_identity: "founders@mail.tenant.example.com",
+                },
+              },
+              personal_aliases: {},
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(
+      manifestPath,
+      `${JSON.stringify(
+        {
+          items: [
+            {
+              ok: true,
+              performed: false,
+              target: "mail.tenant.example.com",
+              operation_id: "20260701T000000Z-00000-subdomain",
+              ack_command:
+                "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name mail.tenant.example.com --ack-plan 20260701T000000Z-00000-subdomain",
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/plan-mail-proofs.ts",
+        "--",
+        "--receipt",
+        receiptPath,
+        "--policy",
+        policyPath,
+        "--ack-manifest",
+        manifestPath,
+        "--json",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(0);
+    const plan = JSON.parse(result.stdout) as {
+      actions: Array<{
+        ack_command?: string;
+        operation_id?: string;
+      }>;
+    };
+    expect(plan.actions[0]).toMatchObject({
+      operation_id: "20260701T000000Z-00000-subdomain",
+      ack_command:
+        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name mail.tenant.example.com --ack-plan 20260701T000000Z-00000-subdomain",
+    });
+  });
 });

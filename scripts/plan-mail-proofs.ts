@@ -236,10 +236,11 @@ function normalizedAckManifestEntry(item: AckManifestItem): AckManifestEntry | n
   if (typeof item.ack_command !== "string" || item.ack_command.length === 0) return null;
   if (isExpired(item.preview_expires_at)) return null;
 
-  const commandDomain = senderDomainFromAckCommand(item.ack_command);
-  const target = typeof item.target === "string" && item.target.length > 0 ? item.target : commandDomain;
-  if (!target || target !== commandDomain) return null;
-  if (!item.ack_command.includes(`--ack-plan ${item.operation_id}`)) return null;
+  const command = parseSenderDomainAckCommand(item.ack_command);
+  if (!command) return null;
+  const target = typeof item.target === "string" && item.target.length > 0 ? item.target : command.name;
+  if (target !== command.name) return null;
+  if (item.operation_id !== command.operation_id) return null;
 
   return {
     domain: target,
@@ -248,12 +249,12 @@ function normalizedAckManifestEntry(item: AckManifestItem): AckManifestEntry | n
   };
 }
 
-function senderDomainFromAckCommand(command: string): string | null {
+function parseSenderDomainAckCommand(command: string): SenderDomainAckCommand | null {
   const match = command.match(
     /cfctl\s+apply\s+sender_domain\s+enable\s+--zone\s+([^\s]+)\s+--name\s+([^\s]+)\s+--ack-plan\s+([^\s]+)/,
   );
   if (!match) return null;
-  return match[1] === match[2] ? match[1] : null;
+  return { zone: match[1], name: match[2], operation_id: match[3] };
 }
 
 function isExpired(value: string | undefined): boolean {
@@ -335,4 +336,10 @@ interface AckManifestEntry {
   domain: string;
   operation_id: string;
   ack_command: string;
+}
+
+interface SenderDomainAckCommand {
+  zone: string;
+  name: string;
+  operation_id: string;
 }
