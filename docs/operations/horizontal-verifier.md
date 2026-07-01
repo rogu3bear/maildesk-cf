@@ -157,6 +157,9 @@ operator action. Sender-domain readiness gaps remain blocked actions because
 they require Cloudflare mutation, but the JSON plan includes the `cfctl`
 preview command, protected `--ack-plan` command template, and follow-up verify
 command so a reviewed handoff can stay inside the control-plane flow.
+When a reviewed preview receipt has already been built, pass it with
+`--ack-manifest <path>` to copy exact, unexpired sender-domain `ack_command`
+values into the proof plan without applying them.
 
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra

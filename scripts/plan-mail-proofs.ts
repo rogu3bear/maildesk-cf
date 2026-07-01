@@ -55,6 +55,7 @@ if (!receiptPath) {
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const receipt = readJson<Receipt>(resolve(root, receiptPath));
 const policy = readJson<PolicyFile>(policyPath);
+const ackManifest = loadAckManifest(argValue("--ack-manifest"));
 const actions = buildActions(receipt, policy);
 const plan = {
   generated_at: new Date().toISOString(),
@@ -202,11 +203,63 @@ function isReservedExampleDomain(domain: string): boolean {
 
 function senderDomainRepairCommands(domain: string): SenderDomainRepairCommands {
   const base = `CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone ${domain} --name ${domain}`;
+  const ackPreview = ackManifest.get(domain);
   return {
     preview_command: `${base} --plan`,
     ack_command_template: `${base} --ack-plan <operation-id>`,
+    ...(ackPreview
+      ? {
+          operation_id: ackPreview.operation_id,
+          ack_command: ackPreview.ack_command,
+        }
+      : {}),
     verify_command: "cfctl maildesk-cf verify --file config/desired-state.local.json",
   };
+}
+
+function loadAckManifest(path: string | undefined): Map<string, AckManifestEntry> {
+  if (!path) return new Map();
+  const manifest = readJson<AckManifest>(resolve(root, path));
+  const items = Array.isArray(manifest) ? manifest : manifest.items ?? [];
+  return new Map(
+    items
+      .map((item) => normalizedAckManifestEntry(item))
+      .filter((item): item is AckManifestEntry => Boolean(item))
+      .map((item) => [item.domain, item]),
+  );
+}
+
+function normalizedAckManifestEntry(item: AckManifestItem): AckManifestEntry | null {
+  if (item.performed === true) return null;
+  if (item.ok === false) return null;
+  if (typeof item.operation_id !== "string" || item.operation_id.length === 0) return null;
+  if (typeof item.ack_command !== "string" || item.ack_command.length === 0) return null;
+  if (isExpired(item.preview_expires_at)) return null;
+
+  const commandDomain = senderDomainFromAckCommand(item.ack_command);
+  const target = typeof item.target === "string" && item.target.length > 0 ? item.target : commandDomain;
+  if (!target || target !== commandDomain) return null;
+  if (!item.ack_command.includes(`--ack-plan ${item.operation_id}`)) return null;
+
+  return {
+    domain: target,
+    operation_id: item.operation_id,
+    ack_command: item.ack_command,
+  };
+}
+
+function senderDomainFromAckCommand(command: string): string | null {
+  const match = command.match(
+    /cfctl\s+apply\s+sender_domain\s+enable\s+--zone\s+([^\s]+)\s+--name\s+([^\s]+)\s+--ack-plan\s+([^\s]+)/,
+  );
+  if (!match) return null;
+  return match[1] === match[2] ? match[1] : null;
+}
+
+function isExpired(value: string | undefined): boolean {
+  if (!value) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
 }
 
 function defaultPolicyPath(): string {
@@ -260,5 +313,26 @@ type ProofAction =
 interface SenderDomainRepairCommands {
   preview_command: string;
   ack_command_template: string;
+  operation_id?: string;
+  ack_command?: string;
   verify_command: string;
+}
+
+interface AckManifest {
+  items?: AckManifestItem[];
+}
+
+interface AckManifestItem {
+  ok?: boolean;
+  performed?: boolean;
+  operation_id?: string;
+  ack_command?: string;
+  preview_expires_at?: string;
+  target?: string;
+}
+
+interface AckManifestEntry {
+  domain: string;
+  operation_id: string;
+  ack_command: string;
 }
