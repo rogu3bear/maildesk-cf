@@ -172,7 +172,9 @@ bun run send:maildesk-probes -- \
 ```
 
 The probe executor defaults to dry-run and a limit of one target. Use
-`--limit <n>` or `--all` only for a deliberate proof pass.
+`--limit <n>` or `--all` only for a deliberate proof pass. Executing more than
+one selected probe requires both `--confirm-live-send` and
+`--confirm-bulk-live-send`.
 
 Dry-run an outbound reply proof from a plan:
 

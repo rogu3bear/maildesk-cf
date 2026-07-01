@@ -156,7 +156,8 @@ default and requires `--execute --confirm-ack-plan` before it applies any
 also requires `--confirm-bulk-ack-plan`.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
 requires `--execute --confirm-live-send` before it sends mail or calls the
-reply API.
+reply API. Sending more than one selected probe also requires
+`--confirm-bulk-live-send`.
 
 ## De-Templating
 
