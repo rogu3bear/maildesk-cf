@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -82,6 +82,85 @@ describe("maildesk closeout gate", () => {
     });
   });
 
+  test("refreshes ack manifest before closeout dry-run when requested", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    const refreshLogPath = join(dir, "refresh.log");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+    const refresh = fakeAckRefresh(manifestPath, refreshLogPath);
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      proof_actions: 1,
+      targeted_inbound_probes: 0,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 1,
+      sender_domain_blocked_count: 1,
+      sender_domain_ack_ready_count: 1,
+      sender_domain_ack_missing_count: 0,
+    });
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "tenant.example.com",
+          operation_id: "old-op",
+          preview_expires_at: "2000-01-01T00:00:00.000Z",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan old-op",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--ack-manifest",
+        manifestPath,
+        "--refresh-acks",
+        "--refresh-ack-command",
+        refresh,
+        "--preflight-command",
+        preflight,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(readFileSync(refreshLogPath, "utf8")).toContain(`--out ${manifestPath}`);
+    const closeout = JSON.parse(result.stdout) as {
+      ack_refresh?: { ok?: boolean; ack_ready_count?: number };
+      ack_dry_run?: { ready_count?: number; dry_run_count?: number; applied_count?: number };
+      blockers?: Array<{ kind?: string; count?: number }>;
+    };
+    expect(closeout.ack_refresh).toMatchObject({
+      ok: true,
+      ack_ready_count: 1,
+    });
+    expect(closeout.ack_dry_run).toMatchObject({
+      ready_count: 1,
+      dry_run_count: 1,
+      applied_count: 0,
+    });
+    expect(closeout.blockers).not.toContainEqual({
+      kind: "sender_domain_ack_dry_run_stale",
+      count: 1,
+    });
+  });
+
   test("surfaces production preflight failures as instance blockers", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
@@ -150,6 +229,35 @@ ${stdout}STDOUT
 cat >&2 <<'STDERR'
 ${stderr}STDERR
 exit ${status}
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeAckRefresh(manifestPath: string, logPath: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-refresh-"));
+  const path = join(dir, "refresh-acks");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "$@" > ${JSON.stringify(logPath)}
+cat > ${JSON.stringify(manifestPath)} <<'JSON'
+{
+  "items": [
+    {
+      "ok": true,
+      "performed": false,
+      "target": "tenant.example.com",
+      "operation_id": "new-op",
+      "ack_command": "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan new-op"
+    }
+  ]
+}
+JSON
+cat <<'JSON'
+{"preview_count":1,"ack_ready_count":1,"failed_count":0}
+JSON
 `,
   );
   chmodSync(path, 0o700);

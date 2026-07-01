@@ -35,14 +35,16 @@ called done:
 bun run check:maildesk-closeout -- \
   --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json \
   --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --refresh-acks \
   --json
 ```
 
 That command is non-mutating. It runs production preflight, reads the compact
-receipt summary, dry-runs the reviewed sender-domain ack manifest, and exits
-non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all proven.
-Protected applies and live mail probes are reported as blockers; they are not
-executed by the closeout gate.
+receipt summary, optionally refreshes the sender-domain ack manifest in
+`cfctl --plan` mode, dry-runs the reviewed sender-domain ack manifest, and
+exits non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all
+proven. Protected applies and live mail probes are reported as blockers; they
+are not executed by the closeout gate.
 
 To refresh that manifest from the current proof plan without applying anything:
 
