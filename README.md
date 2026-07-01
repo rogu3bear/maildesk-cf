@@ -143,7 +143,10 @@ closeout gate. It exits non-zero until instance, edge, and mail readiness are
 actually proven. Pass `--refresh-acks` when the closeout should refresh the
 sender-domain ack manifest in `cfctl --plan` mode before dry-running it. Pass
 `--redact-sensitive` with `--json` for shareable summaries that keep counts and
-blocker kinds without printing sender domains or ack commands.
+blocker kinds without printing sender domains or ack commands. Pass
+`--purge-duplicate-previews` after repeated `--refresh-acks` runs to clean up
+duplicate active local `cfctl` preview records after the new previews are
+captured.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by

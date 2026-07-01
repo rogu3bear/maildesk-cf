@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -230,6 +230,89 @@ describe("maildesk closeout gate", () => {
     });
   });
 
+  test("purges duplicate active previews during closeout when requested", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    const refreshLogPath = join(dir, "refresh.log");
+    const cleanupLogPath = join(dir, "cleanup.log");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+    const refresh = fakeAckRefresh(manifestPath, refreshLogPath);
+    const cleanup = fakePreviewCleanup(cleanupLogPath);
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      proof_actions: 1,
+      targeted_inbound_probes: 0,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 1,
+      sender_domain_blocked_count: 1,
+      sender_domain_ack_ready_count: 1,
+      sender_domain_ack_missing_count: 0,
+    });
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "tenant.example.com",
+          operation_id: "old-op",
+          preview_expires_at: "2000-01-01T00:00:00.000Z",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan old-op",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--ack-manifest",
+        manifestPath,
+        "--refresh-acks",
+        "--refresh-ack-command",
+        refresh,
+        "--purge-duplicate-previews",
+        "--preview-cleanup-command",
+        cleanup,
+        "--preflight-command",
+        preflight,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(existsSync(cleanupLogPath)).toBe(true);
+    expect(readFileSync(cleanupLogPath, "utf8")).toContain("cleanup invoked");
+    const closeout = JSON.parse(result.stdout) as {
+      preview_cleanup?: {
+        ok?: boolean;
+        performed?: boolean;
+        purged_count?: number;
+        duplicate_group_count?: number;
+      };
+      blockers?: Array<{ kind?: string }>;
+    };
+    expect(closeout.preview_cleanup).toMatchObject({
+      ok: true,
+      performed: true,
+      purged_count: 2,
+      duplicate_group_count: 1,
+    });
+    expect(closeout.blockers).not.toContainEqual({ kind: "preview_cleanup" });
+  });
+
   test("surfaces production preflight failures as instance blockers", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
@@ -326,6 +409,22 @@ cat > ${JSON.stringify(manifestPath)} <<'JSON'
 JSON
 cat <<'JSON'
 {"preview_count":1,"ack_ready_count":1,"failed_count":0}
+JSON
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakePreviewCleanup(logPath: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-preview-cleanup-"));
+  const path = join(dir, "preview-cleanup");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "cleanup invoked" > ${JSON.stringify(logPath)}
+cat <<'JSON'
+{"ok":true,"performed":true,"summary":{"purged_count":2,"duplicate_group_count":1}}
 JSON
 `,
   );
