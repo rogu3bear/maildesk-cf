@@ -29,6 +29,14 @@ interface AckDryRunSummary {
   results?: unknown[];
 }
 
+interface RedactedAckDryRunSummary {
+  mode: string;
+  ready_count: number;
+  applied_count: number;
+  dry_run_count: number;
+  result_count: number;
+}
+
 interface AckRefreshSummary {
   ok: boolean;
   status: number;
@@ -49,6 +57,7 @@ interface Blocker {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const jsonOutput = args.includes("--json");
+const redactSensitive = args.includes("--redact-sensitive");
 const summaryPath =
   argValue("--summary") ?? "var/proof/maildesk-receipt-require-ack-ready-summary.local.json";
 const ackManifestPath =
@@ -74,6 +83,7 @@ const ready =
 
 const closeout = {
   ready,
+  sensitive_redacted: redactSensitive,
   summary_path: relativePath(resolve(root, summaryPath)),
   ack_manifest_path:
     skipAckDryRun || !existsSync(resolve(root, ackManifestPath))
@@ -101,7 +111,7 @@ const closeout = {
     sender_domain_ack_ready_count: summary.sender_domain_ack_ready_count ?? 0,
     sender_domain_ack_missing_count: summary.sender_domain_ack_missing_count ?? 0,
   },
-  ack_dry_run: ackDryRun,
+  ack_dry_run: redactSensitive ? redactAckDryRun(ackDryRun) : ackDryRun,
   blockers,
 };
 
@@ -273,6 +283,17 @@ function runAckDryRun(manifestPath: string): AckDryRunSummary {
     };
   }
   return parseJson<AckDryRunSummary>(result.stdout, "sender-domain ack dry-run");
+}
+
+function redactAckDryRun(ack: AckDryRunSummary | null): RedactedAckDryRunSummary | null {
+  if (!ack) return null;
+  return {
+    mode: ack.mode ?? "dry_run",
+    ready_count: ack.ready_count ?? 0,
+    applied_count: ack.applied_count ?? 0,
+    dry_run_count: ack.dry_run_count ?? 0,
+    result_count: ack.results?.length ?? 0,
+  };
 }
 
 function argValue(name: string): string | undefined {
