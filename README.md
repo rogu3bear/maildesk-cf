@@ -146,7 +146,8 @@ sender-domain ack manifest in `cfctl --plan` mode before dry-running it. Pass
 blocker kinds without printing sender domains or ack commands. Pass
 `--purge-duplicate-previews` after repeated `--refresh-acks` runs to clean up
 duplicate active local `cfctl` preview records after the new previews are
-captured.
+captured. Pass `--purge-expired-previews` to remove expired local preview
+records when `cfctl doctor` reports preview-ledger drift.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by

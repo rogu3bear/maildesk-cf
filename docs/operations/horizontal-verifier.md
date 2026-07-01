@@ -37,6 +37,7 @@ bun run check:maildesk-closeout -- \
   --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
   --refresh-acks \
   --purge-duplicate-previews \
+  --purge-expired-previews \
   --redact-sensitive \
   --json
 ```
@@ -52,6 +53,10 @@ Use `--purge-duplicate-previews` when `--refresh-acks` has been run repeatedly.
 The cleanup is local `cfctl` preview-ledger hygiene: it removes duplicate active
 preview records after fresh previews are captured, without applying
 sender-domain changes.
+
+Use `--purge-expired-previews` when `cfctl doctor` reports expired preview
+records. The cleanup removes only expired local preview-ledger records; it does
+not apply sender-domain changes.
 
 Use `--redact-sensitive` for JSON that may be copied into an issue, PR, or
 status report. The redacted form preserves readiness, aggregate dry-run counts,

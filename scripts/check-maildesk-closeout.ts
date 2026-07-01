@@ -54,6 +54,7 @@ interface PreviewCleanupSummary {
   performed?: boolean;
   purged_count?: number;
   duplicate_group_count?: number;
+  expired_purged_count?: number;
   failures: string[];
 }
 
@@ -74,13 +75,17 @@ const ackManifestPath =
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
 const refreshAcks = args.includes("--refresh-acks");
 const purgeDuplicatePreviews = args.includes("--purge-duplicate-previews");
+const purgeExpiredPreviews = args.includes("--purge-expired-previews");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
 
 const summary = readJson<ReceiptSummary>(summaryPath);
 const productionPreflight = skipProductionPreflight ? null : runProductionPreflight();
 const ackRefresh = refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
-const previewCleanup = purgeDuplicatePreviews ? runPreviewCleanup() : null;
+const previewCleanup =
+  purgeDuplicatePreviews || purgeExpiredPreviews
+    ? runPreviewCleanup(purgeDuplicatePreviews, purgeExpiredPreviews)
+    : null;
 const ackDryRun =
   skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
 const blockers = buildBlockers(summary, productionPreflight, ackRefresh, previewCleanup, ackDryRun);
@@ -285,11 +290,47 @@ function runProductionPreflight(): { ok: boolean; failures: string[]; status: nu
   };
 }
 
-function runPreviewCleanup(): PreviewCleanupSummary {
-  const command = argValue("--preview-cleanup-command");
+function runPreviewCleanup(purgeDuplicates: boolean, purgeExpired: boolean): PreviewCleanupSummary {
+  const duplicateCleanup =
+    purgeDuplicates
+      ? runPreviewCleanupCommand(
+          "duplicate preview cleanup",
+          argValue("--preview-cleanup-command"),
+          ["previews", "purge-duplicate-active"],
+        )
+      : null;
+  const expiredCleanup =
+    purgeExpired
+      ? runPreviewCleanupCommand(
+          "expired preview cleanup",
+          argValue("--expired-preview-cleanup-command"),
+          ["previews", "purge-expired"],
+        )
+      : null;
+  const results = [duplicateCleanup, expiredCleanup].filter(
+    (result): result is PreviewCleanupSummary => Boolean(result),
+  );
+  const failures = results.flatMap((result) => result.failures);
+
+  return {
+    ok: failures.length === 0,
+    status: failures.length === 0 ? 0 : results.find((result) => result.status !== 0)?.status ?? 1,
+    performed: results.some((result) => result.performed === true),
+    purged_count: results.reduce((total, result) => total + (result.purged_count ?? 0), 0),
+    duplicate_group_count: duplicateCleanup?.duplicate_group_count ?? 0,
+    expired_purged_count: expiredCleanup?.purged_count ?? 0,
+    failures,
+  };
+}
+
+function runPreviewCleanupCommand(
+  label: string,
+  command: string | undefined,
+  cfctlArgs: string[],
+): PreviewCleanupSummary {
   const result = command
     ? spawnSync(command, { cwd: root, encoding: "utf8" })
-    : spawnSync("cfctl", ["previews", "purge-duplicate-active"], {
+    : spawnSync("cfctl", cfctlArgs, {
         cwd: root,
         encoding: "utf8",
       });
@@ -298,7 +339,7 @@ function runPreviewCleanup(): PreviewCleanupSummary {
     return {
       ok: false,
       status,
-      failures: [`preview cleanup exited ${status}`],
+      failures: [`${label} exited ${status}`],
     };
   }
 
@@ -309,7 +350,7 @@ function runPreviewCleanup(): PreviewCleanupSummary {
       purged_count?: number;
       duplicate_group_count?: number;
     };
-  }>(result.stdout, "preview cleanup");
+  }>(result.stdout, label);
 
   return {
     ok: output.ok === true,
@@ -317,7 +358,7 @@ function runPreviewCleanup(): PreviewCleanupSummary {
     performed: output.performed === true,
     purged_count: output.summary?.purged_count ?? 0,
     duplicate_group_count: output.summary?.duplicate_group_count ?? 0,
-    failures: output.ok === true ? [] : ["preview cleanup did not report ok"],
+    failures: output.ok === true ? [] : [`${label} did not report ok`],
   };
 }
 
