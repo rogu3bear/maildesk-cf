@@ -156,8 +156,8 @@ bun run send:maildesk-probes -- \
   --domain example.com
 ```
 
-For proof-only runs, prefer a deployed `MAILDESK_PROOF_API_TOKEN` over rotating
-the primary `MAILDESK_API_TOKEN`.
+For proof-only runs and production closeout preflight, prefer a deployed
+`MAILDESK_PROOF_API_TOKEN` over rotating the primary `MAILDESK_API_TOKEN`.
 
 ## Receipt Shape
 

@@ -55,7 +55,7 @@ if (mode === "production") {
   checkCloudflareAccountTarget(desiredState, cfctlDoctor);
   checkCloudflareAuthEnv(cfctlDoctor);
   checkProjectName(desiredState);
-  checkRequiredEnv("MAILDESK_API_TOKEN");
+  checkRequiredEnvAny(["MAILDESK_API_TOKEN", "MAILDESK_PROOF_API_TOKEN"]);
   checkOutboundEnv();
   checkWranglerPlaceholders();
 } else {

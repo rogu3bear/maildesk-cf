@@ -60,6 +60,34 @@ describe("production preflight", () => {
     expect(result.stderr).toContain("wrangler.toml still contains placeholder Cloudflare resource IDs");
   });
 
+  test("accepts MAILDESK_PROOF_API_TOKEN for proof-only closeout", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+      MAILDESK_PROOF_API_TOKEN: "example-proof-token",
+    };
+    delete env.CLOUDFLARE_ACCOUNT_ID;
+    delete env.CLOUDFLARE_API_TOKEN;
+    delete env.CLOUDFLARE_API_KEY;
+    delete env.CLOUDFLARE_EMAIL;
+    delete env.CF_DEV_TOKEN;
+    delete env.CF_GLOBAL_TOKEN;
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROJECT_NAME;
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).not.toContain("MAILDESK_API_TOKEN");
+    expect(result.stderr).not.toContain("MAILDESK_PROOF_API_TOKEN");
+    expect(result.stderr).toContain("wrangler.toml still contains placeholder Cloudflare resource IDs");
+  });
+
   test("fails Cloudflare proof when cfctl doctor has no healthy lane", () => {
     const cfctl = fakeCfctlDoctor(false);
     const env = {
@@ -83,6 +111,25 @@ describe("production preflight", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("missing Cloudflare account target");
     expect(result.stderr).toContain("missing Cloudflare auth");
+  });
+
+  test("asks for either API token when no reply proof token is present", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+    };
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROOF_API_TOKEN;
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("set one of MAILDESK_API_TOKEN, MAILDESK_PROOF_API_TOKEN");
   });
 });
 
