@@ -53,6 +53,7 @@ Email Routing desired state.
 Provision through `cfctl`, using plan and acknowledge phases for mutations:
 
 ```bash
+bun run check:cfctl-provisioning -- --desired-state config/desired-state.local.json
 cfctl doctor
 cfctl maildesk-cf provision --file config/desired-state.local.json --plan
 cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>
@@ -60,8 +61,10 @@ cfctl maildesk-cf verify --file config/desired-state.local.json
 ```
 
 Keep desired state in ignored private files and verify every mutation with
-readback. If the composite plan emits component commands, run those through the
-named primitive surface. For example:
+readback. The local check proves the file is usable by the lifecycle surface;
+the `cfctl` plan and verify steps still require the operator's configured
+account, credentials, and reviewed operation id. If the composite plan emits
+component commands, run those through the named primitive surface. For example:
 
 ```bash
 cfctl apply email.routing_rule upsert --zone example.com \
@@ -125,11 +128,20 @@ Before enabling replies, verify each sending domain has:
 If any item is missing, keep inbound forwarding enabled but do not claim
 domain-consistent outbound replies are complete.
 
-The public template defaults to `MAILDESK_OUTBOUND_MODE=disabled`. To enable
-Cloudflare sending, add a Wrangler `send_email` binding named `EMAIL` only
-after Cloudflare Email Service readback proves the sender domain is available.
-To enable Resend, set `MAILDESK_OUTBOUND_MODE=resend` and store
-`RESEND_API_KEY` as a Worker secret. Production preflight also accepts `RESEND`
-as a local compatibility alias for existing ignored environment files. In either case,
-`MAILDESK_VERIFIED_SENDER_DOMAINS` must contain only domains verified by the
-active sender provider.
+The public template defaults to `sender.mode=disabled` and
+`MAILDESK_OUTBOUND_MODE=disabled`. In that mode, outbound proof gaps are not
+sender-domain repair work because no provider is selected.
+
+To enable Cloudflare sending, set both desired-state `sender.mode` and
+`MAILDESK_OUTBOUND_MODE` to `cloudflare_email_service`, add a Wrangler
+`send_email` binding named `EMAIL`, and populate
+`MAILDESK_VERIFIED_SENDER_DOMAINS` only after Cloudflare Email Service readback
+proves the sender domain is available.
+
+To enable Resend, set both desired-state `sender.mode` and
+`MAILDESK_OUTBOUND_MODE` to `resend`, store `RESEND_API_KEY` as a Worker secret,
+and build `MAILDESK_VERIFIED_SENDER_DOMAINS` from Resend domain readback.
+Production preflight also accepts `RESEND` as a local compatibility alias for
+existing ignored environment files. Resend sender-domain blockers are repaired
+in Resend and refreshed through provider readback; they do not use
+`cfctl sender_domain --ack-plan`.

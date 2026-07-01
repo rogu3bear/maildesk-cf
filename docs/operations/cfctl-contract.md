@@ -23,6 +23,18 @@ validated by `maildesk-policy-check`. `cfctl` owns account resources; the
 application owns runtime behavior.
 
 The template fixture is `config/desired-state.example.json`.
+The schema is `ops/cfctl/maildesk-cf.desired-state.schema.json`.
+
+Before asking `cfctl` to plan account mutation, prove the checkout-side lane
+input locally:
+
+```bash
+bun run check:cfctl-provisioning
+```
+
+That hook validates the desired-state file and prints the `cfctl doctor`,
+`diff`, `provision --plan`, `provision --ack-plan`, and `verify` handoff. It is
+non-mutating and does not replace `cfctl` live readback.
 
 ## Resources To Own
 
@@ -34,7 +46,8 @@ The template fixture is `config/desired-state.example.json`.
 - R2 bucket for raw MIME and attachments.
 - R2 preview bucket for non-production checks.
 - Queue for async mail jobs.
-- Cloudflare Email Service sender posture.
+- Cloudflare Email Service sender posture when `sender.mode` is
+  `cloudflare_email_service`.
 - DNS records for SPF, DKIM, DMARC, MTA-STS, and TLS reporting when configured.
 
 The desired-state fixture may include preview storage resources, but production
@@ -53,7 +66,7 @@ Verification should avoid broad live sends. Prefer:
 - R2 bucket existence;
 - Queue existence;
 - DNS record reads;
-- provider sender-domain status reads;
+- provider sender-domain status reads from the active sender mode;
 - outbound identity readback for every configured reply identity;
 - one explicit targeted send only when a human asks for delivery proof.
 
@@ -76,6 +89,19 @@ Verification output should distinguish:
 This repo contains the app-side contract and placeholders. The control-plane
 repo now exposes a first-class `maildesk-cf` lifecycle surface, and component
 plans may point at primitive `cfctl` surfaces such as `email.routing_rule` and
-`sender_domain` for preview-gated writes. Do not run `--ack-plan` until the
+`sender_domain` for Cloudflare Email Service preview-gated writes. Resend
+sender-domain setup remains provider-side readback and should not be converted
+into a Cloudflare `sender_domain --ack-plan`. Do not run `--ack-plan` until the
 operator has reviewed the preview receipt and explicitly chosen to mutate
 Cloudflare.
+
+What remains outside this checkout:
+
+- install or update `cfctl` with the `maildesk-cf` lifecycle surface;
+- copy `config/desired-state.example.json` to an ignored local file with a real
+  account and domain;
+- run `cfctl doctor` with a healthy credential lane;
+- review a real `cfctl maildesk-cf provision --plan` receipt and supply its
+  operation id before `--ack-plan`;
+- run targeted `cfctl maildesk-cf verify` and mail proof readbacks after
+  mutation.

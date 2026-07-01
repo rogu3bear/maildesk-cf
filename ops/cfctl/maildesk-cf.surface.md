@@ -56,6 +56,19 @@ boundaries.
 
 `config/desired-state.example.json` is the current template fixture for this
 shape.
+`ops/cfctl/maildesk-cf.desired-state.schema.json` is the public schema contract
+for the fixture. Keep it small and template-safe: real account IDs, private
+domains, secrets, preview receipts, and applied operation ids belong in ignored
+local files or `cfctl` state, not tracked source.
+
+The repo-local proof hook is:
+
+```bash
+bun run check:cfctl-provisioning
+```
+
+It validates the desired-state file and prints the lifecycle handoff. It does
+not call live `cfctl`, acknowledge previews, or mutate Cloudflare.
 
 ## Outputs
 
@@ -79,12 +92,17 @@ Use `cfctl maildesk-cf` for lifecycle readback and planning. When the plan
 emits component operations, use the named primitive `cfctl` surface for the
 actual preview/ack flow rather than bypassing `cfctl`.
 
-Current component surfaces include Email Routing rules and Email Sending sender
-domains. Sender-domain authentication is previewed through:
+Sender provider mode must be one of `disabled`, `cloudflare_email_service`, or
+`resend`, matching the runtime `MAILDESK_OUTBOUND_MODE` values.
+
+Current component surfaces include Email Routing rules and Cloudflare Email
+Service sender domains. Cloudflare sender-domain authentication is previewed
+through:
 
 ```bash
 cfctl apply sender_domain enable --zone example.com --name example.com --plan
 ```
 
 Cloudflare writes still require a reviewed preview receipt and explicit
-`--ack-plan <operation-id>`.
+`--ack-plan <operation-id>`. Resend sender-domain verification is provider
+readback, not a `cfctl sender_domain` write.

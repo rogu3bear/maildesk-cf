@@ -12,10 +12,11 @@ bun run preflight:template
 bash scripts/check-template.sh
 ```
 
-It verifies:
+Together, template preflight and `scripts/check-template.sh` verify:
 
 - Bun, Rust, Cargo, and TypeScript tooling are available;
 - required source files exist;
+- the public `cfctl maildesk-cf` desired-state schema and fixture validate;
 - `config/policy.example.json` validates through the Rust router;
 - reserved example domains remain present;
 - Worker TypeScript compiles.
@@ -45,8 +46,8 @@ values.
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
 | `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | production | bearer token for the reply API; proof-only closeout may use the secondary token without rotating the primary API token |
-| `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` |
-| `MAILDESK_VERIFIED_SENDER_DOMAINS` | required when outbound is enabled | comma-separated sender domains approved by provider readback |
+| `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` and must match selected desired-state `sender.mode` |
+| `MAILDESK_VERIFIED_SENDER_DOMAINS` | required for `cloudflare_email_service` or `resend` | comma-separated sender domains approved by the active provider readback |
 | `RESEND_API_KEY` or `RESEND` | required for `resend` mode | Resend API key; `RESEND_API_KEY` is the preferred Worker secret name and `RESEND` is accepted as a local compatibility alias |
 | `MAILDESK_PROJECT_NAME` | production project option | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
@@ -69,13 +70,18 @@ Production mode also fails if `wrangler.toml` still contains placeholder
 Cloudflare resource IDs. That is intentional. Placeholder IDs are acceptable in
 the public template and unacceptable before real provisioning.
 
-Outbound mode is deliberately explicit. `disabled` proves inbound and reply
-authorization without sending mail. `cloudflare_email_service` requires a
-Worker `send_email` binding named `EMAIL`, and `resend` requires a Resend API
-key from `RESEND_API_KEY` or the local compatibility alias `RESEND`. Both
-enabled modes require
-`MAILDESK_VERIFIED_SENDER_DOMAINS`; build it from provider readback, not from
-the local policy alone.
+Outbound mode is deliberately explicit. Desired state and runtime use the same
+three values: `disabled`, `cloudflare_email_service`, and `resend`.
+Production preflight fails if `MAILDESK_OUTBOUND_MODE` disagrees with
+`sender.mode` in the selected desired-state file.
+
+`disabled` proves inbound and reply authorization without sending mail and does
+not require sender-domain provider readback. `cloudflare_email_service`
+requires a Worker `send_email` binding named `EMAIL` in `wrangler.toml` and
+`MAILDESK_VERIFIED_SENDER_DOMAINS` built from Cloudflare Email Service readback.
+`resend` requires a Resend API key from `RESEND_API_KEY` or the local
+compatibility alias `RESEND`, plus `MAILDESK_VERIFIED_SENDER_DOMAINS` built
+from Resend provider readback.
 
 ## Policy Files
 
@@ -97,6 +103,7 @@ local checkout is ready for the `cfctl` plan/apply/verify flow.
 Cloudflare account writes should still follow:
 
 ```bash
+bun run check:cfctl-provisioning -- --desired-state config/desired-state.local.json
 cfctl doctor
 cfctl maildesk-cf provision --file config/desired-state.local.json --plan
 cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>

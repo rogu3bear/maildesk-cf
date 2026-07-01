@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/maildesk-cf/cfctl/maildesk-cf.desired-state.schema.json",
+  "title": "maildesk-cf cfctl desired state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "domains", "workers", "storage", "sender", "verification"],
+  "properties": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "anyOf": [
+        { "required": ["account_id"] },
+        { "required": ["account_id_env"] }
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "account_id": { "$ref": "#/$defs/non_empty_string" },
+        "account_id_env": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/domain" }
+    },
+    "workers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mail_api", "mail_router"],
+      "properties": {
+        "mail_api": { "$ref": "#/$defs/worker" },
+        "mail_router": { "$ref": "#/$defs/worker" }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "d1_database",
+        "d1_preview_database",
+        "r2_raw_mail_bucket",
+        "r2_raw_mail_preview_bucket",
+        "queue"
+      ],
+      "properties": {
+        "d1_database": { "$ref": "#/$defs/non_empty_string" },
+        "d1_preview_database": { "$ref": "#/$defs/non_empty_string" },
+        "r2_raw_mail_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "r2_raw_mail_preview_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "queue": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "authenticated_domains"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["disabled", "cloudflare_email_service", "resend"]
+        },
+        "authenticated_domains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/domain_name" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow_broad_live_sends", "targeted_send_required"],
+      "properties": {
+        "allow_broad_live_sends": { "type": "boolean" },
+        "targeted_send_required": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "inbound_mx_provider", "role_aliases", "personal_aliases"],
+      "properties": {
+        "name": { "$ref": "#/$defs/domain_name" },
+        "inbound_mx_provider": {
+          "type": "string",
+          "enum": ["cloudflare_email_routing", "google_workspace", "external"]
+        },
+        "role_aliases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/alias" },
+          "uniqueItems": true
+        },
+        "personal_aliases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/alias" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["script_name", "config"],
+      "properties": {
+        "script_name": { "$ref": "#/$defs/non_empty_string" },
+        "config": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "alias": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9._+-]*$"
+    },
+    "domain_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9.-]+$"
+    },
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
