@@ -128,7 +128,9 @@ Cloudflare account state.
 desired-state, and optional live evidence. See
 [docs/operations/horizontal-verifier.md](docs/operations/horizontal-verifier.md).
 `bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
-workflow and writes the three receipt artifacts under `var/`.
+workflow and writes the three receipt artifacts under `var/`. Pass
+`--ack-manifest <path> --require-ack-ready` when the receipt should also prove
+that every sender-domain blocker has an exact reviewed ack command.
 `bun run collect:maildesk-evidence` builds that optional evidence file from
 available readbacks without mutating Cloudflare.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.

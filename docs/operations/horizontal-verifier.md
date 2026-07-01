@@ -14,6 +14,18 @@ available, writes `var/maildesk-live-evidence.json`, writes
 `var/maildesk-receipt.json`, writes `var/maildesk-proof-plan.json`, and prints a
 short readiness summary.
 
+When a reviewed sender-domain preview manifest exists, include it in the same
+receipt run:
+
+```bash
+bun run receipt:maildesk -- \
+  --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --require-ack-ready
+```
+
+That remains a no-mutation workflow. It fails the receipt only when
+sender-domain blockers are missing exact ack commands.
+
 For template-only or offline receipt checks, skip live collection:
 
 ```bash
