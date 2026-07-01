@@ -313,6 +313,70 @@ describe("maildesk closeout gate", () => {
     expect(closeout.blockers).not.toContainEqual({ kind: "preview_cleanup" });
   });
 
+  test("purges expired previews during closeout when requested", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const cleanupLogPath = join(dir, "expired-cleanup.log");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+    const cleanup = fakeExpiredPreviewCleanup(cleanupLogPath);
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      targeted_inbound_probes: 0,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 0,
+      sender_domain_blocked_count: 0,
+      sender_domain_ack_ready_count: 0,
+      sender_domain_ack_missing_count: 0,
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--skip-ack-dry-run",
+        "--purge-expired-previews",
+        "--expired-preview-cleanup-command",
+        cleanup,
+        "--preflight-command",
+        preflight,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(existsSync(cleanupLogPath)).toBe(true);
+    expect(readFileSync(cleanupLogPath, "utf8")).toContain("expired cleanup invoked");
+    const closeout = JSON.parse(result.stdout) as {
+      preview_cleanup?: {
+        ok?: boolean;
+        performed?: boolean;
+        purged_count?: number;
+        expired_purged_count?: number;
+        duplicate_group_count?: number;
+      };
+      blockers?: Array<{ kind?: string }>;
+    };
+    expect(closeout.preview_cleanup).toMatchObject({
+      ok: true,
+      performed: true,
+      purged_count: 14,
+      expired_purged_count: 14,
+      duplicate_group_count: 0,
+    });
+    expect(closeout.blockers).not.toContainEqual({ kind: "preview_cleanup" });
+  });
+
   test("surfaces production preflight failures as instance blockers", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
@@ -425,6 +489,22 @@ function fakePreviewCleanup(logPath: string): string {
 echo "cleanup invoked" > ${JSON.stringify(logPath)}
 cat <<'JSON'
 {"ok":true,"performed":true,"summary":{"purged_count":2,"duplicate_group_count":1}}
+JSON
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeExpiredPreviewCleanup(logPath: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-expired-preview-cleanup-"));
+  const path = join(dir, "expired-preview-cleanup");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "expired cleanup invoked" > ${JSON.stringify(logPath)}
+cat <<'JSON'
+{"ok":true,"performed":true,"summary":{"purged_count":14}}
 JSON
 `,
   );
