@@ -35,6 +35,7 @@ const explicitEvidencePath = Boolean(argValue("--evidence"));
 const evidencePath = argValue("--evidence") ?? "var/maildesk-live-evidence.json";
 const receiptPath = argValue("--receipt") ?? "var/maildesk-receipt.json";
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
+const summaryPath = argValue("--summary");
 
 if (!skipCollect) {
   const collectArgs = [
@@ -79,6 +80,7 @@ const summary = {
   evidence_path: skipCollect && !explicitEvidencePath ? null : relativePath(resolve(root, evidencePath)),
   receipt_path: relativePath(resolve(root, receiptPath)),
   plan_path: relativePath(resolve(root, planPath)),
+  summary_path: summaryPath ? relativePath(resolve(root, summaryPath)) : null,
   local_truth_ok: receipt.status?.local_truth_ok ?? false,
   live_evidence_present: receipt.status?.live_evidence_present ?? false,
   edge_ready: receipt.status?.edge_ready ?? false,
@@ -96,6 +98,10 @@ const summary = {
   sender_domain_ack_ready_count: proofPlan.summary?.sender_domain_ack_ready_count ?? 0,
   sender_domain_ack_missing_count: proofPlan.summary?.sender_domain_ack_missing_count ?? 0,
 };
+
+if (summaryPath) {
+  writeJson(summaryPath, summary);
+}
 
 if (jsonOutput) {
   console.log(JSON.stringify(summary, null, 2));

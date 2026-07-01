@@ -12,7 +12,8 @@ bun run receipt:maildesk
 That command collects live evidence when credentials and readback tools are
 available, writes `var/maildesk-live-evidence.json`, writes
 `var/maildesk-receipt.json`, writes `var/maildesk-proof-plan.json`, and prints a
-short readiness summary.
+short readiness summary. Add `--summary var/maildesk-receipt-summary.json` when
+that compact handoff should be persisted beside the full artifacts.
 
 When a reviewed sender-domain preview manifest exists, include it in the same
 receipt run:
@@ -20,7 +21,8 @@ receipt run:
 ```bash
 bun run receipt:maildesk -- \
   --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
-  --require-ack-ready
+  --require-ack-ready \
+  --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json
 ```
 
 That remains a no-mutation workflow. It fails the receipt only when

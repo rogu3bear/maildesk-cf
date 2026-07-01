@@ -15,6 +15,7 @@ describe("maildesk receipt workflow", () => {
     const manifestPath = join(dir, "ack-manifest.json");
     const receiptPath = join(dir, "receipt.json");
     const planPath = join(dir, "proof-plan.json");
+    const summaryPath = join(dir, "receipt-summary.json");
 
     writeJson(policyPath, {
       domains: {
@@ -123,6 +124,8 @@ describe("maildesk receipt workflow", () => {
         receiptPath,
         "--plan",
         planPath,
+        "--summary",
+        summaryPath,
         "--json",
       ],
       {
@@ -138,6 +141,20 @@ describe("maildesk receipt workflow", () => {
       sender_domain_ack_missing_count?: number;
     };
     expect(summary).toMatchObject({
+      summary_path: summaryPath,
+      sender_domain_blocked_count: 1,
+      sender_domain_ack_ready_count: 1,
+      sender_domain_ack_missing_count: 0,
+    });
+
+    const writtenSummary = JSON.parse(readFileSync(summaryPath, "utf8")) as {
+      summary_path?: string;
+      sender_domain_blocked_count?: number;
+      sender_domain_ack_ready_count?: number;
+      sender_domain_ack_missing_count?: number;
+    };
+    expect(writtenSummary).toMatchObject({
+      summary_path: summaryPath,
       sender_domain_blocked_count: 1,
       sender_domain_ack_ready_count: 1,
       sender_domain_ack_missing_count: 0,
