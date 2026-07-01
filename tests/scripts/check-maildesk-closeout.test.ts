@@ -82,6 +82,75 @@ describe("maildesk closeout gate", () => {
     });
   });
 
+  test("redacts sensitive ack dry-run details from JSON output", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      proof_actions: 1,
+      targeted_inbound_probes: 0,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 1,
+      sender_domain_blocked_count: 1,
+      sender_domain_ack_ready_count: 1,
+      sender_domain_ack_missing_count: 0,
+    });
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "tenant.example.com",
+          operation_id: "op-tenant",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--ack-manifest",
+        manifestPath,
+        "--preflight-command",
+        preflight,
+        "--redact-sensitive",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain("tenant.example.com");
+    expect(result.stdout).not.toContain("ack_command");
+    expect(result.stdout).not.toContain("--ack-plan");
+    const closeout = JSON.parse(result.stdout) as {
+      sensitive_redacted?: boolean;
+      ack_dry_run?: { ready_count?: number; dry_run_count?: number; applied_count?: number; result_count?: number };
+    };
+    expect(closeout.sensitive_redacted).toBe(true);
+    expect(closeout.ack_dry_run).toMatchObject({
+      ready_count: 1,
+      dry_run_count: 1,
+      applied_count: 0,
+      result_count: 1,
+    });
+  });
+
   test("refreshes ack manifest before closeout dry-run when requested", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");

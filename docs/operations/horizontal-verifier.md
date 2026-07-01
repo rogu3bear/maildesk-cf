@@ -36,6 +36,7 @@ bun run check:maildesk-closeout -- \
   --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json \
   --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
   --refresh-acks \
+  --redact-sensitive \
   --json
 ```
 
@@ -45,6 +46,11 @@ receipt summary, optionally refreshes the sender-domain ack manifest in
 exits non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all
 proven. Protected applies and live mail probes are reported as blockers; they
 are not executed by the closeout gate.
+
+Use `--redact-sensitive` for JSON that may be copied into an issue, PR, or
+status report. The redacted form preserves readiness, aggregate dry-run counts,
+and blocker kinds, but omits per-domain sender-domain ack details and
+`cfctl --ack-plan` commands.
 
 To refresh that manifest from the current proof plan without applying anything:
 

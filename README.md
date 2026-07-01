@@ -115,7 +115,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-rece
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
-bun run check:maildesk-closeout -- --summary var/maildesk-receipt-summary.json --json
+bun run check:maildesk-closeout -- --summary var/maildesk-receipt-summary.json --redact-sensitive --json
 bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
 bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
@@ -141,7 +141,9 @@ available readbacks without mutating Cloudflare.
 receipt summary, and sender-domain ack dry-run state into one non-mutating
 closeout gate. It exits non-zero until instance, edge, and mail readiness are
 actually proven. Pass `--refresh-acks` when the closeout should refresh the
-sender-domain ack manifest in `cfctl --plan` mode before dry-running it.
+sender-domain ack manifest in `cfctl --plan` mode before dry-running it. Pass
+`--redact-sensitive` with `--json` for shareable summaries that keep counts and
+blocker kinds without printing sender domains or ack commands.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by
