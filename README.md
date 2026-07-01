@@ -140,7 +140,8 @@ available readbacks without mutating Cloudflare.
 `bun run check:maildesk-closeout` joins production preflight, the compact
 receipt summary, and sender-domain ack dry-run state into one non-mutating
 closeout gate. It exits non-zero until instance, edge, and mail readiness are
-actually proven.
+actually proven. Pass `--refresh-acks` when the closeout should refresh the
+sender-domain ack manifest in `cfctl --plan` mode before dry-running it.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by

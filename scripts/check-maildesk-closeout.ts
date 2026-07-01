@@ -29,6 +29,17 @@ interface AckDryRunSummary {
   results?: unknown[];
 }
 
+interface AckRefreshSummary {
+  ok: boolean;
+  status: number;
+  plan_path?: string;
+  manifest_path?: string;
+  preview_count?: number;
+  ack_ready_count?: number;
+  failed_count?: number;
+  failures: string[];
+}
+
 interface Blocker {
   kind: string;
   count?: number;
@@ -42,14 +53,17 @@ const summaryPath =
   argValue("--summary") ?? "var/proof/maildesk-receipt-require-ack-ready-summary.local.json";
 const ackManifestPath =
   argValue("--ack-manifest") ?? "var/proof/maildesk-sender-domain-ack-manifest.local.json";
+const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
+const refreshAcks = args.includes("--refresh-acks");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
 
 const summary = readJson<ReceiptSummary>(summaryPath);
 const productionPreflight = skipProductionPreflight ? null : runProductionPreflight();
+const ackRefresh = refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
 const ackDryRun =
   skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
-const blockers = buildBlockers(summary, productionPreflight, ackDryRun);
+const blockers = buildBlockers(summary, productionPreflight, ackRefresh, ackDryRun);
 const ready =
   blockers.length === 0 &&
   productionPreflight?.ok !== false &&
@@ -66,6 +80,7 @@ const closeout = {
       ? null
       : relativePath(resolve(root, ackManifestPath)),
   production_preflight: productionPreflight,
+  ack_refresh: ackRefresh,
   receipt: {
     local_truth_ok: summary.local_truth_ok === true,
     live_evidence_present: summary.live_evidence_present === true,
@@ -119,6 +134,7 @@ if (!ready) {
 function buildBlockers(
   receipt: ReceiptSummary,
   preflight: { ok: boolean; failures: string[] } | null,
+  refresh: AckRefreshSummary | null,
   ack: AckDryRunSummary | null,
 ): Blocker[] {
   const blockers: Blocker[] = [];
@@ -126,6 +142,11 @@ function buildBlockers(
   if (preflight?.ok === false) {
     for (const failure of preflight.failures) {
       blockers.push({ kind: "production_preflight", detail: failure });
+    }
+  }
+  if (refresh?.ok === false) {
+    for (const failure of refresh.failures) {
+      blockers.push({ kind: "sender_domain_ack_refresh", detail: failure });
     }
   }
   if (receipt.local_truth_ok !== true) {
@@ -170,6 +191,47 @@ function buildBlockers(
   }
 
   return blockers;
+}
+
+function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummary {
+  const command = argValue("--refresh-ack-command");
+  const result = command
+    ? spawnSync(command, ["--plan", planPath, "--out", manifestPath, "--json"], {
+        cwd: root,
+        encoding: "utf8",
+      })
+    : spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/refresh-sender-domain-ack-manifest.ts",
+          "--plan",
+          planPath,
+          "--out",
+          manifestPath,
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+  const status = result.status ?? 1;
+  if (status !== 0) {
+    return {
+      ok: false,
+      status,
+      failures: [`sender-domain ack refresh exited ${status}`],
+    };
+  }
+
+  const summary = parseJson<Omit<AckRefreshSummary, "ok" | "status" | "failures">>(
+    result.stdout,
+    "sender-domain ack refresh",
+  );
+  return {
+    ok: true,
+    status,
+    ...summary,
+    failures: [],
+  };
 }
 
 function runProductionPreflight(): { ok: boolean; failures: string[]; status: number } {
