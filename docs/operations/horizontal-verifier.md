@@ -59,6 +59,15 @@ flags are required for the next protected command. This handoff is count-only;
 redacted output does not include domains, addresses, operation IDs, or
 `cfctl --ack-plan` commands.
 
+The closeout JSON also includes `protected_command_handoff`, a sanitized set of
+argv arrays for the next protected command. Sender-domain commands call
+`apply:maildesk-acks` with the reviewed manifest and default to `--limit 1`.
+Probe commands call `send:maildesk-probes` with placeholder values such as
+`<verified-sender>`, `<maildesk-api-url>`, `<reply-api-token>`, and
+`<proof-recipient>` that must be replaced before any live send. The handoff
+does not include domains, addresses, operation IDs, tokens, or raw
+`cfctl --ack-plan` commands.
+
 Use `--purge-duplicate-previews` when `--refresh-acks` has been run repeatedly.
 The cleanup is local `cfctl` preview-ledger hygiene: it removes duplicate active
 preview records after fresh previews are captured, without applying

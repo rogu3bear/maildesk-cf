@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
 
@@ -79,6 +79,18 @@ interface ProtectedActionHandoff {
   bulk_confirmation_flag: string | null;
 }
 
+interface ProtectedCommandHandoffSummary {
+  sender_domain_apply: ProtectedCommandHandoff | null;
+  inbound_probe: ProtectedCommandHandoff | null;
+  outbound_reply_probe: ProtectedCommandHandoff | null;
+}
+
+interface ProtectedCommandHandoff {
+  dry_run_one: string[];
+  execute_one: string[] | null;
+  execute_all: string[] | null;
+}
+
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const jsonOutput = args.includes("--json");
@@ -110,6 +122,11 @@ const ackDryRun =
   skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
 const blockers = buildBlockers(summary, productionPreflight, ackRefresh, previewCleanup, ackDryRun);
 const protectedActions = buildProtectedActions(summary, ackDryRun);
+const protectedCommandHandoff = buildProtectedCommandHandoff(
+  protectedActions,
+  ackManifestPath,
+  planPath,
+);
 const ready =
   blockers.length === 0 &&
   productionPreflight?.ok !== false &&
@@ -151,6 +168,7 @@ const closeout = {
   },
   ack_dry_run: redactSensitive ? redactAckDryRun(ackDryRun) : ackDryRun,
   protected_actions: protectedActions,
+  protected_command_handoff: protectedCommandHandoff,
   blockers,
 };
 
@@ -277,6 +295,128 @@ function buildProtectedActions(
       bulk_confirmation_required: outboundReplyProbeCount > 1,
       bulk_confirmation_flag: outboundReplyProbeCount > 1 ? "--confirm-bulk-live-send" : null,
     },
+  };
+}
+
+function buildProtectedCommandHandoff(
+  actions: ProtectedActionsSummary,
+  manifestPath: string,
+  proofPlanPath: string,
+): ProtectedCommandHandoffSummary {
+  return {
+    sender_domain_apply: senderDomainApplyCommands(actions.sender_domain_apply, manifestPath),
+    inbound_probe: inboundProbeCommands(actions.inbound_probe, proofPlanPath),
+    outbound_reply_probe: outboundReplyProbeCommands(actions.outbound_reply_probe, proofPlanPath),
+  };
+}
+
+function senderDomainApplyCommands(
+  action: ProtectedActionHandoff,
+  manifestPath: string,
+): ProtectedCommandHandoff | null {
+  if (action.count <= 0) return null;
+  const manifestArg = commandPath(manifestPath);
+  const base = [
+    "bun",
+    "run",
+    "apply:maildesk-acks",
+    "--",
+    "--manifest",
+    manifestArg,
+  ];
+  const dryRunOne = [...base, "--limit", "1", "--json"];
+  const canExecute = (action.dry_run_ready_count ?? 0) > 0;
+  const executeOne = canExecute
+    ? [...base, "--execute", "--confirm-ack-plan", "--limit", "1", "--json"]
+    : null;
+  const executeAll =
+    canExecute && action.count > 1
+      ? [
+          ...base,
+          "--execute",
+          "--confirm-ack-plan",
+          "--confirm-bulk-ack-plan",
+          "--all",
+          "--json",
+        ]
+      : null;
+
+  return {
+    dry_run_one: dryRunOne,
+    execute_one: executeOne,
+    execute_all: executeAll,
+  };
+}
+
+function inboundProbeCommands(
+  action: ProtectedActionHandoff,
+  proofPlanPath: string,
+): ProtectedCommandHandoff | null {
+  if (action.count <= 0) return null;
+  const base = [
+    "bun",
+    "run",
+    "send:maildesk-probes",
+    "--",
+    "--plan",
+    commandPath(proofPlanPath),
+    "--kind",
+    "inbound",
+    "--from",
+    "<verified-sender>",
+  ];
+  return {
+    dry_run_one: [...base, "--limit", "1", "--json"],
+    execute_one: [...base, "--execute", "--confirm-live-send", "--limit", "1", "--json"],
+    execute_all:
+      action.count > 1
+        ? [
+            ...base,
+            "--execute",
+            "--confirm-live-send",
+            "--confirm-bulk-live-send",
+            "--all",
+            "--json",
+          ]
+        : null,
+  };
+}
+
+function outboundReplyProbeCommands(
+  action: ProtectedActionHandoff,
+  proofPlanPath: string,
+): ProtectedCommandHandoff | null {
+  if (action.count <= 0) return null;
+  const base = [
+    "bun",
+    "run",
+    "send:maildesk-probes",
+    "--",
+    "--plan",
+    commandPath(proofPlanPath),
+    "--kind",
+    "outbound",
+    "--api-url",
+    "<maildesk-api-url>",
+    "--api-token",
+    "<reply-api-token>",
+    "--to",
+    "<proof-recipient>",
+  ];
+  return {
+    dry_run_one: [...base, "--limit", "1", "--json"],
+    execute_one: [...base, "--execute", "--confirm-live-send", "--limit", "1", "--json"],
+    execute_all:
+      action.count > 1
+        ? [
+            ...base,
+            "--execute",
+            "--confirm-live-send",
+            "--confirm-bulk-live-send",
+            "--all",
+            "--json",
+          ]
+        : null,
   };
 }
 
@@ -469,4 +609,9 @@ function parseJson<T>(value: string, label: string): T {
 
 function relativePath(path: string): string {
   return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+}
+
+function commandPath(path: string): string {
+  const absolutePath = resolve(root, path);
+  return relative(root, absolutePath) || ".";
 }
