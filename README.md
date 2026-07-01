@@ -150,8 +150,9 @@ without printing sender domains or ack commands. Pass
 duplicate active local `cfctl` preview records after the new previews are
 captured. Pass `--purge-expired-previews` to remove expired local preview
 records when `cfctl doctor` reports preview-ledger drift. Closeout JSON also
-includes aggregate `protected_actions` counts and required confirmation flags
-for the next sender-domain apply and live-probe handoffs.
+includes aggregate `protected_actions` counts, required confirmation flags, and
+sanitized `protected_command_handoff` argv arrays for the next sender-domain
+apply and live-probe handoffs.
 `bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by

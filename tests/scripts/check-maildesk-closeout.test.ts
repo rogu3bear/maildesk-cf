@@ -247,6 +247,135 @@ describe("maildesk closeout gate", () => {
     });
   });
 
+  test("emits sanitized argv commands for the next protected handoff", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 2,
+      gap_count: 4,
+      proof_actions: 4,
+      targeted_inbound_probes: 2,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 2,
+      sender_domain_blocked_count: 2,
+      sender_domain_ack_ready_count: 2,
+      sender_domain_ack_missing_count: 0,
+    });
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "tenant-a.example.com",
+          operation_id: "op-a",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-a.example.com --name tenant-a.example.com --ack-plan op-a",
+        },
+        {
+          ok: true,
+          performed: false,
+          target: "tenant-b.example.com",
+          operation_id: "op-b",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-b.example.com --name tenant-b.example.com --ack-plan op-b",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--ack-manifest",
+        manifestPath,
+        "--plan",
+        "var/maildesk-proof-plan.json",
+        "--preflight-command",
+        preflight,
+        "--redact-sensitive",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain("tenant-a.example.com");
+    expect(result.stdout).not.toContain("op-a");
+    expect(result.stdout).not.toContain("--ack-plan");
+    const closeout = JSON.parse(result.stdout) as {
+      protected_command_handoff?: {
+        sender_domain_apply?: {
+          dry_run_one?: string[];
+          execute_one?: string[];
+          execute_all?: string[] | null;
+        };
+        inbound_probe?: {
+          dry_run_one?: string[];
+          execute_one?: string[];
+          execute_all?: string[] | null;
+        };
+      };
+    };
+    expect(closeout.protected_command_handoff?.sender_domain_apply?.dry_run_one).toEqual([
+      "bun",
+      "run",
+      "apply:maildesk-acks",
+      "--",
+      "--manifest",
+      relative(root, manifestPath),
+      "--limit",
+      "1",
+      "--json",
+    ]);
+    expect(closeout.protected_command_handoff?.sender_domain_apply?.execute_one).toEqual([
+      "bun",
+      "run",
+      "apply:maildesk-acks",
+      "--",
+      "--manifest",
+      relative(root, manifestPath),
+      "--execute",
+      "--confirm-ack-plan",
+      "--limit",
+      "1",
+      "--json",
+    ]);
+    expect(closeout.protected_command_handoff?.sender_domain_apply?.execute_all).toContain(
+      "--confirm-bulk-ack-plan",
+    );
+    expect(closeout.protected_command_handoff?.inbound_probe?.execute_one).toEqual([
+      "bun",
+      "run",
+      "send:maildesk-probes",
+      "--",
+      "--plan",
+      "var/maildesk-proof-plan.json",
+      "--kind",
+      "inbound",
+      "--from",
+      "<verified-sender>",
+      "--execute",
+      "--confirm-live-send",
+      "--limit",
+      "1",
+      "--json",
+    ]);
+    expect(closeout.protected_command_handoff?.inbound_probe?.execute_all).toContain(
+      "--confirm-bulk-live-send",
+    );
+  });
+
   test("refreshes ack manifest before closeout dry-run when requested", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
