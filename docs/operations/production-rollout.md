@@ -86,10 +86,11 @@ control plane owns Cloudflare writes.
 
 ## 5. Production Preflight
 
-Set or source the required variables, then run:
+Put the required variables in the ignored repo-local env file or export them in
+the shell, then run:
 
 ```bash
-bun run preflight:production
+bun run preflight:production -- --env-file .dev.vars
 ```
 
 Production preflight must fail on placeholder Cloudflare IDs, missing auth,

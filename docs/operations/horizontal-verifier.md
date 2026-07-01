@@ -33,6 +33,7 @@ called done:
 
 ```bash
 bun run check:maildesk-closeout -- \
+  --env-file .dev.vars \
   --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json \
   --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
   --refresh-acks \
@@ -46,8 +47,10 @@ That command is non-mutating. It runs production preflight, reads the compact
 receipt summary, optionally refreshes the sender-domain ack manifest in
 `cfctl --plan` mode, dry-runs the reviewed sender-domain ack manifest, and
 exits non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all
-proven. Protected applies and live mail probes are reported as blockers; they
-are not executed by the closeout gate.
+proven. Use `--env-file .dev.vars` when production-only values live in the
+ignored repo-local env file instead of the shell environment. Protected applies
+and live mail probes are reported as blockers; they are not executed by the
+closeout gate.
 
 The closeout JSON includes an aggregate `protected_actions` handoff. It records
 how many sender-domain applies, inbound probes, and outbound reply probes are

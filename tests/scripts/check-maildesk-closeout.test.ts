@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
@@ -528,7 +528,69 @@ describe("maildesk closeout gate", () => {
       detail: "missing or placeholder environment variable: MAILDESK_API_TOKEN",
     });
   });
+
+  test("loads an explicit env file before running production preflight", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const envDir = mkdtempSync(join(ensureVarDir(), "closeout-env-"));
+    const envFile = join(envDir, ".dev.vars");
+    const preflight = fakeEnvAwarePreflight();
+    writeFileSync(envFile, "MAILDESK_API_TOKEN=example-maildesk-token\n");
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      proof_actions: 1,
+      targeted_inbound_probes: 1,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 0,
+      sender_domain_blocked_count: 0,
+      sender_domain_ack_ready_count: 0,
+      sender_domain_ack_missing_count: 0,
+    });
+    const env = { ...process.env };
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROOF_API_TOKEN;
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--skip-ack-dry-run",
+        "--preflight-command",
+        preflight,
+        "--env-file",
+        relative(root, envFile),
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8", env },
+    );
+
+    expect(result.status).toBe(1);
+    const closeout = JSON.parse(result.stdout) as {
+      production_preflight?: { ok?: boolean; failures?: string[] };
+      blockers?: Array<{ kind?: string }>;
+    };
+    expect(closeout.production_preflight).toMatchObject({
+      ok: true,
+      failures: [],
+    });
+    expect(closeout.blockers).not.toContainEqual({ kind: "production_preflight" });
+  });
 });
+
+function ensureVarDir(): string {
+  const dir = resolve(root, "var");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function fakePreflight(status: number, stderr: string, stdout: string): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-preflight-"));
@@ -541,6 +603,24 @@ ${stdout}STDOUT
 cat >&2 <<'STDERR'
 ${stderr}STDERR
 exit ${status}
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeEnvAwarePreflight(): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-env-aware-preflight-"));
+  const path = join(dir, "preflight");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+if [ -n "$MAILDESK_API_TOKEN" ]; then
+  echo "preflight ok: production"
+  exit 0
+fi
+echo "fail: missing or placeholder environment variable: MAILDESK_API_TOKEN" >&2
+exit 1
 `,
   );
   chmodSync(path, 0o700);

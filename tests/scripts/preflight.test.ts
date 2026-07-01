@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
@@ -90,6 +90,76 @@ describe("production preflight", () => {
     }
   });
 
+  test("loads production-only secrets from an explicit repo-local env file", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const envDir = mkdtempSync(join(ensureVarDir(), "preflight-env-"));
+    const envFile = join(envDir, ".dev.vars");
+    writeFileSync(
+      envFile,
+      [
+        "MAILDESK_API_TOKEN=example-maildesk-token",
+        "MAILDESK_OUTBOUND_MODE=cloudflare_email_service",
+        "MAILDESK_VERIFIED_SENDER_DOMAINS=example.com",
+      ].join("\n"),
+    );
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+    };
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROOF_API_TOKEN;
+    delete env.MAILDESK_OUTBOUND_MODE;
+    delete env.MAILDESK_VERIFIED_SENDER_DOMAINS;
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/preflight.ts",
+        "--mode",
+        "production",
+        "--env-file",
+        relative(root, envFile),
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      },
+    );
+
+    expect([0, 1]).toContain(result.status);
+    expect(result.stderr).not.toContain("set one of MAILDESK_API_TOKEN, MAILDESK_PROOF_API_TOKEN");
+    expect(result.stderr).not.toContain("MAILDESK_VERIFIED_SENDER_DOMAINS");
+  });
+
+  test("rejects env files outside the repository root", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const envDir = mkdtempSync(join(tmpdir(), "maildesk-outside-env-"));
+    const envFile = join(envDir, ".dev.vars");
+    writeFileSync(envFile, "MAILDESK_API_TOKEN=secret-outside-value\n");
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+    };
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROOF_API_TOKEN;
+
+    const result = spawnSync(
+      "bun",
+      ["run", "scripts/preflight.ts", "--mode", "production", "--env-file", envFile],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("env file must be under repository root");
+    expect(result.stderr).not.toContain("secret-outside-value");
+  });
+
   test("fails Cloudflare proof when cfctl doctor has no healthy lane", () => {
     const cfctl = fakeCfctlDoctor(false);
     const env = {
@@ -134,6 +204,12 @@ describe("production preflight", () => {
     expect(result.stderr).toContain("set one of MAILDESK_API_TOKEN, MAILDESK_PROOF_API_TOKEN");
   });
 });
+
+function ensureVarDir(): string {
+  const dir = resolve(root, "var");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 function fakeCfctlDoctor(healthy: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-"));

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { loadEnvFile } from "./env-file";
 
 interface ReceiptSummary {
   local_truth_ok?: boolean;
@@ -82,6 +83,7 @@ const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const jsonOutput = args.includes("--json");
 const redactSensitive = args.includes("--redact-sensitive");
+const envFileLoad = loadEnvFile(root, argValue("--env-file"));
 const summaryPath =
   argValue("--summary") ?? "var/proof/maildesk-receipt-require-ack-ready-summary.local.json";
 const ackManifestPath =
@@ -94,7 +96,11 @@ const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
 
 const summary = readJson<ReceiptSummary>(summaryPath);
-const productionPreflight = skipProductionPreflight ? null : runProductionPreflight();
+const productionPreflight = skipProductionPreflight
+  ? null
+  : envFileLoad.failures.length > 0
+    ? { ok: false, status: 1, failures: envFileLoad.failures }
+    : runProductionPreflight();
 const ackRefresh = refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
 const previewCleanup =
   purgeDuplicatePreviews || purgeExpiredPreviews
@@ -280,6 +286,7 @@ function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummar
     ? spawnSync(command, ["--plan", planPath, "--out", manifestPath, "--json"], {
         cwd: root,
         encoding: "utf8",
+        env: process.env,
       })
     : spawnSync(
         "bun",
@@ -292,7 +299,7 @@ function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummar
           manifestPath,
           "--json",
         ],
-        { cwd: root, encoding: "utf8" },
+        { cwd: root, encoding: "utf8", env: process.env },
       );
   const status = result.status ?? 1;
   if (status !== 0) {
@@ -318,10 +325,11 @@ function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummar
 function runProductionPreflight(): { ok: boolean; failures: string[]; status: number } {
   const command = argValue("--preflight-command");
   const result = command
-    ? spawnSync(command, { cwd: root, encoding: "utf8" })
+    ? spawnSync(command, { cwd: root, encoding: "utf8", env: process.env })
     : spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
         cwd: root,
         encoding: "utf8",
+        env: process.env,
       });
   const status = result.status ?? 1;
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
@@ -377,10 +385,11 @@ function runPreviewCleanupCommand(
   cfctlArgs: string[],
 ): PreviewCleanupSummary {
   const result = command
-    ? spawnSync(command, { cwd: root, encoding: "utf8" })
+    ? spawnSync(command, { cwd: root, encoding: "utf8", env: process.env })
     : spawnSync("cfctl", cfctlArgs, {
         cwd: root,
         encoding: "utf8",
+        env: process.env,
       });
   const status = result.status ?? 1;
   if (status !== 0) {
@@ -414,7 +423,7 @@ function runAckDryRun(manifestPath: string): AckDryRunSummary {
   const result = spawnSync(
     "bun",
     ["run", "scripts/apply-sender-domain-ack-manifest.ts", "--manifest", manifestPath, "--json"],
-    { cwd: root, encoding: "utf8" },
+    { cwd: root, encoding: "utf8", env: process.env },
   );
   if (result.status !== 0) {
     return {

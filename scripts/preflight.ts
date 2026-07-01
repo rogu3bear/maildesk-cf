@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { loadEnvFile } from "./env-file";
 
 type Mode = "template" | "production";
 
@@ -13,11 +14,14 @@ interface DesiredState {
 }
 
 const root = resolve(import.meta.dir, "..");
-const args = new Set(process.argv.slice(2));
+const rawArgs = process.argv.slice(2);
+const args = new Set(rawArgs);
 const failures: string[] = [];
 const warnings: string[] = [];
+const envFileLoad = loadEnvFile(root, argValue("--env-file"));
+failures.push(...envFileLoad.failures);
 const mode: Mode = args.has("--mode")
-  ? parseMode(process.argv[process.argv.indexOf("--mode") + 1])
+  ? parseMode(argValue("--mode"))
   : args.has("--production")
     ? "production"
     : "template";
@@ -81,6 +85,12 @@ function parseMode(value: string | undefined): Mode {
   return "template";
 }
 
+function argValue(name: string): string | undefined {
+  const index = rawArgs.indexOf(name);
+  if (index === -1) return undefined;
+  return rawArgs[index + 1];
+}
+
 function checkFile(path: string) {
   if (!existsSync(resolve(root, path))) {
     failures.push(`missing required file: ${path}`);
@@ -88,7 +98,7 @@ function checkFile(path: string) {
 }
 
 function checkCommand(command: string, args: string[], required: boolean) {
-  const result = spawnSync(command, args, { cwd: root, encoding: "utf8" });
+  const result = spawnSync(command, args, { cwd: root, encoding: "utf8", env: process.env });
   if (result.status === 0) return;
 
   const message = `command unavailable or failing: ${command}`;
@@ -100,7 +110,7 @@ function checkPolicy(path: string) {
   const result = spawnSync(
     "cargo",
     ["run", "--quiet", "--bin", "maildesk-policy-check", "--", path],
-    { cwd: root, encoding: "utf8" },
+    { cwd: root, encoding: "utf8", env: process.env },
   );
   if (result.status === 0) return;
 
@@ -207,7 +217,7 @@ function checkTemplateExamples() {
 
 function readCfctlDoctor(): CfctlDoctorSummary | null {
   const command = process.env.CFCTL_BIN ?? "cfctl";
-  const result = spawnSync(command, ["doctor"], { cwd: root, encoding: "utf8" });
+  const result = spawnSync(command, ["doctor"], { cwd: root, encoding: "utf8", env: process.env });
   if (result.status !== 0 || !result.stdout.trim()) return null;
 
   try {
