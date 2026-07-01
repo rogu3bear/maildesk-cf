@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/preflight.ts scripts/collect-live-evidence.ts scripts/plan-mail-proofs.ts scripts/receipt-maildesk.ts scripts/send-mail-probes.ts scripts/verify-maildesk.ts docs/ARTIFACTS-POLICY.md docs/SCRIPT-OWNERSHIP.md docs/roadmap.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/architecture/outbound-identity.md docs/operations/cfctl-contract.md docs/operations/deliverability.md docs/operations/horizontal-verifier.md docs/operations/preflight.md docs/operations/production-rollout.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json config/desired-state.example.json; do
+for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/preflight.ts scripts/collect-live-evidence.ts scripts/plan-mail-proofs.ts scripts/receipt-maildesk.ts scripts/refresh-sender-domain-ack-manifest.ts scripts/send-mail-probes.ts scripts/verify-maildesk.ts docs/ARTIFACTS-POLICY.md docs/SCRIPT-OWNERSHIP.md docs/roadmap.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/architecture/outbound-identity.md docs/operations/cfctl-contract.md docs/operations/deliverability.md docs/operations/horizontal-verifier.md docs/operations/preflight.md docs/operations/production-rollout.md ops/cfctl/maildesk-cf.surface.md config/policy.example.json config/desired-state.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done

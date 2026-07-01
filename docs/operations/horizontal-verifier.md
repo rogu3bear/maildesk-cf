@@ -26,6 +26,18 @@ bun run receipt:maildesk -- \
 That remains a no-mutation workflow. It fails the receipt only when
 sender-domain blockers are missing exact ack commands.
 
+To refresh that manifest from the current proof plan without applying anything:
+
+```bash
+bun run refresh:maildesk-acks -- \
+  --plan var/maildesk-proof-plan.json \
+  --out var/proof/maildesk-sender-domain-ack-manifest.local.json
+```
+
+The refresher executes only the `cfctl apply sender_domain enable ... --plan`
+commands already present in the proof plan, stores the preview receipts, and
+constructs protected `--ack-plan` commands for review.
+
 For template-only or offline receipt checks, skip live collection:
 
 ```bash
