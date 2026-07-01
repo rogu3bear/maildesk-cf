@@ -91,6 +91,17 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
     const policyDomain = policy.domains[gap.domain];
     if (!row || !policyDomain) continue;
 
+    if (isReservedExampleDomain(gap.domain)) {
+      actions.push({
+        kind: "blocked",
+        domain: gap.domain,
+        blocked_by: "template_desired_state",
+        description:
+          "copy config/desired-state.example.json to config/desired-state.local.json and config/policy.example.json to config/policy.local.json with a real domain before live mail proof",
+      });
+      continue;
+    }
+
     if (gap.field === "inbound_proof") {
       if (row.inbound_mx_provider && row.inbound_mx_provider !== "cloudflare_email_routing") {
         actions.push({
@@ -183,6 +194,10 @@ function outboundIdentity(domain: string, policyDomain: PolicyDomain): string {
   return personal?.reply_identity ?? `postmaster@${domain}`;
 }
 
+function isReservedExampleDomain(domain: string): boolean {
+  return domain === "example.com" || domain === "example.net" || domain === "example.org";
+}
+
 function defaultPolicyPath(): string {
   return existsSync(resolve(root, "config/policy.local.json"))
     ? "config/policy.local.json"
@@ -219,6 +234,11 @@ type ProofAction =
   | {
       kind: "blocked";
       domain: string;
-      blocked_by: "inbound_mx" | "inbound_provider" | "inbound_proof" | "sender_domain_not_verified";
+      blocked_by:
+        | "inbound_mx"
+        | "inbound_provider"
+        | "inbound_proof"
+        | "sender_domain_not_verified"
+        | "template_desired_state";
       description: string;
     };
