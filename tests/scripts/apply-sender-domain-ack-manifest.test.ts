@@ -169,6 +169,59 @@ describe("sender-domain ack manifest applier", () => {
       operation_id: "op-tenant",
     });
   });
+
+  test("bulk execute requires an explicit bulk ack-plan confirmation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-ack-apply-"));
+    const manifestPath = join(dir, "ack-manifest.json");
+    const logPath = join(dir, "cfctl-calls.log");
+    const cfctl = fakeCfctl(logPath);
+
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "alpha.example.com",
+          operation_id: "op-alpha",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone alpha.example.com --name alpha.example.com --ack-plan op-alpha",
+        },
+        {
+          ok: true,
+          performed: false,
+          target: "bravo.example.com",
+          operation_id: "op-bravo",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone bravo.example.com --name bravo.example.com --ack-plan op-bravo",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/apply-sender-domain-ack-manifest.ts",
+        "--",
+        "--manifest",
+        manifestPath,
+        "--cfctl",
+        cfctl,
+        "--execute",
+        "--confirm-ack-plan",
+        "--all",
+        "--json",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("missing --confirm-bulk-ack-plan for bulk --execute");
+    expect(existsSync(logPath)).toBe(false);
+  });
 });
 
 function fakeCfctl(logPath: string): string {

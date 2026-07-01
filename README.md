@@ -151,7 +151,8 @@ captured.
 plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run apply:maildesk-acks` dry-runs reviewed sender-domain ack commands by
 default and requires `--execute --confirm-ack-plan` before it applies any
-`cfctl --ack-plan` operation.
+`cfctl --ack-plan` operation. Applying more than one selected ack operation
+also requires `--confirm-bulk-ack-plan`.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
 requires `--execute --confirm-live-send` before it sends mail or calls the
 reply API.

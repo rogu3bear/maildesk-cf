@@ -38,6 +38,7 @@ const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const execute = args.includes("--execute");
 const confirmAckPlan = args.includes("--confirm-ack-plan");
+const confirmBulkAckPlan = args.includes("--confirm-bulk-ack-plan");
 const jsonOutput = args.includes("--json");
 const manifestPath = argValue("--manifest") ?? "var/proof/maildesk-sender-domain-ack-manifest.local.json";
 const outPath = argValue("--out");
@@ -64,6 +65,11 @@ const ready = items
   .filter((item): item is ReadyAck => Boolean(item))
   .filter((item) => !domainFilter || item.domain === domainFilter)
   .slice(0, limit);
+
+if (execute && ready.length > 1 && !confirmBulkAckPlan) {
+  console.error("missing --confirm-bulk-ack-plan for bulk --execute");
+  process.exit(1);
+}
 
 const results = ready.map((item) => (execute ? applyAck(item) : dryRunAck(item)));
 const summary = {

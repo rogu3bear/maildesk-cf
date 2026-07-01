@@ -80,7 +80,8 @@ bun run apply:maildesk-acks -- \
 
 Applying sender-domain ack commands is a protected action. It requires both
 `--execute` and `--confirm-ack-plan`, and it defaults to one apply at a time
-unless `--all` or a larger `--limit` is passed:
+unless `--all` or a larger `--limit` is passed. Applying more than one selected
+ack operation also requires `--confirm-bulk-ack-plan`:
 
 ```bash
 bun run apply:maildesk-acks -- \
@@ -88,6 +89,18 @@ bun run apply:maildesk-acks -- \
   --execute \
   --confirm-ack-plan \
   --limit 1
+```
+
+For a deliberately batched repair, add the bulk confirmation only after
+reviewing the selected manifest entries:
+
+```bash
+bun run apply:maildesk-acks -- \
+  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --execute \
+  --confirm-ack-plan \
+  --confirm-bulk-ack-plan \
+  --limit 2
 ```
 
 For template-only or offline receipt checks, skip live collection:
