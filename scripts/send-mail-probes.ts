@@ -49,6 +49,7 @@ const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const execute = args.includes("--execute");
 const confirmLiveSend = args.includes("--confirm-live-send");
+const confirmBulkLiveSend = args.includes("--confirm-bulk-live-send");
 const jsonOutput = args.includes("--json");
 const kind = argValue("--kind") ?? "inbound";
 const planPath = resolve(root, argValue("--plan") ?? "var/maildesk-proof-plan.json");
@@ -91,6 +92,11 @@ const probes = plan.actions
   )
   .filter((action) => !domainFilter || action.domain === domainFilter)
   .slice(0, limit);
+
+if (execute && probes.length > 1 && !confirmBulkLiveSend) {
+  console.error("missing --confirm-bulk-live-send for bulk --execute");
+  process.exit(1);
+}
 
 const generatedAt = new Date().toISOString();
 const results = probes.map((probe) =>

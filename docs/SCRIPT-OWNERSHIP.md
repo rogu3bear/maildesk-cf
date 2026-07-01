@@ -15,7 +15,7 @@ logging, and keep live mutation behind explicit operator action.
 | `scripts/plan-mail-proofs.ts` | operator-planning | Converts verifier gaps into targeted proof steps. Does not send mail or mutate Cloudflare. |
 | `scripts/refresh-sender-domain-ack-manifest.ts` | operator-planning | Reruns sender-domain proof-plan preview commands with `cfctl --plan` and writes an ack manifest. Must not apply preview operations. |
 | `scripts/apply-sender-domain-ack-manifest.ts` | protected-apply | Dry-runs reviewed sender-domain ack commands by default. Requires `--execute --confirm-ack-plan` before applying any `cfctl --ack-plan` operation, plus `--confirm-bulk-ack-plan` when more than one selected ack would apply. |
-| `scripts/send-mail-probes.ts` | protected-probe | Dry-runs targeted probes by default. Requires explicit `--execute --confirm-live-send` before sending mail or calling the reply API. |
+| `scripts/send-mail-probes.ts` | protected-probe | Dry-runs targeted probes by default. Requires explicit `--execute --confirm-live-send` before sending mail or calling the reply API, plus `--confirm-bulk-live-send` when more than one selected probe would execute. |
 | `scripts/init.sh` | template-generation | Renames the template for a new project checkout. Should not copy private local state. |
 
 ## Mutation Boundary
