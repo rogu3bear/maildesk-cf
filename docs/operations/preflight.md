@@ -27,10 +27,14 @@ Template mode must not require real Cloudflare credentials.
 Production mode is for a de-templated private instance:
 
 ```bash
-bun run preflight:production
+bun run preflight:production -- --env-file .dev.vars
 ```
 
-It verifies the template checks plus production-only requirements.
+It verifies the template checks plus production-only requirements. You may also
+export the variables directly in the shell and run `bun run preflight:production`.
+The explicit env-file path must point inside the repository, fills missing
+variables without overriding existing shell values, and does not print secret
+values.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |

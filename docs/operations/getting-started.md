@@ -62,7 +62,7 @@ Before a real deployment, export production variables or use a local ignored
 environment file, then run:
 
 ```bash
-bun run preflight:production
+bun run preflight:production -- --env-file .dev.vars
 ```
 
 See [preflight.md](preflight.md) for the full variable contract.

@@ -115,7 +115,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-rece
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
-bun run check:maildesk-closeout -- --summary var/maildesk-receipt-summary.json --redact-sensitive --json
+bun run check:maildesk-closeout -- --env-file .dev.vars --summary var/maildesk-receipt-summary.json --redact-sensitive --json
 bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
 bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
@@ -140,10 +140,12 @@ available readbacks without mutating Cloudflare.
 `bun run check:maildesk-closeout` joins production preflight, the compact
 receipt summary, and sender-domain ack dry-run state into one non-mutating
 closeout gate. It exits non-zero until instance, edge, and mail readiness are
-actually proven. Pass `--refresh-acks` when the closeout should refresh the
-sender-domain ack manifest in `cfctl --plan` mode before dry-running it. Pass
-`--redact-sensitive` with `--json` for shareable summaries that keep counts and
-blocker kinds without printing sender domains or ack commands. Pass
+actually proven. Pass `--env-file .dev.vars` when production-only values live
+in the ignored local env file instead of the shell environment. Pass
+`--refresh-acks` when the closeout should refresh the sender-domain ack
+manifest in `cfctl --plan` mode before dry-running it. Pass `--redact-sensitive`
+with `--json` for shareable summaries that keep counts and blocker kinds
+without printing sender domains or ack commands. Pass
 `--purge-duplicate-previews` after repeated `--refresh-acks` runs to clean up
 duplicate active local `cfctl` preview records after the new previews are
 captured. Pass `--purge-expired-previews` to remove expired local preview
@@ -186,11 +188,13 @@ Before provisioning a real Cloudflare account, copy `.env.example` to a local
 ignored environment file or export equivalent variables, then run:
 
 ```bash
-bun run preflight:production
+bun run preflight:production -- --env-file .dev.vars
 ```
 
 Production preflight checks required Cloudflare/cfctl inputs, policy validity,
 and placeholder Cloudflare resource IDs before any account mutation.
+The env-file loader accepts only repo-local files, fills missing variables, and
+does not print secret values.
 
 See [docs/operations/preflight.md](docs/operations/preflight.md) for the exact
 variable contract.
