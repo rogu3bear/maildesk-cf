@@ -64,6 +64,20 @@ interface Blocker {
   detail?: string;
 }
 
+interface ProtectedActionsSummary {
+  sender_domain_apply: ProtectedActionHandoff;
+  inbound_probe: ProtectedActionHandoff;
+  outbound_reply_probe: ProtectedActionHandoff;
+}
+
+interface ProtectedActionHandoff {
+  count: number;
+  dry_run_ready_count?: number;
+  required_flags: string[];
+  bulk_confirmation_required: boolean;
+  bulk_confirmation_flag: string | null;
+}
+
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const jsonOutput = args.includes("--json");
@@ -89,6 +103,7 @@ const previewCleanup =
 const ackDryRun =
   skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
 const blockers = buildBlockers(summary, productionPreflight, ackRefresh, previewCleanup, ackDryRun);
+const protectedActions = buildProtectedActions(summary, ackDryRun);
 const ready =
   blockers.length === 0 &&
   productionPreflight?.ok !== false &&
@@ -129,6 +144,7 @@ const closeout = {
     sender_domain_ack_missing_count: summary.sender_domain_ack_missing_count ?? 0,
   },
   ack_dry_run: redactSensitive ? redactAckDryRun(ackDryRun) : ackDryRun,
+  protected_actions: protectedActions,
   blockers,
 };
 
@@ -224,6 +240,38 @@ function buildBlockers(
   }
 
   return blockers;
+}
+
+function buildProtectedActions(
+  receipt: ReceiptSummary,
+  ack: AckDryRunSummary | null,
+): ProtectedActionsSummary {
+  const senderDomainCount =
+    (receipt.sender_domain_ack_missing_count ?? 0) > 0 ? 0 : receipt.sender_domain_blocked_count ?? 0;
+  const inboundProbeCount = receipt.targeted_inbound_probes ?? 0;
+  const outboundReplyProbeCount = receipt.targeted_outbound_reply_probes ?? 0;
+
+  return {
+    sender_domain_apply: {
+      count: senderDomainCount,
+      dry_run_ready_count: ack?.ready_count ?? 0,
+      required_flags: ["--execute", "--confirm-ack-plan"],
+      bulk_confirmation_required: senderDomainCount > 1,
+      bulk_confirmation_flag: senderDomainCount > 1 ? "--confirm-bulk-ack-plan" : null,
+    },
+    inbound_probe: {
+      count: inboundProbeCount,
+      required_flags: ["--execute", "--confirm-live-send"],
+      bulk_confirmation_required: inboundProbeCount > 1,
+      bulk_confirmation_flag: inboundProbeCount > 1 ? "--confirm-bulk-live-send" : null,
+    },
+    outbound_reply_probe: {
+      count: outboundReplyProbeCount,
+      required_flags: ["--execute", "--confirm-live-send"],
+      bulk_confirmation_required: outboundReplyProbeCount > 1,
+      bulk_confirmation_flag: outboundReplyProbeCount > 1 ? "--confirm-bulk-live-send" : null,
+    },
+  };
 }
 
 function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummary {

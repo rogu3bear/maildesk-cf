@@ -151,6 +151,102 @@ describe("maildesk closeout gate", () => {
     });
   });
 
+  test("summarizes protected action handoffs without exposing sensitive details", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "ack-manifest.json");
+    const preflight = fakePreflight(0, "", "preflight ok: production\n");
+
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: true,
+      mail_ready: false,
+      domain_count: 2,
+      gap_count: 4,
+      proof_actions: 4,
+      targeted_inbound_probes: 2,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 2,
+      sender_domain_blocked_count: 2,
+      sender_domain_ack_ready_count: 2,
+      sender_domain_ack_missing_count: 0,
+    });
+    writeJson(manifestPath, {
+      items: [
+        {
+          ok: true,
+          performed: false,
+          target: "tenant-a.example.com",
+          operation_id: "op-a",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-a.example.com --name tenant-a.example.com --ack-plan op-a",
+        },
+        {
+          ok: true,
+          performed: false,
+          target: "tenant-b.example.com",
+          operation_id: "op-b",
+          ack_command:
+            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-b.example.com --name tenant-b.example.com --ack-plan op-b",
+        },
+      ],
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-maildesk-closeout.ts",
+        "--",
+        "--summary",
+        summaryPath,
+        "--ack-manifest",
+        manifestPath,
+        "--preflight-command",
+        preflight,
+        "--redact-sensitive",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain("tenant-a.example.com");
+    expect(result.stdout).not.toContain("tenant-b.example.com");
+    expect(result.stdout).not.toContain("--ack-plan");
+    const closeout = JSON.parse(result.stdout) as {
+      protected_actions?: {
+        sender_domain_apply?: {
+          count?: number;
+          dry_run_ready_count?: number;
+          required_flags?: string[];
+          bulk_confirmation_required?: boolean;
+          bulk_confirmation_flag?: string | null;
+        };
+        inbound_probe?: {
+          count?: number;
+          required_flags?: string[];
+          bulk_confirmation_required?: boolean;
+          bulk_confirmation_flag?: string | null;
+        };
+      };
+    };
+    expect(closeout.protected_actions?.sender_domain_apply).toMatchObject({
+      count: 2,
+      dry_run_ready_count: 2,
+      required_flags: ["--execute", "--confirm-ack-plan"],
+      bulk_confirmation_required: true,
+      bulk_confirmation_flag: "--confirm-bulk-ack-plan",
+    });
+    expect(closeout.protected_actions?.inbound_probe).toMatchObject({
+      count: 2,
+      required_flags: ["--execute", "--confirm-live-send"],
+      bulk_confirmation_required: true,
+      bulk_confirmation_flag: "--confirm-bulk-live-send",
+    });
+  });
+
   test("refreshes ack manifest before closeout dry-run when requested", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");

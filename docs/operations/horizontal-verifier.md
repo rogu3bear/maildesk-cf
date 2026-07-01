@@ -49,6 +49,13 @@ exits non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all
 proven. Protected applies and live mail probes are reported as blockers; they
 are not executed by the closeout gate.
 
+The closeout JSON includes an aggregate `protected_actions` handoff. It records
+how many sender-domain applies, inbound probes, and outbound reply probes are
+waiting, whether the corresponding dry-run is ready, and which confirmation
+flags are required for the next protected command. This handoff is count-only;
+redacted output does not include domains, addresses, operation IDs, or
+`cfctl --ack-plan` commands.
+
 Use `--purge-duplicate-previews` when `--refresh-acks` has been run repeatedly.
 The cleanup is local `cfctl` preview-ledger hygiene: it removes duplicate active
 preview records after fresh previews are captured, without applying
