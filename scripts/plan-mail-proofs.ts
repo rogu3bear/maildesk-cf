@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 
 interface Receipt {
   rows: DomainRow[];
@@ -13,6 +14,9 @@ interface DomainRow {
   inbound_proof: Status;
   outbound_sender: Status;
   outbound_proof: Status;
+  sender_domain?: {
+    provider?: string;
+  };
 }
 
 interface ReceiptGap {
@@ -145,12 +149,11 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
     }
 
     if (gap.field === "outbound_sender") {
+      const senderMode = rowSenderMode(row);
       actions.push({
         kind: "blocked",
         domain: gap.domain,
-        blocked_by: "sender_domain_not_verified",
-        ...senderDomainRepairCommands(gap.domain),
-        description: "repair provider sender-domain verification before attempting outbound reply proof",
+        ...senderRepairAction(senderMode, gap.domain),
       });
     }
 
@@ -170,12 +173,11 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
           description: "collect inbound proof first so outbound proof can reply from an audited thread",
         });
       } else if (row.outbound_sender !== "ok") {
+        const senderMode = rowSenderMode(row);
         actions.push({
           kind: "blocked",
           domain: gap.domain,
-          blocked_by: "sender_domain_not_verified",
-          ...senderDomainRepairCommands(gap.domain),
-          description: "repair sender-domain readiness before attempting outbound reply proof",
+          ...senderRepairAction(senderMode, gap.domain),
         });
       } else {
         const identity = outboundIdentity(gap.domain, policyDomain);
@@ -248,6 +250,37 @@ function senderDomainRepairCommands(domain: string): SenderDomainRepairCommands 
       : {}),
     verify_command: "cfctl maildesk-cf verify --file config/desired-state.local.json",
   };
+}
+
+function senderRepairAction(mode: SenderMode, domain: string): SenderRepairAction {
+  if (mode === "cloudflare_email_service") {
+    return {
+      blocked_by: "sender_domain_not_verified",
+      ...senderDomainRepairCommands(domain),
+      description:
+        "repair Cloudflare Email Service sender-domain verification before attempting outbound reply proof",
+    };
+  }
+
+  if (mode === "resend") {
+    return {
+      blocked_by: "resend_sender_domain_not_verified",
+      description:
+        "repair Resend sender-domain verification and refresh Resend provider readback before attempting outbound reply proof",
+      verify_command: "resend domains list --json --limit 100",
+    };
+  }
+
+  return {
+    blocked_by: "outbound_disabled",
+    description: "outbound sending is disabled by desired state; enable a sender mode before outbound reply proof",
+  };
+}
+
+function rowSenderMode(row: DomainRow): SenderMode {
+  const provider = row.sender_domain?.provider;
+  if (provider === undefined) return "cloudflare_email_service";
+  return isSenderMode(provider) ? provider : senderModeOrDefault(provider);
 }
 
 function loadAckManifest(path: string | undefined): Map<string, AckManifestEntry> {
@@ -337,6 +370,8 @@ type ProofAction =
         | "inbound_provider"
         | "inbound_proof"
         | "sender_domain_not_verified"
+        | "resend_sender_domain_not_verified"
+        | "outbound_disabled"
         | "template_desired_state";
       preview_command?: string;
       ack_command_template?: string;
@@ -350,6 +385,14 @@ interface SenderDomainRepairCommands {
   operation_id?: string;
   ack_command?: string;
   verify_command: string;
+}
+
+interface SenderRepairAction extends Partial<SenderDomainRepairCommands> {
+  blocked_by: Extract<
+    ProofAction,
+    { kind: "blocked" }
+  >["blocked_by"];
+  description: string;
 }
 
 interface AckManifest {

@@ -363,6 +363,8 @@ describe("maildesk closeout gate", () => {
       "var/maildesk-proof-plan.json",
       "--kind",
       "inbound",
+      "--inbound-provider",
+      "<probe-provider>",
       "--from",
       "<verified-sender>",
       "--execute",

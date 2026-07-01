@@ -41,7 +41,7 @@ describe("maildesk receipt workflow", () => {
         },
       ],
       sender: {
-        mode: "cloudflare_first",
+        mode: "cloudflare_email_service",
         authenticated_domains: ["tenant.example.com"],
       },
     });

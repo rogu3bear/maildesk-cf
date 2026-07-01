@@ -52,6 +52,7 @@ const confirmLiveSend = args.includes("--confirm-live-send");
 const confirmBulkLiveSend = args.includes("--confirm-bulk-live-send");
 const jsonOutput = args.includes("--json");
 const kind = argValue("--kind") ?? "inbound";
+const inboundProvider = argValue("--inbound-provider") ?? process.env.MAILDESK_INBOUND_PROBE_PROVIDER ?? "manual";
 const planPath = resolve(root, argValue("--plan") ?? "var/maildesk-proof-plan.json");
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const from = argValue("--from") ?? (execute ? undefined : "maildesk-proof@example.com");
@@ -63,6 +64,10 @@ const limit = args.includes("--all") ? Number.POSITIVE_INFINITY : Number(argValu
 
 if (kind !== "inbound" && kind !== "outbound") {
   console.error("invalid --kind; expected inbound or outbound");
+  process.exit(1);
+}
+if (inboundProvider !== "manual" && inboundProvider !== "resend") {
+  console.error("invalid --inbound-provider; expected manual or resend");
   process.exit(1);
 }
 if (execute && !confirmLiveSend) {
@@ -97,6 +102,10 @@ if (execute && probes.length > 1 && !confirmBulkLiveSend) {
   console.error("missing --confirm-bulk-live-send for bulk --execute");
   process.exit(1);
 }
+if (kind === "inbound" && execute && inboundProvider === "manual") {
+  console.error("manual inbound probes cannot execute; pass --inbound-provider resend or send the dry-run target manually");
+  process.exit(1);
+}
 
 const generatedAt = new Date().toISOString();
 const results = probes.map((probe) =>
@@ -108,6 +117,7 @@ const summary = {
   mode: execute ? "execute" : "dry_run",
   kind,
   plan_path: relativePath(planPath),
+  inbound_provider: kind === "inbound" ? inboundProvider : null,
   from: kind === "inbound" ? from : null,
   to: kind === "outbound" ? to : null,
   requested_domain: domainFilter ?? null,
@@ -128,8 +138,17 @@ if (jsonOutput) {
 function sendInboundProbe(
   probe: Extract<ProofAction, { kind: "targeted_inbound_probe" }>,
   generatedAt: string,
-): { domain: string; target: string; status: "sent" | "dry_run"; id?: string } {
+): { domain: string; target: string; status: "sent" | "dry_run"; provider: string; id?: string } {
   const idempotencyKey = `maildesk-proof:${probe.domain}:${tagValue(from as string)}:${generatedAt.slice(0, 10)}`;
+  if (!execute) {
+    return {
+      domain: probe.domain,
+      target: probe.target,
+      status: "dry_run",
+      provider: inboundProvider,
+    };
+  }
+
   const commandArgs = [
     "emails",
     "send",
@@ -150,7 +169,6 @@ function sendInboundProbe(
     "--idempotency-key",
     idempotencyKey,
     "--json",
-    ...(execute ? [] : ["--dry-run"]),
   ];
   const result = spawnSync("resend", commandArgs, { cwd: root, encoding: "utf8" });
   if (result.stderr) process.stderr.write(result.stderr);
@@ -161,7 +179,8 @@ function sendInboundProbe(
   return {
     domain: probe.domain,
     target: probe.target,
-    status: execute ? "sent" : "dry_run",
+    status: "sent",
+    provider: "resend",
     ...(parsed.id ? { id: parsed.id } : {}),
   };
 }

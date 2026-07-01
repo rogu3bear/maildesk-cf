@@ -2,9 +2,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { senderModeOrDefault } from "./sender-mode";
 
 interface DesiredState {
   domains: Array<{ name: string; inbound_mx_provider?: string }>;
+  sender?: {
+    mode?: string;
+  };
   workers?: {
     mail_router?: {
       script_name?: string;
@@ -80,8 +84,9 @@ const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
 const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-policy-path");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
-const useResend = !args.includes("--no-resend");
 const desiredState = readJson<DesiredState>(desiredStatePath);
+const senderMode = senderModeOrDefault(desiredState.sender?.mode);
+const useResend = senderMode === "resend" && !args.includes("--no-resend");
 const routerService = desiredState.workers?.mail_router?.script_name;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
@@ -417,7 +422,7 @@ function collectOutboundProofs(databaseName: string): Record<string, OutboundPro
       status: "delivered",
       from_identity: detail.fromIdentity,
       provider: detail.result?.provider,
-      provider_message_id: detail.result?.id,
+      provider_message_id: detail.result?.providerMessageId ?? detail.result?.id,
       audit_event_at: typeof row.created_at === "string" ? row.created_at : undefined,
     };
   }
@@ -584,6 +589,7 @@ interface OutboundAuditDetail {
   fromIdentity?: string;
   result?: {
     provider?: string;
+    providerMessageId?: string;
     id?: string;
   };
 }

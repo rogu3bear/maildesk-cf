@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
 
@@ -134,7 +135,7 @@ interface RouteSummary {
 
 interface SenderSummary {
   authenticated: boolean;
-  provider: string;
+  provider: SenderMode | "invalid";
   provider_status: string | null;
 }
 
@@ -319,7 +320,7 @@ function buildRows(
       d1_queue: checkD1Queue(live),
       inbound_proof: checkInboundProof(domainName, policyDomain, desiredDomain, live.inbound_proofs?.[domainName]),
       outbound_sender: checkSender(domainName, desired, live),
-      outbound_proof: checkOutboundProof(domainName, live.outbound_proofs?.[domainName]),
+      outbound_proof: checkOutboundProof(domainName, desired, live.outbound_proofs?.[domainName]),
     };
   });
 }
@@ -578,15 +579,25 @@ function isOkProofStatus(status: string | undefined): boolean {
 }
 
 function checkSender(domainName: string, desired: DesiredState, live: LiveEvidence): Status {
+  const mode = desiredSenderMode(desired);
+  if (mode === "invalid") return "drift";
+  if (mode === "disabled") return "ok";
+
   const desiredAuthenticated = desired.sender?.authenticated_domains?.includes(domainName) ?? false;
   if (!desiredAuthenticated) return "missing";
-  const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
-  if (cfctlStatus) return senderStatus(cfctlStatus);
-  if (desired.sender?.mode === "cloudflare_first" && live.cfctl_maildesk?.sender_domains) return "missing";
+
+  if (mode === "cloudflare_email_service") {
+    const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
+    if (cfctlStatus) return senderStatus(cfctlStatus);
+    if (live.cfctl_maildesk?.sender_domains) return "missing";
+    return "not_checked";
+  }
+
   if (!live.sender_domains) return "not_checked";
   if (Array.isArray(live.sender_domains)) {
     return live.sender_domains.includes(domainName) ? "ok" : "missing";
   }
+
   const status = live.sender_domains[domainName];
   return status === "verified" || status === "ok" ? "ok" : status ? "drift" : "missing";
 }
@@ -595,12 +606,16 @@ function senderStatus(status: Status): Status {
   return status === "ok" ? "ok" : status === "missing" ? "missing" : "drift";
 }
 
-function checkOutboundProof(domainName: string, proof: ProofEvidence | undefined): Status {
+function checkOutboundProof(domainName: string, desired: DesiredState, proof: ProofEvidence | undefined): Status {
+  const mode = desiredSenderMode(desired);
+  if (mode === "disabled") return "ok";
+  if (mode === "invalid") return "drift";
   if (!proof) return "not_checked";
   if (!isOkProofStatus(proof.status)) return "drift";
   if (!proof.from_identity) return "drift";
   const mailbox = parseMailbox(proof.from_identity);
   if (!mailbox || mailbox.domain !== domainName) return "drift";
+  if (proof.provider && proof.provider !== mode) return "drift";
   return proof.provider || proof.provider_message_id || proof.audit_event_at ? "ok" : "drift";
 }
 
@@ -641,21 +656,31 @@ function domainRoutes(
 }
 
 function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
+  const mode = desiredSenderMode(desired);
   return {
-    authenticated: desired.sender?.authenticated_domains?.includes(domainName) ?? false,
-    provider: desired.sender?.mode ?? "resend",
-    provider_status: senderProviderStatus(domainName, live),
+    authenticated: mode !== "disabled" && (desired.sender?.authenticated_domains?.includes(domainName) ?? false),
+    provider: mode,
+    provider_status: senderProviderStatus(domainName, desired, live),
   };
 }
 
-function senderProviderStatus(domainName: string, live: LiveEvidence): string | null {
-  const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
-  if (cfctlStatus) return cfctlStatus;
+function senderProviderStatus(domainName: string, desired: DesiredState, live: LiveEvidence): string | null {
+  const mode = desiredSenderMode(desired);
+  if (mode === "disabled") return "disabled";
+  if (mode === "invalid") return "invalid";
+  if (mode === "cloudflare_email_service") {
+    return live.cfctl_maildesk?.sender_domains?.[domainName] ?? null;
+  }
   if (!live.sender_domains) return null;
   if (Array.isArray(live.sender_domains)) {
     return live.sender_domains.includes(domainName) ? "listed" : null;
   }
   return live.sender_domains[domainName] ?? null;
+}
+
+function desiredSenderMode(desired: DesiredState): SenderMode | "invalid" {
+  if (desired.sender?.mode !== undefined && !isSenderMode(desired.sender.mode)) return "invalid";
+  return senderModeOrDefault(desired.sender?.mode);
 }
 
 function evidenceSummary(
