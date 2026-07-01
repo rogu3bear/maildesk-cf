@@ -134,6 +134,8 @@ that every sender-domain blocker has an exact reviewed ack command.
 `bun run collect:maildesk-evidence` builds that optional evidence file from
 available readbacks without mutating Cloudflare.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.
+`bun run refresh:maildesk-acks` reruns sender-domain preview commands from that
+plan in `cfctl --plan` mode and writes an ack manifest without applying it.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes by default and
 requires `--execute` before it sends mail.
 

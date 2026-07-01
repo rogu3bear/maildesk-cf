@@ -15,6 +15,7 @@
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
     "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
     "receipt:maildesk": "bun run scripts/receipt-maildesk.ts",
+    "refresh:maildesk-acks": "bun run scripts/refresh-sender-domain-ack-manifest.ts",
     "send:maildesk-probes": "bun run scripts/send-mail-probes.ts",
     "verify:maildesk": "bun run scripts/verify-maildesk.ts"
   },
