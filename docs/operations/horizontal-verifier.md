@@ -146,7 +146,11 @@ bun run send:maildesk-probes -- --from proof@example.com --json
 Send only when the sender identity is verified and the target set is intentional:
 
 ```bash
-bun run send:maildesk-probes -- --execute --from proof@example.com --domain example.com
+bun run send:maildesk-probes -- \
+  --execute \
+  --confirm-live-send \
+  --from proof@example.com \
+  --domain example.com
 ```
 
 The probe executor defaults to dry-run and a limit of one target. Use
@@ -164,6 +168,7 @@ Executing outbound proof requires the deployed reply API URL and token:
 bun run send:maildesk-probes -- \
   --kind outbound \
   --execute \
+  --confirm-live-send \
   --api-url https://maildesk.example.workers.dev \
   --api-token "$MAILDESK_API_TOKEN" \
   --to proof@example.com \
