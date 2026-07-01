@@ -160,6 +160,8 @@ command so a reviewed handoff can stay inside the control-plane flow.
 When a reviewed preview receipt has already been built, pass it with
 `--ack-manifest <path>` to copy exact, unexpired sender-domain `ack_command`
 values into the proof plan without applying them.
+Add `--require-ack-ready` when the handoff should fail unless every
+sender-domain blocker has an exact operation id and ack command.
 
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra

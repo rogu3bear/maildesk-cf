@@ -46,6 +46,7 @@ type Status = "ok" | "drift" | "missing" | "not_checked";
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
+const requireAckReady = args.includes("--require-ack-ready");
 const receiptPath = argValue("--receipt");
 if (!receiptPath) {
   console.error("missing --receipt <path>");
@@ -57,6 +58,7 @@ const receipt = readJson<Receipt>(resolve(root, receiptPath));
 const policy = readJson<PolicyFile>(policyPath);
 const ackManifest = loadAckManifest(argValue("--ack-manifest"));
 const actions = buildActions(receipt, policy);
+const senderDomainAck = senderDomainAckSummary(actions);
 const plan = {
   generated_at: new Date().toISOString(),
   receipt_path: relativePath(resolve(root, receiptPath)),
@@ -66,6 +68,9 @@ const plan = {
     inbound_probe_count: actions.filter((action) => action.kind === "targeted_inbound_probe").length,
     outbound_reply_probe_count: actions.filter((action) => action.kind === "targeted_outbound_reply_probe").length,
     blocked_count: actions.filter((action) => action.kind === "blocked").length,
+    sender_domain_blocked_count: senderDomainAck.blocked,
+    sender_domain_ack_ready_count: senderDomainAck.ready,
+    sender_domain_ack_missing_count: senderDomainAck.missing,
   },
   actions,
 };
@@ -81,6 +86,16 @@ if (jsonOutput) {
   console.log(`targeted_inbound_probes ${plan.summary.inbound_probe_count}`);
   console.log(`targeted_outbound_reply_probes ${plan.summary.outbound_reply_probe_count}`);
   console.log(`blocked ${plan.summary.blocked_count}`);
+  console.log(
+    `sender_domain_ack_ready ${plan.summary.sender_domain_ack_ready_count}/${plan.summary.sender_domain_blocked_count}`,
+  );
+}
+
+if (requireAckReady && senderDomainAck.missing > 0) {
+  console.error(
+    `sender-domain ack commands are not ready: missing ${senderDomainAck.missing} of ${senderDomainAck.blocked}`,
+  );
+  process.exit(1);
 }
 
 function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
@@ -175,6 +190,24 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
   }
 
   return actions;
+}
+
+function senderDomainAckSummary(actions: ProofAction[]): SenderDomainAckSummary {
+  const blocked = actions.filter(
+    (action) => action.kind === "blocked" && action.blocked_by === "sender_domain_not_verified",
+  );
+  const ready = blocked.filter(
+    (action) =>
+      typeof action.operation_id === "string" &&
+      action.operation_id.length > 0 &&
+      typeof action.ack_command === "string" &&
+      action.ack_command.length > 0,
+  );
+  return {
+    blocked: blocked.length,
+    ready: ready.length,
+    missing: blocked.length - ready.length,
+  };
 }
 
 function inboundTarget(domain: string, policyDomain: PolicyDomain): string {
@@ -342,4 +375,10 @@ interface SenderDomainAckCommand {
   zone: string;
   name: string;
   operation_id: string;
+}
+
+interface SenderDomainAckSummary {
+  blocked: number;
+  ready: number;
+  missing: number;
 }
