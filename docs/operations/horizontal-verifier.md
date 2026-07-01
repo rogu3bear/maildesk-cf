@@ -152,6 +152,12 @@ readiness for Cloudflare Email Routing, R2 policy, Worker bindings, and D1/Queue
 reachability. `mail_ready` is stricter: it also requires inbound proof, outbound
 sender readiness, and outbound reply audit proof.
 
+`bun run plan:maildesk-proofs` turns `mail_ready` gaps into the next safe
+operator action. Sender-domain readiness gaps remain blocked actions because
+they require Cloudflare mutation, but the JSON plan includes the `cfctl`
+preview command, protected `--ack-plan` command template, and follow-up verify
+command so a reviewed handoff can stay inside the control-plane flow.
+
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra
 Cloudflare rules so adjacent account routing does not create false drift.

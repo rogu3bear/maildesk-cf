@@ -133,6 +133,7 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
         kind: "blocked",
         domain: gap.domain,
         blocked_by: "sender_domain_not_verified",
+        ...senderDomainRepairCommands(gap.domain),
         description: "repair provider sender-domain verification before attempting outbound reply proof",
       });
     }
@@ -157,6 +158,7 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
           kind: "blocked",
           domain: gap.domain,
           blocked_by: "sender_domain_not_verified",
+          ...senderDomainRepairCommands(gap.domain),
           description: "repair sender-domain readiness before attempting outbound reply proof",
         });
       } else {
@@ -196,6 +198,15 @@ function outboundIdentity(domain: string, policyDomain: PolicyDomain): string {
 
 function isReservedExampleDomain(domain: string): boolean {
   return domain === "example.com" || domain === "example.net" || domain === "example.org";
+}
+
+function senderDomainRepairCommands(domain: string): SenderDomainRepairCommands {
+  const base = `CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone ${domain} --name ${domain}`;
+  return {
+    preview_command: `${base} --plan`,
+    ack_command_template: `${base} --ack-plan <operation-id>`,
+    verify_command: "cfctl maildesk-cf verify --file config/desired-state.local.json",
+  };
 }
 
 function defaultPolicyPath(): string {
@@ -240,5 +251,14 @@ type ProofAction =
         | "inbound_proof"
         | "sender_domain_not_verified"
         | "template_desired_state";
+      preview_command?: string;
+      ack_command_template?: string;
+      verify_command?: string;
       description: string;
     };
+
+interface SenderDomainRepairCommands {
+  preview_command: string;
+  ack_command_template: string;
+  verify_command: string;
+}
