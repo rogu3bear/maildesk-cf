@@ -2,6 +2,9 @@ name = "maildesk-cf-router"
 main = "workers/mail-router/src/index.ts"
 compatibility_date = "2026-05-19"
 
+[build]
+command = "bun run build:router-wasm"
+
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
 

@@ -8,6 +8,7 @@ import {
   OutboundReplyRequestedJob,
   readiness,
 } from "../../shared/contracts";
+import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -62,14 +63,21 @@ async function queueReply(request: Request, env: Env): Promise<Response> {
     return json({ error: "policy_unavailable" }, { status: 503 });
   }
 
-  const authorization = authorizeReply(policy, body);
-  if (authorization instanceof Error) {
-    return json({ error: "reply_not_authorized", detail: authorization.message }, { status: 403 });
+  const authorization = authorizeReplyWithPolicy(policy, {
+    envelopeTo: body.envelopeTo,
+    operator: body.operator,
+    requestedIdentity: body.requestedIdentity || body.fromIdentity || undefined,
+  });
+  if (!authorization.ok) {
+    if (authorization.error.kind === "invalid_request" || authorization.error.kind === "adapter_failure") {
+      return json({ error: "policy_unavailable" }, { status: 503 });
+    }
+    return json({ error: "reply_not_authorized", detail: authorization.error.message }, { status: 403 });
   }
 
   const job: OutboundReplyRequestedJob = {
     ...body,
-    fromIdentity: authorization.fromIdentity,
+    fromIdentity: authorization.value.fromIdentity,
     queuedAt: body.queuedAt || new Date().toISOString(),
   };
 
@@ -216,72 +224,6 @@ async function loadPolicyFromR2(env: Env): Promise<string | null> {
   return policyObject?.text() ?? null;
 }
 
-function authorizeReply(policy: RouterPolicy, job: OutboundReplyRequestedJob): ReplyAuthorization | Error {
-  const route = routeAddress(policy, job.envelopeTo);
-  if (route instanceof Error) return route;
-
-  const operator = normalizeMailbox(job.operator);
-  if (!route.operators.includes(operator)) {
-    return new Error(`operator is not allowed on route: ${operator}`);
-  }
-
-  const requestedIdentity = normalizeMailbox(job.requestedIdentity || job.fromIdentity || route.defaultReplyIdentity);
-  if (!route.allowedReplyIdentities.includes(requestedIdentity)) {
-    return new Error(`reply identity is not allowed for this route: ${requestedIdentity}`);
-  }
-
-  return { fromIdentity: requestedIdentity };
-}
-
-function routeAddress(policy: RouterPolicy, address: string): RouteDecision | Error {
-  const parsed = parseMailbox(address);
-  if (!parsed) return new Error(`invalid route recipient: ${address}`);
-
-  const domainPolicy = policy.domains[parsed.domain];
-  if (!domainPolicy) return new Error(`domain is not configured: ${parsed.domain}`);
-
-  const roleAlias = domainPolicy.role_aliases[parsed.localPart];
-  if (roleAlias) {
-    if (roleAlias.sink) {
-      return new Error(`alias is a store-only sink, not a reply route: ${address}`);
-    }
-    return {
-      operators: unique(roleAlias.operators),
-      defaultReplyIdentity: normalizeMailbox(roleAlias.reply_identity),
-      allowedReplyIdentities: unique([
-        roleAlias.reply_identity,
-        ...roleAlias.allowed_reply_identities,
-      ]),
-    };
-  }
-
-  const personalAlias = domainPolicy.personal_aliases[parsed.localPart];
-  if (personalAlias) {
-    return {
-      operators: [normalizeMailbox(personalAlias.operator)],
-      defaultReplyIdentity: normalizeMailbox(personalAlias.reply_identity),
-      allowedReplyIdentities: [normalizeMailbox(personalAlias.reply_identity)],
-    };
-  }
-
-  const catchAll = domainPolicy.catch_all;
-  if (catchAll) {
-    if (catchAll.sink) {
-      return new Error(`alias is a store-only sink, not a reply route: ${address}`);
-    }
-    return {
-      operators: unique(catchAll.operators),
-      defaultReplyIdentity: normalizeMailbox(catchAll.reply_identity),
-      allowedReplyIdentities: unique([
-        catchAll.reply_identity,
-        ...catchAll.allowed_reply_identities,
-      ]),
-    };
-  }
-
-  return new Error(`alias is not configured: ${address}`);
-}
-
 async function sendOutboundReply(
   job: OutboundReplyRequestedJob,
   env: Env,
@@ -412,53 +354,10 @@ function normalizeMailbox(address: string): string {
   return address.trim().toLowerCase();
 }
 
-function unique(values: string[]): string[] {
-  return [...new Set(values.map(normalizeMailbox).filter(Boolean))];
-}
-
 function responseId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || !("id" in value)) return undefined;
   const id = (value as { id?: unknown }).id;
   return typeof id === "string" ? id : undefined;
-}
-
-interface RouterPolicy {
-  domains: Record<string, DomainPolicy>;
-}
-
-interface DomainPolicy {
-  role_aliases: Record<string, RoleAliasPolicy>;
-  personal_aliases: Record<string, PersonalAliasPolicy>;
-  catch_all?: CatchAllPolicy;
-}
-
-interface RoleAliasPolicy {
-  operators: string[];
-  reply_identity: string;
-  allowed_reply_identities: string[];
-  sink?: boolean;
-}
-
-interface PersonalAliasPolicy {
-  operator: string;
-  reply_identity: string;
-}
-
-interface CatchAllPolicy {
-  operators: string[];
-  reply_identity: string;
-  allowed_reply_identities: string[];
-  sink?: boolean;
-}
-
-interface RouteDecision {
-  operators: string[];
-  defaultReplyIdentity: string;
-  allowedReplyIdentities: string[];
-}
-
-interface ReplyAuthorization {
-  fromIdentity: string;
 }
 
 interface ParsedMailbox {

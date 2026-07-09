@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:router-wasm": "bun run scripts/build-router-wasm.ts",
     "ci": "bash scripts/ci.sh",
     "check": "bun run typecheck",
     "preflight": "bun run scripts/preflight.ts",
@@ -13,8 +14,8 @@
     "check:maildesk-closeout": "bun run scripts/check-maildesk-closeout.ts",
     "apply:maildesk-acks": "bun run scripts/apply-sender-domain-ack-manifest.ts",
     "test:scripts": "bun test ./tests/scripts",
-    "test:workers": "bun test ./tests/workers",
-    "typecheck": "tsc --noEmit",
+    "test:workers": "bun run build:router-wasm && bun test ./tests/workers",
+    "typecheck": "bun run build:router-wasm && tsc --noEmit",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
     "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
     "receipt:maildesk": "bun run scripts/receipt-maildesk.ts",
@@ -26,7 +27,7 @@
     "@cloudflare/workers-types": "^4.20260616.1",
     "@types/node": "^25.9.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.100.0"
+    "wrangler": "^4.110.0"
   },
   "overrides": {
     "ws": "8.21.0",
