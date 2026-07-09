@@ -21,7 +21,8 @@ complete elsewhere.
 
 ## Milestone 1: Deployable Edge Skeleton
 
-- [ ] Compile router for Worker consumption or expose a stable adapter crate.
+- [x] Compile the Rust router to WebAssembly and use it for inbound route
+      decisions and outbound reply authorization in both Workers.
 - [x] Email Worker accepts Cloudflare email events into the edge job contract.
 - [x] Email Worker writes raw MIME to R2.
 - [x] Email Worker forwards accepted inbound mail to policy-selected operators.

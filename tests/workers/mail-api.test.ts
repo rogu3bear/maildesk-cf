@@ -78,6 +78,58 @@ describe("mail API outbound sender modes", () => {
       providerMessageId: "cf-message-id",
     });
   });
+
+  test("reply authorization returns the Rust router rejection", async () => {
+    const request = new Request("https://maildesk.example.com/api/replies", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        kind: "outbound_reply_requested",
+        messageId: "message-unauthorized",
+        threadId: "thread-unauthorized",
+        operator: "outsider@example.com",
+        envelopeTo: "founders@example.com",
+        fromIdentity: "founders@example.com",
+        to: ["sender@example.net"],
+        subject: "Unauthorized reply",
+        text: "hello",
+        queuedAt: "2026-07-09T00:00:00.000Z",
+      }),
+    });
+
+    const response = await mailApiWorker.fetch(request, {
+      DB: new D1Recorder(),
+      RAW_MAIL: {},
+      MAIL_JOBS: {
+        async send() {},
+      },
+      MAILDESK_API_TOKEN: "test-token",
+      MAILDESK_POLICY_JSON: JSON.stringify({
+        default_reply_mode: "role_first",
+        domains: {
+          "example.com": {
+            role_aliases: {
+              founders: {
+                operators: ["operator@example.com"],
+                reply_identity: "founders@example.com",
+                allowed_reply_identities: [],
+              },
+            },
+            personal_aliases: {},
+          },
+        },
+      }),
+    } as unknown as Env);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: "reply_not_authorized",
+      detail: "sender is not an operator on the route: outsider@example.com",
+    });
+  });
 });
 
 class MessageBatchRecorder {

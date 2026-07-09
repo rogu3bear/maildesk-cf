@@ -1,4 +1,5 @@
 import { errorDetail, MaildeskEnv, rawMailKey } from "../../shared/contracts";
+import { routeInbound, RouteDecision, RouterPolicy } from "../../shared/router";
 
 export default {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
@@ -94,7 +95,7 @@ async function enqueueInbound(
 async function routeMessage(
   message: ForwardableEmailMessage,
   env: Env,
-): Promise<RouteDecision | Error | null> {
+): Promise<RouteDecision | Error> {
   const policyJson = await loadPolicyJson(env);
   // Fail closed: a missing/unreadable policy must temp-reject (sender retries)
   // rather than silently accept-and-drop. Returning null here would store +
@@ -109,64 +110,14 @@ async function routeMessage(
     return new Error(`maildesk policy is invalid JSON: ${errorDetail(error)}`);
   }
 
-  const recipient = parseMailbox(message.to);
-  if (!recipient) return new Error(`recipient is not a valid mailbox address: ${message.to}`);
+  const result = routeInbound(policy, {
+    envelopeTo: message.to,
+    headerFrom: message.from,
+    messageId: message.headers.get("message-id") ?? undefined,
+    subject: message.headers.get("subject") ?? undefined,
+  });
 
-  const domainPolicy = policy.domains[recipient.domain];
-  if (!domainPolicy) return new Error(`domain is not configured: ${recipient.domain}`);
-
-  const roleAlias = domainPolicy.role_aliases[recipient.localPart];
-  if (roleAlias) {
-    if (roleAlias.sink) {
-      return {
-        routeKind: "sink",
-        operators: [],
-        defaultReplyIdentity: roleAlias.reply_identity,
-      };
-    }
-
-    if (roleAlias.operators.length === 0) {
-      return new Error(`policy has an empty operator set for: ${message.to}`);
-    }
-
-    return {
-      routeKind: "role_alias",
-      operators: unique(roleAlias.operators),
-      defaultReplyIdentity: roleAlias.reply_identity,
-    };
-  }
-
-  const personalAlias = domainPolicy.personal_aliases[recipient.localPart];
-  if (personalAlias) {
-    return {
-      routeKind: "personal_alias",
-      operators: [personalAlias.operator],
-      defaultReplyIdentity: personalAlias.reply_identity,
-    };
-  }
-
-  const catchAll = domainPolicy.catch_all;
-  if (catchAll) {
-    if (catchAll.sink) {
-      return {
-        routeKind: "sink",
-        operators: [],
-        defaultReplyIdentity: catchAll.reply_identity,
-      };
-    }
-
-    if (catchAll.operators.length === 0) {
-      return new Error(`policy has an empty catch-all operator set for: ${recipient.domain}`);
-    }
-
-    return {
-      routeKind: "catch_all",
-      operators: unique(catchAll.operators),
-      defaultReplyIdentity: catchAll.reply_identity,
-    };
-  }
-
-  return new Error(`alias is not configured: ${message.to}`);
+  return result.ok ? result.value : new Error(result.error.message);
 }
 
 async function persistInboundMetadata(
@@ -320,10 +271,6 @@ function normalizeMailbox(address: string): string {
   return address.trim().toLowerCase();
 }
 
-function unique(values: string[]): string[] {
-  return [...new Set(values.map(normalizeMailbox).filter(Boolean))];
-}
-
 function stableId(prefix: string, ...parts: string[]): string {
   return [prefix, ...parts.map(stablePart)].join(":");
 }
@@ -337,41 +284,6 @@ type Env = MaildeskEnv;
 interface ParsedMailbox {
   localPart: string;
   domain: string;
-}
-
-interface RouterPolicy {
-  domains: Record<string, DomainPolicy>;
-}
-
-interface DomainPolicy {
-  role_aliases: Record<string, RoleAliasPolicy>;
-  personal_aliases: Record<string, PersonalAliasPolicy>;
-  catch_all?: CatchAllPolicy;
-}
-
-interface RoleAliasPolicy {
-  operators: string[];
-  reply_identity: string;
-  /** When true, archive inbound mail (R2 + D1) but never forward to operators. */
-  sink?: boolean;
-}
-
-interface PersonalAliasPolicy {
-  operator: string;
-  reply_identity: string;
-}
-
-interface CatchAllPolicy {
-  operators: string[];
-  reply_identity: string;
-  /** When true, archive unmatched mail but never forward to operators. */
-  sink?: boolean;
-}
-
-interface RouteDecision {
-  routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  operators: string[];
-  defaultReplyIdentity: string;
 }
 
 interface ForwardResult {

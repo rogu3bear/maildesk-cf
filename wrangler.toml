@@ -3,6 +3,9 @@ main = "workers/mail-api/src/index.ts"
 compatibility_date = "2026-06-29"
 upload_source_maps = true
 
+[build]
+command = "bun run build:router-wasm"
+
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
 MAILDESK_OUTBOUND_MODE = "disabled"

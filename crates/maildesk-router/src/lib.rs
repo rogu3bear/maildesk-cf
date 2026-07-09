@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub envelope_to: String,
@@ -122,6 +125,33 @@ pub enum PolicyError {
     PersonalReplyIdentityMismatch(String, String),
 }
 
+#[derive(Debug, Deserialize)]
+struct RouteAdapterRequest {
+    policy: RouterPolicy,
+    message: InboundMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplyAdapterRequest {
+    policy: RouterPolicy,
+    envelope_to: String,
+    operator: String,
+    requested_identity: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AdapterResponse<T> {
+    Ok { value: T },
+    Error { error: AdapterError },
+}
+
+#[derive(Debug, Serialize)]
+struct AdapterError {
+    kind: String,
+    message: String,
+}
+
 pub fn route_message(
     policy: &RouterPolicy,
     message: &InboundMessage,
@@ -239,6 +269,84 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
     }
 
     Ok(route_count)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn route_message_json(request_json: &str) -> String {
+    let result = serde_json::from_str::<RouteAdapterRequest>(request_json)
+        .map_err(AdapterError::invalid_request)
+        .and_then(|request| {
+            route_message(&request.policy, &request.message).map_err(AdapterError::from_route)
+        });
+
+    serialize_adapter_response(result)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn authorize_reply_json(request_json: &str) -> String {
+    let result = serde_json::from_str::<ReplyAdapterRequest>(request_json)
+        .map_err(AdapterError::invalid_request)
+        .and_then(|request| {
+            let decision = route_message(
+                &request.policy,
+                &InboundMessage {
+                    envelope_to: request.envelope_to,
+                    header_from: String::new(),
+                    message_id: None,
+                    subject: None,
+                },
+            )
+            .map_err(AdapterError::from_route)?;
+
+            authorize_reply(
+                &decision,
+                &request.operator,
+                request.requested_identity.as_deref(),
+            )
+            .map_err(AdapterError::from_route)
+        });
+
+    serialize_adapter_response(result)
+}
+
+fn serialize_adapter_response<T: Serialize>(result: Result<T, AdapterError>) -> String {
+    let response = match result {
+        Ok(value) => AdapterResponse::Ok { value },
+        Err(error) => AdapterResponse::Error { error },
+    };
+
+    match serde_json::to_string(&response) {
+        Ok(json) => json,
+        Err(_) => {
+            r#"{"status":"error","error":{"kind":"serialization","message":"adapter response serialization failed"}}"#
+                .to_string()
+        }
+    }
+}
+
+impl AdapterError {
+    fn invalid_request(error: serde_json::Error) -> Self {
+        Self {
+            kind: "invalid_request".to_string(),
+            message: error.to_string(),
+        }
+    }
+
+    fn from_route(error: RouteError) -> Self {
+        let kind = match &error {
+            RouteError::InvalidRecipient => "invalid_recipient",
+            RouteError::UnknownDomain(_) => "unknown_domain",
+            RouteError::UnknownAlias(_, _) => "unknown_alias",
+            RouteError::EmptyOperators(_, _) => "empty_operators",
+            RouteError::UnauthorizedOperator(_) => "unauthorized_operator",
+            RouteError::UnauthorizedReplyIdentity(_) => "unauthorized_reply_identity",
+        };
+
+        Self {
+            kind: kind.to_string(),
+            message: error.to_string(),
+        }
+    }
 }
 
 fn route_for_policy_check(
@@ -603,6 +711,49 @@ mod tests {
     fn validates_policy_with_sink_alias() -> Result<(), PolicyError> {
         // A sink alias is valid even though it forwards to no operator.
         assert_eq!(validate_policy(&sink_policy())?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn json_adapter_serializes_route_decisions() -> Result<(), serde_json::Error> {
+        let request = serde_json::json!({
+            "policy": example_policy(),
+            "message": {
+                "envelope_to": "founders@example.com",
+                "header_from": "sender@example.net",
+                "message_id": "<adapter-route@example.net>",
+                "subject": "Adapter route"
+            }
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&route_message_json(&request.to_string()))?;
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["value"]["route_kind"], "role_alias");
+        assert_eq!(
+            response["value"]["default_reply_identity"],
+            "founders@example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn json_adapter_preserves_typed_reply_rejections() -> Result<(), serde_json::Error> {
+        let request = serde_json::json!({
+            "policy": example_policy(),
+            "envelope_to": "founders@example.com",
+            "operator": "outsider@example.com",
+            "requested_identity": "founders@example.com"
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&authorize_reply_json(&request.to_string()))?;
+
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["error"]["kind"], "unauthorized_operator");
+        assert_eq!(
+            response["error"]["message"],
+            "sender is not an operator on the route: outsider@example.com"
+        );
         Ok(())
     }
 

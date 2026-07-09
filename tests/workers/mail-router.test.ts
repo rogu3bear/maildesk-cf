@@ -23,6 +23,7 @@ test("accepted inbound role alias persists D1 metadata", async () => {
       RAW_MAIL: rawMail,
       MAIL_JOBS: mailJobs,
       MAILDESK_POLICY_JSON: JSON.stringify({
+        default_reply_mode: "role_first",
         domains: {
           "example.com": {
             role_aliases: {
@@ -82,6 +83,7 @@ test("D1 metadata failure stops follow-up queue work after forwarding", async ()
         RAW_MAIL: rawMail,
         MAIL_JOBS: mailJobs,
         MAILDESK_POLICY_JSON: JSON.stringify({
+          default_reply_mode: "role_first",
           domains: {
             "example.com": {
               role_aliases: {
@@ -105,6 +107,45 @@ test("D1 metadata failure stops follow-up queue work after forwarding", async ()
   expect(rawMail.puts).toHaveLength(1);
   expect(mailJobs.jobs).toHaveLength(0);
   expect(String(consoleErrors[0]?.[0])).toContain("maildesk metadata persist failed");
+});
+
+test("inbound routing rejects mailbox whitespace through the Rust policy boundary", async () => {
+  const message = new TestEmailMessage({
+    from: "sender@example.net",
+    to: "bad alias@example.com",
+    headers: {
+      "message-id": "<message-invalid@example.net>",
+      subject: "Invalid recipient",
+    },
+    raw: "From: sender@example.net\r\nTo: bad alias@example.com\r\n\r\nhello",
+  });
+
+  await mailRouterWorker.email(
+    message as unknown as ForwardableEmailMessage,
+    {
+      DB: new D1Recorder(),
+      RAW_MAIL: new R2Recorder(),
+      MAIL_JOBS: new QueueRecorder(),
+      MAILDESK_POLICY_JSON: JSON.stringify({
+        default_reply_mode: "role_first",
+        domains: {
+          "example.com": {
+            role_aliases: {},
+            personal_aliases: {},
+            catch_all: {
+              operators: ["operator-a@example.com"],
+              reply_identity: "info@example.com",
+              allowed_reply_identities: [],
+            },
+          },
+        },
+      }),
+    } as unknown as Env,
+    new TestExecutionContext() as unknown as ExecutionContext,
+  );
+
+  expect(message.rejectedWith).toBe("recipient is not a valid mailbox address");
+  expect(message.forwardedTo).toEqual([]);
 });
 
 async function captureConsoleError(action: () => Promise<void>): Promise<unknown[][]> {
