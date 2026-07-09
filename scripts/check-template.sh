@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== public template files"
-for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/preflight.ts scripts/check-cfctl-provisioning.ts scripts/check-maildesk-closeout.ts scripts/collect-live-evidence.ts scripts/plan-mail-proofs.ts scripts/receipt-maildesk.ts scripts/refresh-sender-domain-ack-manifest.ts scripts/apply-sender-domain-ack-manifest.ts scripts/send-mail-probes.ts scripts/verify-maildesk.ts docs/ARTIFACTS-POLICY.md docs/SCRIPT-OWNERSHIP.md docs/roadmap.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/architecture/outbound-identity.md docs/operations/cfctl-contract.md docs/operations/deliverability.md docs/operations/horizontal-verifier.md docs/operations/preflight.md docs/operations/production-rollout.md ops/cfctl/maildesk-cf.surface.md ops/cfctl/maildesk-cf.desired-state.schema.json config/policy.example.json config/desired-state.example.json; do
+for file in AGENTS.md README.md .env.example package.json tsconfig.json wrangler.toml wrangler.mail-router.toml scripts/build-router-wasm.ts scripts/preflight.ts scripts/check-cfctl-provisioning.ts scripts/check-maildesk-closeout.ts scripts/collect-live-evidence.ts scripts/plan-mail-proofs.ts scripts/receipt-maildesk.ts scripts/refresh-sender-domain-ack-manifest.ts scripts/apply-sender-domain-ack-manifest.ts scripts/send-mail-probes.ts scripts/verify-maildesk.ts workers/shared/router.ts docs/ARTIFACTS-POLICY.md docs/SCRIPT-OWNERSHIP.md docs/roadmap.md docs/architecture/adr/0001-rust-router-worker-authority.md docs/architecture/template-standard.md docs/architecture/rust-router-contract.md docs/architecture/runtime-contract.md docs/architecture/outbound-identity.md docs/operations/cfctl-contract.md docs/operations/deliverability.md docs/operations/horizontal-verifier.md docs/operations/preflight.md docs/operations/production-rollout.md ops/cfctl/maildesk-cf.surface.md ops/cfctl/maildesk-cf.desired-state.schema.json config/policy.example.json config/desired-state.example.json; do
   test -s "${ROOT_DIR}/${file}"
   echo "ok ${file}"
 done
@@ -23,7 +23,9 @@ scan_output="$(
     -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
     -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
     --exclude-dir=.git \
+    --exclude-dir=.wrangler \
     --exclude-dir=target \
+    --exclude-dir=generated \
     --exclude-dir=var \
     --exclude-dir=node_modules \
     --exclude=AGENTS.md \
@@ -43,10 +45,23 @@ fi
 echo "== reserved examples"
 grep -RInE 'example\.com|example\.net|example\.org' \
   --exclude-dir=.git \
+  --exclude-dir=.wrangler \
   --exclude-dir=target \
+  --exclude-dir=generated \
   --exclude-dir=var \
   --exclude-dir=node_modules \
   "${ROOT_DIR}" >/dev/null
+
+echo "== rust router authority"
+if grep -RInE \
+  -e 'function routeAddress' \
+  -e 'const roleAlias = domainPolicy\.role_aliases' \
+  -e 'interface RouterPolicy' \
+  "${ROOT_DIR}/workers/mail-api/src" \
+  "${ROOT_DIR}/workers/mail-router/src"; then
+  echo "Worker-local mail policy logic found; use workers/shared/router.ts" >&2
+  exit 1
+fi
 
 echo "== rust tests"
 cargo test --manifest-path "${ROOT_DIR}/Cargo.toml"

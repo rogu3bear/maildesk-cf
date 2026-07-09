@@ -45,6 +45,11 @@ The router is the authority for route decisions and reply authorization. Its
 public output must be serializable, auditable, and stable enough for Workers,
 the UI, and `cfctl` verification to consume.
 
+The TypeScript Workers load the router as an in-process WebAssembly module.
+`workers/shared/router.ts` owns transport translation only; alias lookup,
+recipient selection, reply defaults, and authorization remain Rust decisions.
+Generated WASM is rebuilt before each Worker bundle and is not committed.
+
 ### Storage
 
 D1 stores queryable state. R2 stores raw MIME and attachments. Queues own async

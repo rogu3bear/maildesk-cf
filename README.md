@@ -43,6 +43,7 @@ maildesk-cf/
   workers/
     mail-router/        # Cloudflare Email Worker adapter
     mail-api/           # HTTP API and outbound adapter placeholder
+    shared/router.ts    # TypeScript boundary around the Rust WASM router
   migrations/           # D1 schema
   ops/
     cfctl/              # cfctl desired-state and surface notes
@@ -104,10 +105,15 @@ remain Cloudflare-first.
 
 ## Build
 
+The Worker build requires `wasm-pack`, the Rust
+`wasm32-unknown-unknown` target, Bun, and Cargo. The router pins its
+`wasm-bindgen` ABI so the generated JavaScript and WASM stay compatible.
+
 Current local checks:
 
 ```bash
 bun install
+bun run build:router-wasm
 cargo test
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
@@ -126,6 +132,12 @@ cargo run --bin maildesk-policy-check -- config/policy.example.json
 
 These checks verify the Rust router and template hygiene. They do not prove live
 Cloudflare account state.
+
+The Worker gates build the Rust router automatically. Generated WASM stays
+ignored under `generated/router-wasm/`; both Wrangler targets run the same
+build before bundling. See
+[ADR 0001](docs/architecture/adr/0001-rust-router-worker-authority.md) for the
+boundary and trade-offs.
 
 `bun run verify:maildesk` emits the horizontal domain matrix for policy,
 desired-state, and optional live evidence. See

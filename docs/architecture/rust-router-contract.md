@@ -28,6 +28,23 @@ events and persist results, but it should not invent routing behavior.
 
 Those concerns belong in adapters around the router.
 
+## Worker Adapter
+
+Both Workers call this crate through the generated WebAssembly package. Rust
+exports JSON adapter functions for route decisions and reply authorization;
+`workers/shared/router.ts` translates field names and validates the response
+shape without reimplementing policy.
+
+Generated WASM is a build artifact and is not tracked. Rebuild it with:
+
+```bash
+bun run build:router-wasm
+```
+
+The build must run before Worker typechecking, tests, or Wrangler bundling.
+See [ADR 0001](adr/0001-rust-router-worker-authority.md) for the alternatives
+and deployment boundary.
+
 ## Required Build Behavior
 
 Every generated project should keep these checks green:
@@ -36,6 +53,7 @@ Every generated project should keep these checks green:
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo run --bin maildesk-policy-check -- config/policy.example.json
+bun run build:router-wasm
 ```
 
 Private instances should run the same policy checker against their ignored
