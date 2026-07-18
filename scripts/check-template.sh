@@ -17,24 +17,20 @@ for file in NORTH_STAR.md ANCHOR.md CLAUDE.md; do
 done
 
 echo "== personal data scan"
+# Scan only git-tracked files: those are exactly what a push can leak. A
+# gitignored `.env` (which legitimately holds a local operator's real
+# credentials) is never pushed, so scanning the working tree recursively only
+# produced false positives. Tracked secrets are still caught. Doctrine files
+# that may reference the operator's own context are excluded via pathspec.
 scan_output="$(
-  grep -RInE \
-    -e '/Users/' \
-    -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
-    -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
-    --exclude-dir=.git \
-    --exclude-dir=.wrangler \
-    --exclude-dir=target \
-    --exclude-dir=generated \
-    --exclude-dir=var \
-    --exclude-dir=node_modules \
-    --exclude=AGENTS.md \
-    --exclude=CLAUDE.md \
-    --exclude=NORTH_STAR.md \
-    --exclude=ANCHOR.md \
-    --exclude=Cargo.lock \
-    --exclude=check-template.sh \
-    "${ROOT_DIR}" || true
+  git -C "${ROOT_DIR}" ls-files -z \
+    ':!:AGENTS.md' ':!:CLAUDE.md' ':!:NORTH_STAR.md' ':!:ANCHOR.md' \
+    ':!:Cargo.lock' ':!:scripts/check-template.sh' \
+  | xargs -0 grep -InE \
+      -e '/Users/' \
+      -e 'CLOUDFLARE_ACCOUNT_ID=[A-Za-z0-9]' \
+      -e 'CLOUDFLARE_API_TOKEN=[A-Za-z0-9]' \
+    || true
 )"
 if [[ -n "${scan_output}" ]]; then
   echo "${scan_output}"
