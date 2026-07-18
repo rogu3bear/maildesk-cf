@@ -90,12 +90,7 @@ describe("production preflight", () => {
       CFCTL_BIN: cfctl,
       MAILDESK_API_TOKEN: "example-maildesk-token",
     };
-    delete env.CLOUDFLARE_ACCOUNT_ID;
-    delete env.CLOUDFLARE_API_TOKEN;
-    delete env.CLOUDFLARE_API_KEY;
-    delete env.CLOUDFLARE_EMAIL;
-    delete env.CF_DEV_TOKEN;
-    delete env.CF_GLOBAL_TOKEN;
+    scrubCloudflareEnv(env);
     delete env.MAILDESK_PROJECT_NAME;
 
     const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
@@ -118,12 +113,7 @@ describe("production preflight", () => {
       CFCTL_BIN: cfctl,
       MAILDESK_PROOF_API_TOKEN: "example-proof-token",
     };
-    delete env.CLOUDFLARE_ACCOUNT_ID;
-    delete env.CLOUDFLARE_API_TOKEN;
-    delete env.CLOUDFLARE_API_KEY;
-    delete env.CLOUDFLARE_EMAIL;
-    delete env.CF_DEV_TOKEN;
-    delete env.CF_GLOBAL_TOKEN;
+    scrubCloudflareEnv(env);
     delete env.MAILDESK_API_TOKEN;
     delete env.MAILDESK_PROJECT_NAME;
 
@@ -217,12 +207,7 @@ describe("production preflight", () => {
       CFCTL_BIN: cfctl,
       MAILDESK_API_TOKEN: "example-maildesk-token",
     };
-    delete env.CLOUDFLARE_ACCOUNT_ID;
-    delete env.CLOUDFLARE_API_TOKEN;
-    delete env.CLOUDFLARE_API_KEY;
-    delete env.CLOUDFLARE_EMAIL;
-    delete env.CF_DEV_TOKEN;
-    delete env.CF_GLOBAL_TOKEN;
+    scrubCloudflareEnv(env);
 
     const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
       cwd: root,
@@ -259,6 +244,25 @@ function ensureVarDir(): string {
   const dir = resolve(root, "var");
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// Neutralize Cloudflare auth env for a spawned preflight. Setting the keys to ""
+// (rather than `delete`) is required because Bun auto-loads the repo `.env`
+// into a child's environment, which would otherwise re-inject a local operator's
+// real credentials and defeat `delete`. An explicit (empty) value takes
+// precedence over Bun's `.env` loading, so the child sees no usable auth —
+// making these tests hermetic on a machine that has a `.env`, not just in CI.
+function scrubCloudflareEnv(env: Record<string, string | undefined>): void {
+  for (const key of [
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_API_KEY",
+    "CLOUDFLARE_EMAIL",
+    "CF_DEV_TOKEN",
+    "CF_GLOBAL_TOKEN",
+  ]) {
+    env[key] = "";
+  }
 }
 
 function fakeCfctlDoctor(healthy: boolean): string {
