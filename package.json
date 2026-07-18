@@ -21,7 +21,8 @@
     "receipt:maildesk": "bun run scripts/receipt-maildesk.ts",
     "refresh:maildesk-acks": "bun run scripts/refresh-sender-domain-ack-manifest.ts",
     "send:maildesk-probes": "bun run scripts/send-mail-probes.ts",
-    "verify:maildesk": "bun run scripts/verify-maildesk.ts"
+    "verify:maildesk": "bun run scripts/verify-maildesk.ts",
+    "provision:email-routing": "bun run scripts/provision-email-routing.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260616.1",
