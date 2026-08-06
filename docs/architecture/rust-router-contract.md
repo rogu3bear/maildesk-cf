@@ -52,7 +52,7 @@ Every generated project should keep these checks green:
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
-cargo run --bin maildesk-policy-check -- config/policy.example.json
+cargo run --package maildesk-router --bin maildesk-policy-check -- config/policy.example.json
 bun run build:router-wasm
 ```
 

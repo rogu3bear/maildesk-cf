@@ -19,6 +19,7 @@
 /NORTH_STAR.md
 /ANCHOR.md
 /.agents/
+/.agent/
 /.claude/
 /*.local.md
 /config/*.local.json

@@ -135,7 +135,11 @@ async function persistInboundMetadata(
   const domainId = stableId("domain", recipient.domain);
   const identityId = stableId("identity", route.defaultReplyIdentity);
   const routeId = stableId("route", recipient.domain, recipient.localPart);
-  const threadId = stableId("thread", messageId);
+  const threadId = await collisionResistantId(
+    "thread",
+    normalizeMailbox(message.to),
+    messageId.trim(),
+  );
   const messageRowId = stableId("message", deliveryId);
   const routeKind = route.routeKind === "personal_alias" ? "personal" : "role";
   const subject = message.headers.get("subject");
@@ -277,6 +281,13 @@ function stableId(prefix: string, ...parts: string[]): string {
 
 function stablePart(value: string): string {
   return normalizeMailbox(value).replace(/[^a-z0-9._-]+/g, "_");
+}
+
+async function collisionResistantId(prefix: string, ...parts: string[]): Promise<string> {
+  const bytes = new TextEncoder().encode(parts.join("\0"));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${prefix}:${hex}`;
 }
 
 type Env = MaildeskEnv;

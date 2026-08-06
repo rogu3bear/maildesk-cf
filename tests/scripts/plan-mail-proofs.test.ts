@@ -52,7 +52,16 @@ describe("mail proof planner", () => {
 
     const result = spawnSync(
       "bun",
-      ["run", "scripts/plan-mail-proofs.ts", "--", "--receipt", receiptPath, "--json"],
+      [
+        "run",
+        "scripts/plan-mail-proofs.ts",
+        "--",
+        "--receipt",
+        receiptPath,
+        "--policy",
+        "config/policy.example.json",
+        "--json",
+      ],
       {
         cwd: root,
         encoding: "utf8",

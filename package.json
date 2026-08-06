@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:ui": "bash scripts/build-ui-edge.sh",
     "build:router-wasm": "bun run scripts/build-router-wasm.ts",
     "ci": "bash scripts/ci.sh",
     "check": "bun run typecheck",
@@ -16,6 +17,7 @@
     "test:scripts": "bun test ./tests/scripts",
     "test:workers": "bun run build:router-wasm && bun test ./tests/workers",
     "typecheck": "bun run build:router-wasm && tsc --noEmit",
+    "check:ui": "cargo check --package maildesk-ui --all-features",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
     "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
     "receipt:maildesk": "bun run scripts/receipt-maildesk.ts",
@@ -33,5 +35,8 @@
   "overrides": {
     "ws": "8.21.0",
     "esbuild": "0.28.1"
+  },
+  "dependencies": {
+    "jose": "6.2.8"
   }
 }

@@ -4,6 +4,24 @@ This repo is a public template standard. Treat every tracked file as something
 future users and future agents will copy into their own Cloudflare account
 work.
 
+<!-- forest-alignment:start -->
+## Forest Alignment
+
+- When an enclosing workspace `AGENTS.md` is present, inherit its cross-repo
+  rules; this repo's local doctrine remains authoritative for product, runtime,
+  build, and release specifics.
+- Work in the exact checkout or worktree; preserve unrelated dirty work. Bind
+  review and release proof to the full SHA, report dirty state, and keep source,
+  local test/build, merge, deploy/apply, and authenticated live readback distinct.
+- Cross-repo changes keep this repo's branch/PR, proof, publication, and deploy
+  decisions independent. Name interface providers and consumers, and retain
+  compatibility through consumer cutover.
+- Design work follows shared Design Routing while preserving local product
+  language, tokens, components, and accessibility constraints. Implementation
+  and rendered review remain with their owning lanes; do not create a parallel
+  design authority.
+<!-- forest-alignment:end -->
+
 ## Purpose
 
 `maildesk-cf` is an independent Cloudflare-edge mail desk that requires `cfctl`
@@ -196,3 +214,34 @@ bun run preflight:production
 Production preflight must fail if required Cloudflare/cfctl inputs are missing,
 if `wrangler.toml` still contains placeholder IDs, or if policy validation does
 not pass. Do not skip it to make a deployment feel green.
+
+## Cloudflare Token Doctrine
+
+<!-- Canonical across the operator's Cloudflare repos. Rotation: scripts/rotate-secrets.sh -->
+
+- **One minter: `CF_DEV_TOKEN`** in the operator's shared credential env (not
+  committed) — an account-owned (`cfat_`/`cfut_`) token scoped to `Account API
+  Tokens: Write` + `Account Settings: Read` only. It stays on the operator's
+  machine and never enters CI. The Global API Key (`CF_GLOBAL_TOKEN` /
+  `X-Auth-Email` + `X-Auth-Key`) flow is **forbidden** for minting.
+- **Every runtime and deploy credential is a short-lived, purpose-scoped child**
+  minted from `CF_DEV_TOKEN` via `POST /accounts/{id}/tokens`. Children go to
+  CI / Worker / Pages secret stores and the repo-local `.env` (gitignored); the
+  minter stays on the operator's machine. This repo's child lives in `.env` as
+  `CLOUDFLARE_API_TOKEN` (with `CLOUDFLARE_API_TOKEN_ID` tracked for revocation).
+- **Rotate with `./scripts/rotate-secrets.sh`** — it delegates to the operator's
+  shared rotation engine (raw `curl`, no cfctl / no keychain, so it runs
+  unattended): mint a fresh child from the repo's declared scope (scripts/cf-rotate.conf) →
+  verify → write it to `.env` → record state → queue the old id for revocation. `--dry-run` previews
+  without minting. All Cloudflare calls force `curl -4` (the minter may carry an
+  IPv4-only allowlist; IPv6 egress returns Cloudflare error 9109).
+- **Auto-rotation** runs via a user launchd agent that invokes the rotator on a
+  schedule and sweeps prior children; unattended runs mint while the login
+  session is active.
+- **cfctl caveat (2026-07):** cfctl's keychain secret store is broken on this
+  machine (`errSecAuthFailed` on any profile write), so `cfctl keys mint` and
+  other authenticated cfctl operations are unavailable — the raw-`curl` rotator
+  is the working path. Use cfctl for no-auth reads (catalog / docs / doctor) only
+  until the keychain bug is fixed.
+- Secret values never appear in argv, stdout, logs, or committed files — only in
+  the repo `.env` (gitignored) and the platform secret stores.

@@ -42,7 +42,7 @@ Then configure domains, role aliases, personal aliases, operators, and reply
 identities. Validate it:
 
 ```bash
-cargo run --bin maildesk-policy-check -- config/policy.local.json
+cargo run --package maildesk-router --bin maildesk-policy-check -- config/policy.local.json
 ```
 
 The policy should be the source for both Worker runtime config and `cfctl`
@@ -102,9 +102,11 @@ the system refusing to pretend.
 
 ## 6. Deploy
 
-Deploy the API Worker and Email Worker only after preflight passes and resource
-readback matches desired state. Keep API and Email Worker deploys separate so
-inbound routing can be rolled forward without changing the operator API.
+Deploy the UI, API/Queue, and Email Workers only after preflight passes and
+resource readback matches desired state. Keep the targets separate so inbound
+routing can be rolled forward without changing the operator surface. Keep the
+legacy token reply API disabled unless an explicit service boundary and scoped
+credential have been reviewed.
 
 After deploy, verify:
 

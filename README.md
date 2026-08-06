@@ -36,8 +36,9 @@ or a generic helpdesk clone.
 
 ```text
 maildesk-cf/
-  apps/
-    maildesk-ui/        # Leptos-compatible operator UI placeholder
+  src/                  # Leptos Router UI and Cloudflare SSR adapter
+  style/                # public-site and operator-desk design system
+  assets/               # template-safe icons, manifest, and edge headers
   crates/
     maildesk-router/    # Rust routing and identity policy core
   workers/
@@ -97,24 +98,34 @@ Domain-consistent replies are covered in
 - Queues
 
 The HTTP API Worker uses `wrangler.toml`. The inbound Email Worker uses
-`wrangler.mail-router.toml`. Production resource creation should still be
-driven by `cfctl`; these files document and typecheck the app-side bindings.
+`wrangler.mail-router.toml`. The Leptos operator experience uses
+`wrangler.ui.toml`, with public explanatory routes and Cloudflare
+Access-protected `/desk` and `/desk/api` routes. Production resource creation
+should still be driven by `cfctl`; these files document and typecheck the
+app-side bindings.
+
+The legacy shared-token `POST /api/replies` surface is disabled by default with
+`MAILDESK_REPLY_API_MODE=disabled`. The Access-protected Leptos desk is the
+normal human reply path. Enable `token` mode only for an explicitly
+service-bound integration and provision one of the documented API tokens.
 
 Optional fallback sender adapters can be added later. The default path should
 remain Cloudflare-first.
 
 ## Build
 
-The Worker build requires `wasm-pack`, the Rust
-`wasm32-unknown-unknown` target, Bun, and Cargo. The router pins its
-`wasm-bindgen` ABI so the generated JavaScript and WASM stay compatible.
+The Worker build requires `wasm-pack`, `cargo-leptos`, `worker-build`, the Rust
+`wasm32-unknown-unknown` target, Bun, and Cargo. The build wrappers resolve the
+locked `wasm-bindgen` ABI and install its matching CLI under ignored local
+tooling state so generated JavaScript and WASM stay compatible.
 
 Current local checks:
 
 ```bash
 bun install
+bun run build:ui
 bun run build:router-wasm
-cargo test
+cargo test --workspace --all-features
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
 CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-receipt-summary.json
@@ -127,11 +138,23 @@ bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-m
 bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
 bash scripts/check-template.sh
-cargo run --bin maildesk-policy-check -- config/policy.example.json
+cargo run --package maildesk-router --bin maildesk-policy-check -- config/policy.example.json
 ```
 
 These checks verify the Rust router and template hygiene. They do not prove live
 Cloudflare account state.
+
+For a local edge-rendered preview of the public site and empty operator state:
+
+```bash
+bunx wrangler dev --config wrangler.ui.toml --local --port 8788 \
+  --var MAILDESK_UI_AUTH_MODE:preview
+```
+
+Preview mode is local-only. Production must keep `workers_dev = false`, protect
+`/desk*` with Cloudflare Access, retain `MAILDESK_UI_AUTH_MODE = "access"`, and
+provide `MAILDESK_ACCESS_TEAM_DOMAIN` plus `MAILDESK_ACCESS_AUD` so the Worker
+can validate the Access JWT signature, issuer, audience, and expiry.
 
 The Worker gates build the Rust router automatically. Generated WASM stays
 ignored under `generated/router-wasm/`; both Wrangler targets run the same
@@ -184,8 +207,9 @@ applies any `cfctl --ack-plan` operation. Applying more than one selected ack
 operation also requires `--confirm-bulk-ack-plan`.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes locally by
 default and requires `--execute --confirm-live-send --inbound-provider resend`
-before it sends mail through Resend, or the reply API flags before it queues an
-outbound proof. Sending more than one selected probe also requires
+before it sends mail through Resend. Its reply-API proof mode additionally
+requires an explicitly enabled, service-bound legacy API and the reply API
+flags before it queues an outbound proof. Sending more than one selected probe also requires
 `--confirm-bulk-live-send`.
 
 ## De-Templating
@@ -247,7 +271,9 @@ The first milestone is deliberately narrow:
 - buildable Rust router crate;
 - policy tests for role aliases and reply identities;
 - D1 schema skeleton;
-- Worker adapter skeletons;
+- Worker adapters;
+- Cargo-Leptos public site and operator desk with explicit empty, loading,
+  error, receive-only, and audited-reply states;
 - schema-backed `cfctl maildesk-cf` provisioning contract and local proof hook;
 - template hygiene check.
 

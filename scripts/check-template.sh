@@ -63,7 +63,7 @@ echo "== rust tests"
 cargo test --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "== example policy"
-cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --bin maildesk-policy-check -- \
+cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --package maildesk-router --bin maildesk-policy-check -- \
   "${ROOT_DIR}/config/policy.example.json"
 
 echo "== worker typecheck"

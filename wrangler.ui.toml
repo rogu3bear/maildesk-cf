@@ -1,0 +1,30 @@
+name = "maildesk-cf-ui"
+main = "build/_worker.js"
+compatibility_date = "2026-07-15"
+workers_dev = false
+upload_source_maps = true
+
+[build]
+command = "bash ./scripts/build-ui-edge.sh"
+
+[assets]
+directory = "./target/site"
+binding = "ASSETS"
+
+[vars]
+MAILDESK_UI_AUTH_MODE = "access"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+preview_database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "RAW_MAIL"
+bucket_name = "maildesk-cf-raw-mail"
+
+[[queues.producers]]
+binding = "MAIL_JOBS"
+queue = "maildesk-cf-jobs"

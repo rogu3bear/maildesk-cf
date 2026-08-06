@@ -6,6 +6,7 @@ export interface MaildeskEnv {
   RESEND_API_KEY?: string;
   MAILDESK_API_TOKEN?: string;
   MAILDESK_PROOF_API_TOKEN?: string;
+  MAILDESK_REPLY_API_MODE?: "disabled" | "token";
   MAILDESK_OUTBOUND_MODE?: "disabled" | "cloudflare_email_service" | "resend";
   MAILDESK_POLICY_JSON?: string;
   MAILDESK_POLICY_R2_KEY?: string;
@@ -96,14 +97,17 @@ export function rawMailKey(messageId: string, deliveryId: string): string {
 }
 
 export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
+  const replyApiMode = env.MAILDESK_REPLY_API_MODE ?? "disabled";
   const checks: ReadinessCheck[] = [
     { name: "db_binding", ok: Boolean(env.DB) },
     { name: "raw_mail_binding", ok: Boolean(env.RAW_MAIL) },
     { name: "mail_jobs_binding", ok: Boolean(env.MAIL_JOBS) },
     {
-      name: "api_token",
-      ok: Boolean(env.MAILDESK_API_TOKEN || env.MAILDESK_PROOF_API_TOKEN),
-      detail: "required for reply API",
+      name: "reply_api",
+      ok:
+        replyApiMode === "disabled" ||
+        (replyApiMode === "token" && Boolean(env.MAILDESK_API_TOKEN || env.MAILDESK_PROOF_API_TOKEN)),
+      detail: replyApiMode,
     },
     {
       name: "policy_config",

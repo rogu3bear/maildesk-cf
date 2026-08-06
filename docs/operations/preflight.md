@@ -45,7 +45,10 @@ values.
 | `CF_DEV_TOKEN` or `CF_GLOBAL_TOKEN` | production auth option | `cfctl` lane token used by cfctl-native setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
-| `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | production | bearer token for the reply API; proof-only closeout may use the secondary token without rotating the primary API token |
+| `MAILDESK_REPLY_API_MODE` | production | `disabled` by default; `token` only for an explicitly service-bound legacy reply integration |
+| `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | token reply API only | bearer token required only when `MAILDESK_REPLY_API_MODE=token`; proof-only closeout may use the secondary token without rotating the primary token |
+| `MAILDESK_ACCESS_TEAM_DOMAIN` | production | HTTPS Access team origin used to fetch rotating JWKS, such as `https://team-name.cloudflareaccess.com` |
+| `MAILDESK_ACCESS_AUD` | production | immutable audience tag for the Access application protecting `/desk*` |
 | `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` and must match selected desired-state `sender.mode` |
 | `MAILDESK_VERIFIED_SENDER_DOMAINS` | required for `cloudflare_email_service` or `resend` | comma-separated sender domains approved by the active provider readback |
 | `RESEND_API_KEY` or `RESEND` | required for `resend` mode | Resend API key; `RESEND_API_KEY` is the preferred Worker secret name and `RESEND` is accepted as a local compatibility alias |
@@ -66,9 +69,14 @@ file. The account target can come from `CLOUDFLARE_ACCOUNT_ID`, a literal
 `project.account_id` in ignored desired state, an env name referenced by
 `project.account_id_env`, or the healthy `cfctl doctor` lane described above.
 
-Production mode also fails if `wrangler.toml` still contains placeholder
-Cloudflare resource IDs. That is intentional. Placeholder IDs are acceptable in
-the public template and unacceptable before real provisioning.
+Production mode also fails if `wrangler.toml`, `wrangler.mail-router.toml`, or
+`wrangler.ui.toml` still contains placeholder Cloudflare resource IDs. That is
+intentional. Placeholder IDs are acceptable in the public template and
+unacceptable before real provisioning.
+
+The Access team origin and application audience are mandatory because the UI
+Worker verifies the application JWT cryptographically. Supplying only the
+Access-injected email header is never sufficient production authentication.
 
 Outbound mode is deliberately explicit. Desired state and runtime use the same
 three values: `disabled`, `cloudflare_email_service`, and `resend`.
@@ -92,7 +100,7 @@ Local policy files are ignored by default.
 Before any Cloudflare mutation, run:
 
 ```bash
-cargo run --bin maildesk-policy-check -- "${MAILDESK_POLICY_PATH:-config/policy.local.json}"
+cargo run --package maildesk-router --bin maildesk-policy-check -- "${MAILDESK_POLICY_PATH:-config/policy.local.json}"
 ```
 
 ## Control Plane
