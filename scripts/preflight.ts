@@ -320,13 +320,50 @@ function readCfctlDoctor(): CfctlDoctorSummary | null {
     const v2RuntimeHealthy =
       parsed.result?.build_identity_healthy === true &&
       parsed.result?.path_build?.healthy === true &&
-      parsed.result?.instruction_drift === 0 &&
-      isUsableValue(parsed.result?.current_profile);
+      parsed.result?.instruction_drift === 0;
+    const selectedProfileHealthy = isUsableValue(parsed.result?.current_profile);
+    const configuredProfileHealthy =
+      v2RuntimeHealthy && readConfiguredCfctlProfile(command);
     return {
-      healthy: parsed.ok === true && (healthyLaneCount > 0 || v2RuntimeHealthy),
+      healthy:
+        parsed.ok === true &&
+        (healthyLaneCount > 0 ||
+          (v2RuntimeHealthy && selectedProfileHealthy) ||
+          configuredProfileHealthy),
     };
   } catch {
     return null;
+  }
+}
+
+function readConfiguredCfctlProfile(command: string): boolean {
+  const profile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
+  if (!profile || !isUsableValue(profile)) return false;
+
+  const result = spawnSync(command, ["auth", "status", profile, "--json"], {
+    cwd: root,
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (result.status !== 0 || !result.stdout.trim()) return false;
+
+  try {
+    const parsed = JSON.parse(result.stdout) as CfctlAuthStatusResponse;
+    if (
+      parsed.ok !== true ||
+      parsed.result?.credential_available !== true ||
+      parsed.result?.profile?.id !== profile
+    ) {
+      return false;
+    }
+
+    const expectedAccount = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+    return (
+      !expectedAccount ||
+      parsed.result.profile.account_id === expectedAccount
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -373,6 +410,17 @@ interface CfctlDoctorResponse {
         healthy_lane_count?: number;
         healthy_lanes?: string[];
       };
+    };
+  };
+}
+
+interface CfctlAuthStatusResponse {
+  ok?: boolean;
+  result?: {
+    credential_available?: boolean;
+    profile?: {
+      id?: string;
+      account_id?: string;
     };
   };
 }
