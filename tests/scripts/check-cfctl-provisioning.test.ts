@@ -10,7 +10,14 @@ describe("cfctl provisioning contract check", () => {
   test("reports the template desired state as a cfctl maildesk-cf provisioning lane", () => {
     const result = spawnSync(
       "bun",
-      ["run", "scripts/check-cfctl-provisioning.ts", "--", "--json"],
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--json",
+      ],
       {
         cwd: root,
         encoding: "utf8",

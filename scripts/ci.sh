@@ -22,8 +22,14 @@ cargo fmt --check
 step "cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 
+step "cargo test --workspace --all-features"
+cargo test --workspace --all-features
+
 step "bun run typecheck"
 bun run typecheck
+
+step "bun run build:ui"
+bun run build:ui
 
 step "bun run test:workers"
 bun run test:workers

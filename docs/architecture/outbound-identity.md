@@ -41,10 +41,14 @@ The supported pattern is:
 5. an outbound job sends through an authenticated sender adapter;
 6. the audit log records the provider result.
 
-The API route for this is `POST /api/replies`. It accepts only authenticated
-requests using `Authorization: Bearer <MAILDESK_API_TOKEN>` or
-`x-maildesk-token: <MAILDESK_API_TOKEN>`, then re-loads policy before queueing
-the outbound job.
+The human operator route is the Access-protected Leptos `/desk/api` server
+function, which derives the operator from a verified Access assertion and
+loads recipients from the authorized thread. A legacy integration route exists
+at `POST /api/replies`, but it is disabled by default. Enabling
+`MAILDESK_REPLY_API_MODE=token` requires `Authorization: Bearer
+<MAILDESK_API_TOKEN>` or `x-maildesk-token: <MAILDESK_API_TOKEN>` and must be
+paired with an explicit service boundary; the shared token does not establish
+an individual operator identity.
 
 ## Sender Adapter Order
 
@@ -100,7 +104,11 @@ Every outbound reply should emit auditable state transitions:
 - `outbound_reply_requested`;
 - `outbound_reply_authorized`;
 - `outbound_reply_send_attempted`;
-- `outbound_reply_delivered` or `outbound_reply_failed`.
+- `outbound_reply_retry_scheduled` when an idempotent Resend attempt will retry;
+- `outbound_reply_delivered`, `outbound_reply_failed`, or
+  `outbound_reply_recovery_required` as the terminal observed state.
 
 Provider message IDs are evidence. Raw provider credentials are never evidence
 and must not be logged.
+Message bodies, BCC recipients, custom headers, and raw provider responses are
+content, not audit metadata, and must not be copied into D1 audit detail.

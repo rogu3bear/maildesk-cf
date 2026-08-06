@@ -1,0 +1,16 @@
+{
+  "name": "maildesk-cf",
+  "short_name": "maildesk",
+  "description": "Cloudflare-native shared mail with policy-backed identity and explicit proof.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3efe5",
+  "theme_color": "#171914",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

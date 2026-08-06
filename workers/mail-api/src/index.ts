@@ -1,5 +1,4 @@
 import {
-  errorDetail,
   json,
   MailJob,
   MaildeskEnv,
@@ -9,6 +8,10 @@ import {
   readiness,
 } from "../../shared/contracts";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
+
+const RESEND_REQUEST_TIMEOUT_MS = 10_000;
+// wrangler.toml allows five retries after the initial Queue delivery.
+const MAX_OUTBOUND_ATTEMPTS = 6;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -28,6 +31,9 @@ export default {
     }
 
     if (url.pathname === "/api/replies") {
+      if ((env.MAILDESK_REPLY_API_MODE ?? "disabled") !== "token") {
+        return notFound();
+      }
       return queueReply(request, env);
     }
 
@@ -36,8 +42,12 @@ export default {
 
   async queue(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
     for (const message of batch.messages) {
-      await recordQueueEvent(message.body, env);
-      message.ack();
+      const disposition = await recordQueueEvent(message.body, env, Math.max(1, message.attempts));
+      if (disposition.kind === "retry") {
+        message.retry({ delaySeconds: disposition.delaySeconds });
+      } else {
+        message.ack();
+      }
     }
   },
 };
@@ -113,12 +123,55 @@ function isOutboundReplyRequestedJob(value: unknown): value is OutboundReplyRequ
   );
 }
 
-async function recordQueueEvent(job: MailJob, env: Env): Promise<void> {
+async function recordQueueEvent(
+  job: MailJob,
+  env: Env,
+  attempt: number,
+): Promise<QueueDisposition> {
   const base = dedupeBase(job);
 
-  await recordAuditEvent(env, "system", job.kind, job, base ? `${base}:${job.kind}` : undefined);
+  const claimed = await recordAuditEvent(
+    env,
+    "system",
+    job.kind,
+    auditDetailForJob(job, env),
+    base ? `${base}:${job.kind}` : undefined,
+    jobThreadId(job),
+  );
 
-  if (job.kind !== "outbound_reply_requested") return;
+  if (job.kind !== "outbound_reply_requested") return ACK;
+
+  // The first audit insert is the durable side-effect claim. Completed
+  // transitions always have a terminal result event. A claimed transition
+  // without a result is safe to resume only for Resend, whose request carries
+  // the stable messageId idempotency key. Cloudflare Email Service does not
+  // expose an equivalent key, so an interrupted transition is surfaced for
+  // deliberate recovery instead of risking a duplicate send.
+  if (!claimed) {
+    const terminalAction = await auditActionForDedupeKey(
+      env,
+      `${job.messageId}:outbound_reply_result`,
+    );
+    if (terminalAction) return ACK;
+
+    const currentMode = configuredOutboundMode(env);
+    const claimedMode = await auditOutboundModeForClaim(
+      env,
+      `${job.messageId}:outbound_reply_requested`,
+    );
+    if (claimedMode !== "resend" || currentMode !== claimedMode) {
+      await recordTerminalSendEvent(job, env, "outbound_reply_recovery_required", {
+        ok: false,
+        provider: claimedMode ?? "unknown",
+        ambiguous: true,
+        error:
+          claimedMode && claimedMode !== currentMode
+            ? `outbound provider mode changed before recovery: ${claimedMode} -> ${currentMode}`
+            : "outbound transition was claimed without a resumable provider result",
+      });
+      return ACK;
+    }
+  }
 
   await recordAuditEvent(
     env,
@@ -131,6 +184,7 @@ async function recordQueueEvent(job: MailJob, env: Env): Promise<void> {
       to: job.to,
     },
     `${job.messageId}:outbound_reply_authorized`,
+    job.threadId,
   );
 
   await recordAuditEvent(
@@ -142,26 +196,102 @@ async function recordQueueEvent(job: MailJob, env: Env): Promise<void> {
       threadId: job.threadId,
       fromIdentity: job.fromIdentity,
       to: job.to,
-      provider: env.MAILDESK_OUTBOUND_MODE ?? "disabled",
+      provider: configuredOutboundMode(env),
+      attempt,
     },
-    `${job.messageId}:outbound_reply_send_attempted`,
+    `${job.messageId}:outbound_reply_send_attempted:${attempt}`,
+    job.threadId,
   );
 
   const sendResult = await sendOutboundReply(job, env);
+  if (sendResult.ok) {
+    await recordTerminalSendEvent(job, env, "outbound_reply_delivered", sendResult);
+    return ACK;
+  }
+
+  if (sendResult.ambiguous) {
+    await recordTerminalSendEvent(job, env, "outbound_reply_recovery_required", sendResult);
+    return ACK;
+  }
+
+  if (sendResult.retryable && attempt < MAX_OUTBOUND_ATTEMPTS) {
+    const delaySeconds = retryDelaySeconds(attempt);
+    await recordAuditEvent(
+      env,
+      job.operator,
+      "outbound_reply_retry_scheduled",
+      {
+        messageId: job.messageId,
+        threadId: job.threadId,
+        fromIdentity: job.fromIdentity,
+        to: job.to,
+        attempt,
+        nextAttempt: attempt + 1,
+        delaySeconds,
+        result: auditSendResult(sendResult),
+      },
+      `${job.messageId}:outbound_reply_retry_scheduled:${attempt}`,
+      job.threadId,
+    );
+    return { kind: "retry", delaySeconds };
+  }
+
+  await recordTerminalSendEvent(job, env, "outbound_reply_failed", sendResult);
+  return ACK;
+}
+
+async function recordTerminalSendEvent(
+  job: OutboundReplyRequestedJob,
+  env: Env,
+  action: "outbound_reply_delivered" | "outbound_reply_failed" | "outbound_reply_recovery_required",
+  result: OutboundSendResult,
+): Promise<void> {
   await recordAuditEvent(
     env,
     job.operator,
-    sendResult.ok ? "outbound_reply_delivered" : "outbound_reply_failed",
+    action,
     {
       messageId: job.messageId,
       threadId: job.threadId,
       fromIdentity: job.fromIdentity,
       to: job.to,
-      result: sendResult,
+      result: auditSendResult(result),
     },
     `${job.messageId}:outbound_reply_result`,
+    job.threadId,
   );
 }
+
+async function auditActionForDedupeKey(env: Env, dedupeKey: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT action FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+  )
+    .bind(dedupeKey)
+    .first<{ action: string }>();
+  return row?.action ?? null;
+}
+
+async function auditOutboundModeForClaim(env: Env, dedupeKey: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT detail_json FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+  )
+    .bind(dedupeKey)
+    .first<{ detail_json: string }>();
+  if (!row?.detail_json) return null;
+
+  try {
+    const detail = JSON.parse(row.detail_json) as { outboundMode?: unknown };
+    return typeof detail.outboundMode === "string" ? detail.outboundMode : null;
+  } catch {
+    return null;
+  }
+}
+
+function retryDelaySeconds(attempt: number): number {
+  return Math.min(300, 5 * 2 ** Math.max(0, attempt - 1));
+}
+
+const ACK: QueueDisposition = { kind: "ack" };
 
 // Stable idempotency base for a job: the inbound deliveryId (set by the router)
 // or the outbound messageId. Returns undefined for jobs without one (no dedup).
@@ -171,22 +301,64 @@ function dedupeBase(job: MailJob): string | undefined {
   return undefined;
 }
 
+function jobThreadId(job: MailJob): string | undefined {
+  if (job.kind === "inbound_email_persisted" || job.kind === "outbound_reply_requested") {
+    return job.threadId;
+  }
+  return undefined;
+}
+
+function auditDetailForJob(job: MailJob, env: Env): unknown {
+  if (job.kind !== "outbound_reply_requested") return job;
+
+  return {
+    kind: job.kind,
+    messageId: job.messageId,
+    threadId: job.threadId,
+    operator: job.operator,
+    envelopeTo: job.envelopeTo,
+    fromIdentity: job.fromIdentity,
+    to: job.to,
+    outboundMode: configuredOutboundMode(env),
+    cc: job.cc,
+    replyTo: job.replyTo,
+    subjectLength: job.subject.length,
+    hasText: Boolean(job.text),
+    hasHtml: Boolean(job.html),
+    queuedAt: job.queuedAt,
+  };
+}
+
+function auditSendResult(result: OutboundSendResult): Omit<OutboundSendResult, "response"> {
+  return {
+    ok: result.ok,
+    provider: result.provider,
+    providerMessageId: result.providerMessageId,
+    error: result.error,
+    status: result.status,
+    retryable: result.retryable,
+    ambiguous: result.ambiguous,
+  };
+}
+
 async function recordAuditEvent(
   env: Env,
   actor: string,
   action: string,
   detail: unknown,
   dedupeKey?: string,
-): Promise<void> {
+  threadId?: string,
+): Promise<boolean> {
   // INSERT OR IGNORE against a partial UNIQUE(dedupe_key) makes the at-least-once
   // queue consumer idempotent: a redelivered job re-inserts the same dedupe_key
   // and is silently dropped. Rows with a null dedupe_key are unconstrained by the
   // partial index, so legacy/ad-hoc events still always insert.
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO audit_events (id, dedupe_key, actor, action, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+  const result = await env.DB.prepare(
+    "INSERT OR IGNORE INTO audit_events (id, dedupe_key, thread_id, actor, action, detail_json) VALUES (?1, ?2, (SELECT id FROM threads WHERE id = ?3), ?4, ?5, ?6)",
   )
-    .bind(crypto.randomUUID(), dedupeKey ?? null, actor, action, JSON.stringify(detail))
+    .bind(crypto.randomUUID(), dedupeKey ?? null, threadId ?? null, actor, action, JSON.stringify(detail))
     .run();
+  return (result.meta?.changes ?? 0) > 0;
 }
 
 type Env = MaildeskEnv;
@@ -228,19 +400,19 @@ async function sendOutboundReply(
   job: OutboundReplyRequestedJob,
   env: Env,
 ): Promise<OutboundSendResult> {
-  const mode = (env.MAILDESK_OUTBOUND_MODE ?? "disabled") as string;
+  const mode = configuredOutboundMode(env);
 
   if (mode === "disabled") {
     return { ok: false, provider: mode, error: "outbound sending is disabled" };
   }
 
-  if (mode !== "cloudflare_email_service" && mode !== "resend") {
-    return { ok: false, provider: mode, error: `invalid outbound mode: ${mode}` };
+  if (mode === "invalid") {
+    return { ok: false, provider: mode, error: "outbound mode is invalid" };
   }
 
   const verifiedDomain = senderDomain(job.fromIdentity);
   if (!isVerifiedSenderDomain(verifiedDomain, env)) {
-    return { ok: false, provider: mode, error: `sender domain is not verified: ${verifiedDomain}` };
+    return { ok: false, provider: mode, error: "sender domain is not verified" };
   }
 
   if (mode === "cloudflare_email_service") {
@@ -261,8 +433,13 @@ async function sendOutboundReply(
         headers: job.headers,
       });
       return { ok: true, provider: mode, providerMessageId: result.messageId };
-    } catch (error) {
-      return { ok: false, provider: mode, error: errorDetail(error) };
+    } catch {
+      return {
+        ok: false,
+        provider: mode,
+        ambiguous: true,
+        error: "Cloudflare Email Service send outcome is unknown",
+      };
     }
   }
 
@@ -274,7 +451,7 @@ async function sendOutboundReply(
     return sendWithResend(job, env.RESEND_API_KEY);
   }
 
-  return { ok: false, provider: mode, error: "invalid outbound mode" };
+  return { ok: false, provider: "invalid", error: "outbound mode is invalid" };
 }
 
 async function sendWithResend(
@@ -284,6 +461,7 @@ async function sendWithResend(
   try {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
+      signal: AbortSignal.timeout(RESEND_REQUEST_TIMEOUT_MS),
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
@@ -308,6 +486,8 @@ async function sendWithResend(
         ok: false,
         provider: "resend",
         error: `Resend send failed with ${response.status}`,
+        status: response.status,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
         response: data,
       };
     }
@@ -318,9 +498,22 @@ async function sendWithResend(
       providerMessageId: responseId(data),
       response: data,
     };
-  } catch (error) {
-    return { ok: false, provider: "resend", error: errorDetail(error) };
+  } catch {
+    return {
+      ok: false,
+      provider: "resend",
+      retryable: true,
+      error: "Resend request failed before a confirmed result",
+    };
   }
+}
+
+function configuredOutboundMode(env: Env): OutboundMode {
+  const mode = env.MAILDESK_OUTBOUND_MODE ?? "disabled";
+  if (mode === "disabled" || mode === "cloudflare_email_service" || mode === "resend") {
+    return mode;
+  }
+  return "invalid";
 }
 
 function isVerifiedSenderDomain(domain: string, env: Env): boolean {
@@ -370,5 +563,11 @@ interface OutboundSendResult {
   provider: string;
   providerMessageId?: string;
   error?: string;
+  status?: number;
+  retryable?: boolean;
+  ambiguous?: boolean;
   response?: unknown;
 }
+
+type QueueDisposition = { kind: "ack" } | { kind: "retry"; delaySeconds: number };
+type OutboundMode = "disabled" | "cloudflare_email_service" | "resend" | "invalid";

@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
+
+setDefaultTimeout(30_000);
 
 describe("production preflight", () => {
   test("accepts RESEND as a local compatibility alias for RESEND_API_KEY", () => {
@@ -19,6 +21,8 @@ describe("production preflight", () => {
       MAILDESK_OUTBOUND_MODE: "resend",
       MAILDESK_PROJECT_NAME: "maildesk-cf",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "example.com",
+      MAILDESK_ACCESS_TEAM_DOMAIN: "https://example.cloudflareaccess.com",
+      MAILDESK_ACCESS_AUD: "example-access-audience",
       RESEND: "example-resend-token",
     };
     delete env.RESEND_API_KEY;
@@ -31,7 +35,7 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).not.toContain("RESEND_API_KEY");
-    expect(result.stderr).toContain("wrangler.toml still contains placeholder Cloudflare resource IDs");
+    expect(result.stderr).toContain("cfctl doctor must report at least one healthy lane");
   });
 
   test("fails when runtime sender mode disagrees with desired state", () => {
@@ -83,7 +87,7 @@ describe("production preflight", () => {
     expect(result.stderr).toContain('cloudflare_email_service mode requires wrangler.toml send_email binding named "EMAIL"');
   });
 
-  test("accepts a healthy cfctl doctor lane for Cloudflare proof", () => {
+  test("does not treat a generic healthy cfctl lane as account or deploy authority", () => {
     const cfctl = fakeCfctlDoctor(true);
     const env = {
       ...process.env,
@@ -100,10 +104,9 @@ describe("production preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).not.toContain("missing Cloudflare account target");
-    expect(result.stderr).not.toContain("missing Cloudflare auth");
+    expect(result.stderr).toContain("missing Cloudflare account target");
+    expect(result.stderr).toContain("missing Cloudflare deploy auth");
     expect(result.stderr).not.toContain("missing project name");
-    expect(result.stderr).toContain("wrangler.toml still contains placeholder Cloudflare resource IDs");
   });
 
   test("accepts MAILDESK_PROOF_API_TOKEN for proof-only closeout", () => {
@@ -112,6 +115,7 @@ describe("production preflight", () => {
       ...process.env,
       CFCTL_BIN: cfctl,
       MAILDESK_PROOF_API_TOKEN: "example-proof-token",
+      MAILDESK_REPLY_API_MODE: "token",
     };
     scrubCloudflareEnv(env);
     delete env.MAILDESK_API_TOKEN;
@@ -126,9 +130,6 @@ describe("production preflight", () => {
     expect([0, 1]).toContain(result.status);
     expect(result.stderr).not.toContain("MAILDESK_API_TOKEN");
     expect(result.stderr).not.toContain("MAILDESK_PROOF_API_TOKEN");
-    if (result.status !== 0) {
-      expect(result.stderr).toContain("wrangler.toml still contains placeholder Cloudflare resource IDs");
-    }
   });
 
   test("loads production-only secrets from an explicit repo-local env file", () => {
@@ -217,14 +218,40 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("missing Cloudflare account target");
-    expect(result.stderr).toContain("missing Cloudflare auth");
+    expect(result.stderr).toContain("missing Cloudflare deploy auth");
   });
 
-  test("asks for either API token when no reply proof token is present", () => {
+  test("accepts the current cfctl v2 doctor health contract", () => {
+    const env = {
+      ...process.env,
+      CFCTL_BIN: fakeCfctlV2Doctor(),
+      CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+      CLOUDFLARE_API_TOKEN: "example-token",
+      MAILDESK_DESIRED_STATE_PATH: writeDesiredState("disabled"),
+      MAILDESK_POLICY_PATH: "config/policy.example.json",
+      MAILDESK_PROJECT_NAME: "maildesk-cf",
+      MAILDESK_OUTBOUND_MODE: "disabled",
+      MAILDESK_REPLY_API_MODE: "disabled",
+      MAILDESK_ACCESS_TEAM_DOMAIN: "https://example.cloudflareaccess.com",
+      MAILDESK_ACCESS_AUD: "example-access-audience",
+    };
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect([0, 1]).toContain(result.status);
+    expect(result.stderr).not.toContain("cfctl doctor must report at least one healthy lane");
+  });
+
+  test("asks for either API token only when the legacy reply API is enabled", () => {
     const cfctl = fakeCfctlDoctor(true);
     const env = {
       ...process.env,
       CFCTL_BIN: cfctl,
+      MAILDESK_REPLY_API_MODE: "token",
     };
     delete env.MAILDESK_API_TOKEN;
     delete env.MAILDESK_PROOF_API_TOKEN;
@@ -237,6 +264,98 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("set one of MAILDESK_API_TOKEN, MAILDESK_PROOF_API_TOKEN");
+  });
+
+  test("does not require a shared API token when the legacy reply API is disabled", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+      MAILDESK_REPLY_API_MODE: "disabled",
+    };
+    delete env.MAILDESK_API_TOKEN;
+    delete env.MAILDESK_PROOF_API_TOKEN;
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect([0, 1]).toContain(result.status);
+    expect(result.stderr).not.toContain("set one of MAILDESK_API_TOKEN, MAILDESK_PROOF_API_TOKEN");
+  });
+
+  test("rejects global credentials and wildcard sender domains for production", () => {
+    const desiredPath = writeDesiredState("resend");
+    const env = {
+      ...process.env,
+      CFCTL_BIN: "/usr/bin/false",
+      CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+      CLOUDFLARE_API_TOKEN: "",
+      CF_GLOBAL_TOKEN: "example-global-token",
+      MAILDESK_DESIRED_STATE_PATH: desiredPath,
+      MAILDESK_OUTBOUND_MODE: "resend",
+      MAILDESK_PROJECT_NAME: "maildesk-cf",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "*",
+      RESEND_API_KEY: "example-resend-token",
+    };
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("purpose-scoped CLOUDFLARE_API_TOKEN");
+    expect(result.stderr).toContain("explicit DNS domains without wildcards");
+  });
+
+  test("rejects embedded and subdomain sender wildcards", () => {
+    const desiredPath = writeDesiredState("resend");
+    for (const value of ["example.com,*", "*.example.com"]) {
+      const env = {
+        ...process.env,
+        CFCTL_BIN: fakeCfctlDoctor(true),
+        CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+        CLOUDFLARE_API_TOKEN: "example-token",
+        MAILDESK_DESIRED_STATE_PATH: desiredPath,
+        MAILDESK_OUTBOUND_MODE: "resend",
+        MAILDESK_PROJECT_NAME: "maildesk-cf",
+        MAILDESK_VERIFIED_SENDER_DOMAINS: value,
+        RESEND_API_KEY: "example-resend-token",
+      };
+
+      const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("explicit DNS domains without wildcards");
+    }
+  });
+
+  test("requires cryptographic Cloudflare Access verifier configuration", () => {
+    const cfctl = fakeCfctlDoctor(true);
+    const env = {
+      ...process.env,
+      CFCTL_BIN: cfctl,
+      MAILDESK_API_TOKEN: "example-maildesk-token",
+      MAILDESK_ACCESS_TEAM_DOMAIN: "",
+      MAILDESK_ACCESS_AUD: "",
+    };
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MAILDESK_ACCESS_TEAM_DOMAIN");
+    expect(result.stderr).toContain("MAILDESK_ACCESS_AUD");
   });
 });
 
@@ -279,6 +398,29 @@ fi
 if [ "$1" = "doctor" ]; then
   cat <<'JSON'
 {"ok":true,"summary":{"healthy_lanes":${JSON.stringify(healthyLanes)}}}
+JSON
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeCfctlV2Doctor(): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-v2-"));
+  const path = join(dir, "cfctl");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "fake cfctl"
+  exit 0
+fi
+if [ "$1" = "doctor" ]; then
+  cat <<'JSON'
+{"ok":true,"result":{"build_identity_healthy":true,"current_profile":"maildesk-production","instruction_drift":0,"path_build":{"healthy":true}}}
 JSON
   exit 0
 fi

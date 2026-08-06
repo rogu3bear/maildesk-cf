@@ -109,6 +109,52 @@ test("D1 metadata failure stops follow-up queue work after forwarding", async ()
   expect(String(consoleErrors[0]?.[0])).toContain("maildesk metadata persist failed");
 });
 
+test("distinct attacker-controlled Message-IDs cannot collapse to one thread id", async () => {
+  const db = new D1Recorder();
+  const env = {
+    DB: db,
+    RAW_MAIL: new R2Recorder(),
+    MAIL_JOBS: new QueueRecorder(),
+    MAILDESK_POLICY_JSON: JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {
+            founders: {
+              operators: ["operator-a@example.com"],
+              reply_identity: "founders@example.com",
+              allowed_reply_identities: [],
+            },
+          },
+          personal_aliases: {},
+        },
+      },
+    }),
+  } as unknown as Env;
+
+  for (const messageId of [
+    "<collision+a@example.net>",
+    "<collision a@example.net>",
+    "<CaseSensitive@example.net>",
+    "<casesensitive@example.net>",
+  ]) {
+    await mailRouterWorker.email(
+      new TestEmailMessage({
+        from: "sender@example.net",
+        to: "founders@example.com",
+        headers: { "message-id": messageId },
+        raw: `Message-ID: ${messageId}\r\n\r\nhello`,
+      }) as unknown as ForwardableEmailMessage,
+      env,
+      new TestExecutionContext() as unknown as ExecutionContext,
+    );
+  }
+
+  const threadIds = db.bindsFor("INSERT INTO threads").map((values) => values[0]);
+  expect(threadIds).toHaveLength(4);
+  expect(new Set(threadIds).size).toBe(4);
+});
+
 test("inbound routing rejects mailbox whitespace through the Rust policy boundary", async () => {
   const message = new TestEmailMessage({
     from: "sender@example.net",
@@ -255,6 +301,12 @@ class D1Recorder {
 
   sqlFor(needle: string): string | undefined {
     return this.statements.find((statement) => statement.sql.includes(needle))?.sql;
+  }
+
+  bindsFor(needle: string): unknown[][] {
+    return this.statements
+      .filter((statement) => statement.sql.includes(needle))
+      .map((statement) => statement.binds);
   }
 }
 

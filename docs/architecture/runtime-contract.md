@@ -38,6 +38,25 @@ The API Worker powers the operator desk. It should:
 - expose health and readiness endpoints that do not leak private config.
 
 The template deploy target for this Worker is `wrangler.toml`.
+Its legacy shared-token `POST /api/replies` route is disabled unless
+`MAILDESK_REPLY_API_MODE=token` is set explicitly. Human replies should use the
+Access-authenticated Leptos server-function path. Token mode is appropriate
+only behind a service boundary that binds the credential to one integration;
+the token itself is not an operator identity.
+
+### Leptos UI Worker
+
+The Cargo-Leptos Worker serves public explanatory routes and the operator desk.
+For `/desk*` in production it must validate the Cloudflare Access application
+JWT signature, issuer, audience, and expiry against the account JWKS before the
+Rust server trusts the email claim. Header presence alone is not
+authentication. `MAILDESK_ACCESS_TEAM_DOMAIN` and `MAILDESK_ACCESS_AUD` are
+required production inputs; local template preview bypasses Access only when
+`MAILDESK_UI_AUTH_MODE=preview` is set explicitly.
+
+The template deploy target for this Worker is `wrangler.ui.toml`, which keeps
+`workers_dev = false` so an alternate public origin cannot bypass the Access
+application on the production hostname.
 
 ### Rust Router
 
@@ -53,7 +72,8 @@ Generated WASM is rebuilt before each Worker bundle and is not committed.
 ### Storage
 
 D1 stores queryable state. R2 stores raw MIME and attachments. Queues own async
-retries. The app should never rely on a personal mailbox as the source of truth.
+delivery and redelivery; provider retry policy must remain explicit. The app
+should never rely on a personal mailbox as the source of truth.
 
 ## Required Bindings
 
@@ -61,7 +81,7 @@ retries. The app should never rely on a personal mailbox as the source of truth.
 | --- | --- | --- |
 | `DB` | D1 | domains, identities, routes, threads, messages, audit events |
 | `RAW_MAIL` | R2 | raw MIME bodies and attachment blobs |
-| `MAIL_JOBS` | Queue | parsing, notification, indexing, outbound retries |
+| `MAIL_JOBS` | Queue | parsing, notification, indexing, and outbound attempt delivery |
 | policy config | secret or versioned config | deployable router policy |
 
 The template ships placeholder `wrangler.toml` values. Production provisioning
@@ -105,6 +125,19 @@ binding limits.
   `ArrayBuffer`, rather than passing the Email Worker raw stream through
   directly.
 - D1 write failure: enqueue no follow-up work unless recovery is explicit.
-- Sender failure: retry through Queue policy and preserve audit evidence.
+- Sender failure: retry transient Resend failures with bounded Queue backoff and
+  the stable message ID idempotency key. Preserve a terminal failed audit result
+  after exhaustion or a non-retryable response.
+- Ambiguous Cloudflare Email Service failure: preserve a recovery-required
+  terminal audit result and do not replay the provider side effect.
+- Queue redelivery: acquire the stable audit claim before any external send;
+  a repeated completed claim must not repeat the provider side effect. A Resend
+  claim without a result may resume through the stable idempotency key; any
+  other incomplete claim becomes an explicit recovery-required condition. The
+  claimed provider mode is durable audit state; configuration drift must never
+  move an incomplete claim across providers.
+- Audit detail: store message and provider identifiers, statuses, counts, and
+  bounded error metadata; do not copy message bodies, BCC, custom headers, raw
+  provider responses, or credentials into D1 audit JSON.
 
 Fail closed first. Add manual recovery paths after the invariant is clear.
