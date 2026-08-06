@@ -246,6 +246,51 @@ describe("production preflight", () => {
     expect(result.stderr).not.toContain("cfctl doctor must report at least one healthy lane");
   });
 
+  test("accepts an explicit account-bound cfctl profile without global selection", () => {
+    const env = {
+      ...process.env,
+      CFCTL_BIN: fakeCfctlV2ProfileDoctor(),
+      CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+      CLOUDFLARE_API_TOKEN: "example-token",
+      MAILDESK_CFCTL_PROFILE: "maildesk-production",
+      MAILDESK_DESIRED_STATE_PATH: writeDesiredState("disabled"),
+      MAILDESK_POLICY_PATH: "config/policy.example.json",
+      MAILDESK_PROJECT_NAME: "maildesk-cf",
+      MAILDESK_OUTBOUND_MODE: "disabled",
+      MAILDESK_REPLY_API_MODE: "disabled",
+      MAILDESK_ACCESS_TEAM_DOMAIN: "https://example.cloudflareaccess.com",
+      MAILDESK_ACCESS_AUD: "example-access-audience",
+    };
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect([0, 1]).toContain(result.status);
+    expect(result.stderr).not.toContain("cfctl doctor must report at least one healthy lane");
+  });
+
+  test("rejects an explicit cfctl profile bound to another account", () => {
+    const env = {
+      ...process.env,
+      CFCTL_BIN: fakeCfctlV2ProfileDoctor("other-account-id"),
+      CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+      CLOUDFLARE_API_TOKEN: "example-token",
+      MAILDESK_CFCTL_PROFILE: "maildesk-production",
+    };
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("cfctl doctor must report at least one healthy lane");
+  });
+
   test("asks for either API token only when the legacy reply API is enabled", () => {
     const cfctl = fakeCfctlDoctor(true);
     const env = {
@@ -421,6 +466,35 @@ fi
 if [ "$1" = "doctor" ]; then
   cat <<'JSON'
 {"ok":true,"result":{"build_identity_healthy":true,"current_profile":"maildesk-production","instruction_drift":0,"path_build":{"healthy":true}}}
+JSON
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeCfctlV2ProfileDoctor(accountId = "example-account-id"): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-v2-profile-"));
+  const path = join(dir, "cfctl");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "fake cfctl"
+  exit 0
+fi
+if [ "$1" = "doctor" ]; then
+  cat <<'JSON'
+{"ok":true,"result":{"build_identity_healthy":true,"current_profile":null,"instruction_drift":0,"path_build":{"healthy":true}}}
+JSON
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "maildesk-production" ]; then
+  cat <<'JSON'
+{"ok":true,"result":{"credential_available":true,"profile":{"id":"maildesk-production","account_id":"${accountId}"}}}
 JSON
   exit 0
 fi

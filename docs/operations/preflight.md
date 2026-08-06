@@ -44,6 +44,7 @@ values.
 | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
 | `CF_DEV_TOKEN` or `CF_GLOBAL_TOKEN` | production auth option | `cfctl` lane token used by cfctl-native setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
+| `MAILDESK_CFCTL_PROFILE` | optional | explicit account-bound `cfctl` profile; avoids changing shared global profile selection |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
 | `MAILDESK_REPLY_API_MODE` | production | `disabled` by default; `token` only for an explicitly service-bound legacy reply integration |
 | `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | token reply API only | bearer token required only when `MAILDESK_REPLY_API_MODE=token`; proof-only closeout may use the secondary token without rotating the primary token |
@@ -60,6 +61,9 @@ Production mode requires one Cloudflare auth option: `CLOUDFLARE_API_TOKEN`,
 `CLOUDFLARE_EMAIL`. In cfctl-native environments, a healthy `cfctl doctor`
 lane also satisfies the Cloudflare account/auth proof because the account
 selector and credential source live in the operator's `cfctl` configuration.
+When no global profile is selected, set `MAILDESK_CFCTL_PROFILE`; preflight
+requires that profile's credential to be available and bound to
+`CLOUDFLARE_ACCOUNT_ID`.
 Prefer scoped tokens for normal operation; the key/email path exists so
 `cfctl` can still run an explicitly selected global/emergency lane.
 
