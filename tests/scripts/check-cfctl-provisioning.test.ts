@@ -114,7 +114,24 @@ describe("cfctl provisioning contract check", () => {
       wranglerBuildCommandFailure('[build]\ncommand = "cd .. && bun run build:router-wasm"\n'),
     ).toContain("build command runs from the repository invocation directory");
     expect(
+      wranglerBuildCommandFailure("[build]\ncommand = 'cd .. && bun run build:router-wasm'\n"),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure(
+        '[build]\ncommand = "cd \\u002e\\u002e && bun run build:router-wasm"\n',
+      ),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run build:router-wasm"\n'),
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure("[build]\ncommand = 'bun run build:router-wasm' # literal\n"),
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = """bun run build:router-wasm"""\n'),
+    ).toContain("must use a supported single-line TOML string");
+    expect(
+      wranglerBuildCommandFailure('[vars]\ncommand = "cd .."\n'),
     ).toBeNull();
   });
 
