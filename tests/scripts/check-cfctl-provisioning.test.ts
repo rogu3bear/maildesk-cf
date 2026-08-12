@@ -134,7 +134,19 @@ describe("cfctl provisioning contract check", () => {
     ).toBeNull();
     expect(
       wranglerBuildCommandFailure('[build]\ncommand = """bun run build:router-wasm"""\n'),
-    ).toContain("must use a supported single-line TOML string");
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure('build.command = "bun run --cwd ../.. build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('build = { command = "bun run --cwd ../.. build:router-wasm" }\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('"build"."command" = "bun run --cwd ../.. build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure("[build\ncommand = 'bun run build:router-wasm'\n"),
+    ).toContain("config must be valid TOML");
     expect(
       wranglerBuildCommandFailure('[vars]\ncommand = "cd .."\n'),
     ).toBeNull();
@@ -192,6 +204,34 @@ describe("cfctl provisioning contract check", () => {
   test("inspects JSONC build commands through the desired-state config path", () => {
     const configPath = join(root, "tests/fixtures/wrangler-jsonc/wrangler.jsonc");
     const desiredDir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-jsonc-"));
+    const desiredPath = join(desiredDir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as { workers: { mail_router: { config: string } } };
+    desired.workers.mail_router.config = relative(root, configPath);
+    writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        desiredPath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    rmSync(desiredDir, { force: true, recursive: true });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not traverse to a parent directory");
+  });
+
+  test("inspects dotted TOML build commands through the desired-state config path", () => {
+    const configPath = join(root, "tests/fixtures/wrangler-toml-dotted/wrangler.toml");
+    const desiredDir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-toml-"));
     const desiredPath = join(desiredDir, "desired-state.json");
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),

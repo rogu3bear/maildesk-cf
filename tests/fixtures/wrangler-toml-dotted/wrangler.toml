@@ -1,0 +1,2 @@
+# This invalid deployment candidate proves dotted TOML build commands are inspected.
+build.command = "bun run --cwd ../.. build:router-wasm"
