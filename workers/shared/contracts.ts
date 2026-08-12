@@ -24,7 +24,7 @@ export type MailJob =
   | InboxReplyReceivedJob
   | OutboundReplyRequestedJob;
 
-export type OperatorDeliveryMode = "web_desk" | "inbox_relay";
+export type OperatorDeliveryMode = "web_desk" | "inbox_relay" | "invalid";
 
 export interface OperatorDeliveryConfig {
   mode: OperatorDeliveryMode;
@@ -183,7 +183,12 @@ export function relaySpoolKey(attemptId: string, receivedAt: string): string {
 }
 
 export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig {
-  const mode = env.MAILDESK_OPERATOR_DELIVERY_MODE ?? "web_desk";
+  const configuredMode = env.MAILDESK_OPERATOR_DELIVERY_MODE as string | undefined;
+  const mode: OperatorDeliveryMode = configuredMode === undefined || configuredMode === "web_desk"
+    ? "web_desk"
+    : configuredMode === "inbox_relay"
+      ? "inbox_relay"
+      : "invalid";
   const replyDomain = normalizeDomain(env.MAILDESK_REPLY_DOMAIN);
   const replyTokenTtlDays = boundedPositiveInteger(env.MAILDESK_REPLY_TOKEN_TTL_DAYS, 90, 1, 365);
   const spoolRetentionDays = boundedPositiveInteger(env.MAILDESK_SPOOL_RETENTION_DAYS, 7, 1, 30);
@@ -195,7 +200,7 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
   );
 
   return {
-    mode: mode === "inbox_relay" ? "inbox_relay" : "web_desk",
+    mode,
     replyDomain,
     replyTokenTtlDays,
     spoolRetentionDays,
@@ -225,7 +230,11 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
   ];
 
   const delivery = operatorDeliveryConfig(env);
-  checks.push({ name: "operator_delivery_mode", ok: true, detail: delivery.mode });
+  checks.push({
+    name: "operator_delivery_mode",
+    ok: delivery.mode !== "invalid",
+    detail: delivery.mode,
+  });
   if (delivery.mode === "inbox_relay") {
     checks.push({
       name: "reply_domain",

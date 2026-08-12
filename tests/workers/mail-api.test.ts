@@ -473,6 +473,29 @@ describe("mail API outbound sender modes", () => {
     expect(response.status).toBe(404);
   });
 
+  test("readiness rejects an explicit invalid operator delivery mode", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox-relayy",
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "operator_delivery_mode",
+      ok: false,
+      detail: "invalid",
+    });
+  });
+
   test("cloudflare_email_service mode sends through EMAIL and records providerMessageId", async () => {
     const db = new D1Recorder();
     const email = new SendEmailRecorder("cf-message-id");

@@ -14,6 +14,7 @@ import {
   normalizeMailbox as normalizeRelayMailbox,
   outboundReplyPayload,
   parseRelayEmail,
+  relayRecordIsActive,
 } from "../../shared/inbox-relay";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
 
@@ -144,7 +145,7 @@ async function processInboxReply(
   )
     .bind(job.relayId)
     .first<ReplyRelayJobRow>();
-  if (!relay || relay.revoked_at || Date.parse(relay.expires_at) <= Date.now()) {
+  if (!relay || !relayRecordIsActive(relay.expires_at, relay.revoked_at)) {
     await failRelayAttempt(job, env, "relay_inactive");
     return ACK;
   }

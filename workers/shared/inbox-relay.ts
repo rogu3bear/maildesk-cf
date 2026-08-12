@@ -186,6 +186,16 @@ export function tokenExpiresAt(now: Date, ttlDays: number): string {
   return new Date(now.getTime() + ttlDays * 86_400_000).toISOString();
 }
 
+export function relayRecordIsActive(
+  expiresAt: string,
+  revokedAt: string | null,
+  nowMs = Date.now(),
+): boolean {
+  if (revokedAt) return false;
+  const expiryMs = Date.parse(expiresAt);
+  return Number.isFinite(expiryMs) && expiryMs > nowMs;
+}
+
 export function normalizeMailbox(value: string): string {
   const mailbox = value.trim().toLowerCase();
   const at = mailbox.lastIndexOf("@");

@@ -7,6 +7,7 @@ import {
   operatorAuthenticationPassed,
   parseRelayEmail,
   relayAddress,
+  relayRecordIsActive,
   relayTokenFromRecipient,
 } from "../../workers/shared/inbox-relay";
 
@@ -104,6 +105,31 @@ test("inbox relay rejects malformed and oversized messages without direct-forwar
   await mailRouterWorker.email(oversized, relayEnv(new RelayD1(), []), {} as ExecutionContext);
   expect(oversized.rejected).toContain("5 MiB");
   expect(oversized.forwarded).toHaveLength(0);
+});
+
+test("invalid delivery configuration and relay timestamps fail closed", async () => {
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<invalid-mode@example.net>" }),
+  );
+  const env = {
+    ...relayEnv(new RelayD1(), []),
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox-relayy",
+  };
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toContain("delivery mode is invalid");
+  expect(message.forwarded).toHaveLength(0);
+  expect(relayRecordIsActive("not-a-timestamp", null, 0)).toBe(false);
+  expect(relayRecordIsActive("2026-08-12T00:00:00.000Z", null, Date.parse("2026-08-12T00:00:00.000Z"))).toBe(false);
+  expect(relayRecordIsActive("2099-01-01T00:00:00.000Z", "2026-08-12T00:00:00.000Z", 0)).toBe(false);
+  expect(relayRecordIsActive("2099-01-01T00:00:00.000Z", null, 0)).toBe(true);
 });
 
 test("reply relay requires aligned Cloudflare authentication before token lookup", async () => {

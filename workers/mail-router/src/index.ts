@@ -13,6 +13,7 @@ import {
   outboundReplyPayload,
   parseRelayEmail,
   relayAddress,
+  relayRecordIsActive,
   relayTokenFromRecipient,
   sha256Hex,
   tokenExpiresAt,
@@ -34,6 +35,10 @@ export default {
 
 async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<void> {
   const config = operatorDeliveryConfig(env);
+  if (config.mode === "invalid") {
+    message.setReject("maildesk operator delivery mode is invalid");
+    return;
+  }
   const token = config.replyDomain
     ? relayTokenFromRecipient(message.to, config.replyDomain)
     : null;
@@ -496,7 +501,7 @@ async function loadActiveRelay(tokenHash: string, env: Env): Promise<ReplyRelayR
   )
     .bind(tokenHash)
     .first<ReplyRelayRow>();
-  if (!relay || relay.revoked_at || Date.parse(relay.expires_at) <= Date.now()) return null;
+  if (!relay || !relayRecordIsActive(relay.expires_at, relay.revoked_at)) return null;
   return relay;
 }
 
