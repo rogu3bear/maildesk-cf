@@ -8,7 +8,8 @@
       "name": "example.com",
       "inbound_mx_provider": "cloudflare_email_routing",
       "role_aliases": ["abuse", "dmarc", "founders", "info", "legal", "noreply", "postmaster", "security"],
-      "personal_aliases": ["operator-a", "operator-b"]
+      "personal_aliases": ["operator-a", "operator-b"],
+      "catch_all": true
     }
   ],
   "workers": {
@@ -27,6 +28,14 @@
     "r2_raw_mail_bucket": "maildesk-cf-raw-mail",
     "r2_raw_mail_preview_bucket": "maildesk-cf-raw-mail-preview",
     "queue": "maildesk-cf-jobs"
+  },
+  "operator_delivery": {
+    "mode": "inbox_relay",
+    "reply_domain": "reply.maildesk.example.com",
+    "reply_token_ttl_days": 90,
+    "spool_retention_days": 7,
+    "max_encoded_message_bytes": 5242880,
+    "banner_mode": "inline"
   },
   "sender": {
     "mode": "disabled",

@@ -32,14 +32,19 @@ operator's outbound mail after they press reply in a separate mailbox provider.
 Doing that without an approved sender path breaks the audit trail and can fail
 SPF, DKIM, DMARC, or provider policy checks.
 
-The supported pattern is:
+The preferred `inbox_relay` pattern is:
 
-1. inbound Email Worker routes and forwards the message;
-2. the desk stores the route decision and default reply identity;
-3. the operator replies from the desk or an approved integration surface;
-4. the API Worker authorizes the operator and identity through the router;
-5. an outbound job sends through an authenticated sender adapter;
-6. the audit log records the provider result.
+1. inbound Email Worker routes and wraps the message with an opaque reply address;
+2. the operator replies normally from an existing operator inbox;
+3. the reply-domain Worker validates the opaque relay, current operator policy,
+   matching envelope/visible sender, and aligned email authentication;
+4. the Queue consumer derives the external recipient and reply identity from D1;
+5. an outbound job strips personal routing headers and sends through an authenticated adapter;
+6. body-free audit records the provider result and deletes the temporary spool.
+
+The operator's personal address is never used as external `From`, `Reply-To`,
+`Sender`, `Return-Path`, or `Bcc`. No untrusted reply header may select the
+external destination.
 
 The human operator route is the Access-protected Leptos `/desk/api` server
 function, which derives the operator from a verified Access assertion and

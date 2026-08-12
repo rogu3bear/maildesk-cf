@@ -11,9 +11,56 @@ export interface MaildeskEnv {
   MAILDESK_POLICY_JSON?: string;
   MAILDESK_POLICY_R2_KEY?: string;
   MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
+  MAILDESK_OPERATOR_DELIVERY_MODE?: "web_desk" | "inbox_relay";
+  MAILDESK_REPLY_DOMAIN?: string;
+  MAILDESK_REPLY_TOKEN_TTL_DAYS?: string;
+  MAILDESK_SPOOL_RETENTION_DAYS?: string;
+  MAILDESK_MAX_ENCODED_MESSAGE_BYTES?: string;
 }
 
-export type MailJob = InboundEmailReceivedJob | InboundEmailPersistedJob | OutboundReplyRequestedJob;
+export type MailJob =
+  | InboundEmailReceivedJob
+  | InboundEmailPersistedJob
+  | InboxReplyReceivedJob
+  | OutboundReplyRequestedJob;
+
+export type OperatorDeliveryMode = "web_desk" | "inbox_relay";
+
+export interface OperatorDeliveryConfig {
+  mode: OperatorDeliveryMode;
+  replyDomain: string | null;
+  replyTokenTtlDays: number;
+  spoolRetentionDays: number;
+  maxEncodedMessageBytes: number;
+  bannerMode: "inline";
+}
+
+export type RouteProofStatus =
+  | "declared"
+  | "local_policy_valid"
+  | "edge_verified"
+  | "provider_accepted"
+  | "inbox_verified"
+  | "reply_verified"
+  | "partial_delivery"
+  | "recovery_required"
+  | "failed"
+  | "intentionally_excluded";
+
+export interface RouteHealthSummary {
+  routeId: string;
+  routeAddress: string;
+  routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
+  desiredProvider: "cloudflare_email_routing" | "google_workspace" | "external";
+  observedProvider?: string;
+  operatorCount: number;
+  replyIdentity: string;
+  inboundStatus: RouteProofStatus;
+  replyStatus: RouteProofStatus;
+  lastInboundAt?: string;
+  lastReplyAt?: string;
+  lastErrorCode?: string;
+}
 
 export interface InboundEmailReceivedJob {
   kind: "inbound_email_received";
@@ -45,6 +92,32 @@ export interface InboundEmailPersistedJob {
   queuedAt: string;
 }
 
+export interface InboxReplyReceivedJob {
+  kind: "inbox_reply_received";
+  attemptId: string;
+  relayId: string;
+  operator: string;
+  operatorMessageId: string;
+  rawR2Key: string;
+  receivedAt: string;
+}
+
+export type MailAttachmentPayload =
+  | {
+      disposition: "inline";
+      contentId: string;
+      filename: string;
+      type: string;
+      content: ArrayBuffer;
+    }
+  | {
+      disposition: "attachment";
+      contentId?: undefined;
+      filename: string;
+      type: string;
+      content: ArrayBuffer;
+    };
+
 export interface OutboundReplyRequestedJob {
   kind: "outbound_reply_requested";
   messageId: string;
@@ -60,7 +133,10 @@ export interface OutboundReplyRequestedJob {
   text?: string;
   html?: string;
   headers?: Record<string, string>;
+  attachments?: MailAttachmentPayload[];
   requestedIdentity?: string;
+  relayAttemptId?: string;
+  relaySpoolKey?: string;
   queuedAt: string;
 }
 
@@ -96,6 +172,34 @@ export function rawMailKey(messageId: string, deliveryId: string): string {
   return `raw/${new Date().toISOString().slice(0, 10)}/${safeId}__${deliveryId}.eml`;
 }
 
+export function relaySpoolKey(attemptId: string, receivedAt: string): string {
+  const day = /^\d{4}-\d{2}-\d{2}/.exec(receivedAt)?.[0] ?? "undated";
+  const safeId = attemptId.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `relay-spool/${day}/${safeId}.eml`;
+}
+
+export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig {
+  const mode = env.MAILDESK_OPERATOR_DELIVERY_MODE ?? "web_desk";
+  const replyDomain = normalizeDomain(env.MAILDESK_REPLY_DOMAIN);
+  const replyTokenTtlDays = boundedPositiveInteger(env.MAILDESK_REPLY_TOKEN_TTL_DAYS, 90, 1, 365);
+  const spoolRetentionDays = boundedPositiveInteger(env.MAILDESK_SPOOL_RETENTION_DAYS, 7, 1, 30);
+  const maxEncodedMessageBytes = boundedPositiveInteger(
+    env.MAILDESK_MAX_ENCODED_MESSAGE_BYTES,
+    5 * 1024 * 1024,
+    64 * 1024,
+    5 * 1024 * 1024,
+  );
+
+  return {
+    mode: mode === "inbox_relay" ? "inbox_relay" : "web_desk",
+    replyDomain,
+    replyTokenTtlDays,
+    spoolRetentionDays,
+    maxEncodedMessageBytes,
+    bannerMode: "inline",
+  };
+}
+
 export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
   const replyApiMode = env.MAILDESK_REPLY_API_MODE ?? "disabled";
   const checks: ReadinessCheck[] = [
@@ -115,6 +219,21 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
       detail: "optional in template",
     },
   ];
+
+  const delivery = operatorDeliveryConfig(env);
+  checks.push({ name: "operator_delivery_mode", ok: true, detail: delivery.mode });
+  if (delivery.mode === "inbox_relay") {
+    checks.push({
+      name: "reply_domain",
+      ok: Boolean(delivery.replyDomain),
+      detail: delivery.replyDomain ?? "missing",
+    });
+    checks.push({
+      name: "operator_delivery_sender",
+      ok: Boolean(env.EMAIL),
+      detail: "cloudflare_email_service",
+    });
+  }
 
   const outboundMode = (env.MAILDESK_OUTBOUND_MODE ?? "disabled") as string;
   if (outboundMode === "cloudflare_email_service") {
@@ -160,4 +279,21 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
 
 export function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeDomain(value: string | undefined): string | null {
+  const domain = value?.trim().toLowerCase();
+  if (!domain || domain.length > 253 || !/^[a-z0-9.-]+$/.test(domain)) return null;
+  return domain;
+}
+
+function boundedPositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (!value || !/^\d+$/.test(value)) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }

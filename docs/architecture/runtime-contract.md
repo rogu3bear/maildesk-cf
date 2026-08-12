@@ -8,16 +8,15 @@ IDs, no operator names, no live receipts, and no secret values.
 
 ### Email Worker
 
-The Email Worker receives Cloudflare Email Routing events. It should:
+The Email Worker receives Cloudflare Email Routing events. In `inbox_relay` it should:
 
 - normalize the envelope recipient into an `InboundMessage`;
 - call the Rust router contract through the compiled adapter path;
-- forward accepted mail to configured operators before attempting raw MIME
-  storage, because the Cloudflare raw message stream may not be reusable after
-  storage;
-- treat per-recipient forward failures as audit/recovery metadata for accepted
-  routes instead of rejecting the original sender's SMTP transaction;
-- store raw MIME content in R2 before parsing work begins;
+- parse MIME ephemerally, prepend equivalent text and HTML routing banners, and
+  submit one new Email Service message per policy-selected operator;
+- set `Reply-To` to `r+<opaque-token>@<reply-domain>` and persist only the
+  SHA-256 token hash;
+- retain raw MIME in R2 only for bounded relay or recovery work;
 - persist the route decision and initial message metadata in D1;
 - enqueue parsing, indexing, notification, and delivery jobs;
 - reject unknown domains and aliases without silently forwarding mail.
@@ -27,17 +26,25 @@ into `crates/maildesk-router`.
 
 The template deploy target for this Worker is `wrangler.mail-router.toml`.
 
+The reserved reply-domain path runs before ordinary alias lookup. It requires a
+live, unexpired relay; matching envelope and visible operator identity; aligned
+Cloudflare SPF or DKIM results; and a fresh Rust `authorize_reply` decision.
+The external destination is always loaded from D1, never from reply headers.
+
 ### API Worker
 
 The API Worker powers the operator desk. It should:
 
 - enforce authentication before thread, message, or reply access;
-- read route, thread, message, identity, and audit data from D1;
+- read body-free route-health and audit data from D1;
 - create outbound reply intents only after router authorization;
 - enqueue outbound send jobs instead of sending inline;
 - expose health and readiness endpoints that do not leak private config.
 
-The template deploy target for this Worker is `wrangler.toml`.
+In `inbox_relay`, its Queue consumer parses the temporary operator-reply spool,
+constructs a public-identity outbound job, records body-free state, and removes
+the spool on terminal provider acceptance. The template deploy target for this
+Worker is `wrangler.toml`.
 Its legacy shared-token `POST /api/replies` route is disabled unless
 `MAILDESK_REPLY_API_MODE=token` is set explicitly. Human replies should use the
 Access-authenticated Leptos server-function path. Token mode is appropriate
@@ -71,9 +78,10 @@ Generated WASM is rebuilt before each Worker bundle and is not committed.
 
 ### Storage
 
-D1 stores queryable state. R2 stores raw MIME and attachments. Queues own async
-delivery and redelivery; provider retry policy must remain explicit. The app
-should never rely on a personal mailbox as the source of truth.
+D1 stores queryable route, relay, idempotency, health, and body-free audit state.
+R2 stores temporary relay/recovery MIME only in `inbox_relay`; successful
+processing deletes it early and lifecycle policy provides a seven-day ceiling.
+Queues own async delivery and redelivery; provider retry policy must remain explicit.
 
 ## Required Bindings
 
@@ -82,6 +90,7 @@ should never rely on a personal mailbox as the source of truth.
 | `DB` | D1 | domains, identities, routes, threads, messages, audit events |
 | `RAW_MAIL` | R2 | raw MIME bodies and attachment blobs |
 | `MAIL_JOBS` | Queue | parsing, notification, indexing, and outbound attempt delivery |
+| `EMAIL` | Email Service | operator delivery and authenticated public-identity replies |
 | policy config | secret or versioned config | deployable router policy |
 
 The template ships placeholder `wrangler.toml` values. Production provisioning
@@ -100,14 +109,13 @@ binding limits.
 1. Cloudflare Email Routing receives `role@example.com`.
 2. Email Worker converts the event into router input.
 3. Rust router returns a `RouteDecision`.
-4. Accepted mail is forwarded to the policy-selected operators.
-5. Raw MIME is written to R2.
-6. Route, message, and audit metadata are written to D1.
-7. Queue jobs parse MIME and notify operators.
-8. Operator opens a thread in the UI.
-9. API Worker asks the router to authorize the reply identity.
-10. Outbound job sends through the configured sender mode.
-11. Audit events record the send request, provider result, and final status.
+4. Email Worker stores relay metadata and sends a bannered copy to each operator.
+5. Operator replies to the opaque relay address from the existing inbox.
+6. Email Worker validates token, identity, authentication, and Rust authorization.
+7. The reply MIME enters a temporary R2 spool and a durable Queue job.
+8. API Worker derives the external destination and public identity only from D1.
+9. Outbound job sends through the configured sender mode.
+10. Terminal success deletes the spool; D1 retains body-free audit and proof state.
 
 ## Failure Policy
 
@@ -116,11 +124,12 @@ binding limits.
 - Empty operator set: fail preflight before deploy.
 - Unauthorized operator: reject API request.
 - Unauthorized reply identity: reject API request.
-- Forward failure for a known route: record per-recipient forward errors and
-  keep recovery evidence instead of bouncing the sender.
-- R2 write failure after forwarding: enqueue an inbound job with explicit
-  storage error metadata so operators receive the message and recovery has
-  evidence.
+- One accepted operator delivery and one definitive failure: accept inbound and
+  record `partial_delivery`.
+- All definitive failures: reject inbound. Ambiguous outcomes: accept, preserve
+  a recovery spool, and record `recovery_required` without automatic replay.
+- Malformed or encoded messages over 5 MiB: reject clearly; never use direct
+  forwarding as a fallback for relay routes.
 - Raw MIME storage must provide R2 a known-length body, such as an
   `ArrayBuffer`, rather than passing the Email Worker raw stream through
   directly.

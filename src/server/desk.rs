@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use worker::D1Type;
 
 use crate::api::{
-    AuditSummary, DeskSnapshot, MessageSummary, ReplyReceipt, ThreadDetail, ThreadSummary,
+    AuditSummary, DeskSnapshot, MessageSummary, ReplyReceipt, RouteHealthSummary, ThreadDetail,
+    ThreadSummary,
 };
 
 use super::{AppError, AppResult, AppState};
@@ -46,6 +47,21 @@ struct AuditRow {
     created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RouteHealthRow {
+    route_address: String,
+    decision_kind: String,
+    desired_provider: String,
+    observed_provider: Option<String>,
+    operator_count: i64,
+    reply_identity: String,
+    inbound_status: String,
+    reply_status: String,
+    last_inbound_at: Option<String>,
+    last_reply_at: Option<String>,
+    last_error_code: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OutboundReplyRequestedJob {
@@ -71,6 +87,12 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
         .ok()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "disabled".to_string());
+    let operator_delivery_mode = state
+        .env
+        .var("MAILDESK_OPERATOR_DELIVERY_MODE")
+        .ok()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "web_desk".to_string());
 
     if state.preview() {
         return Ok(DeskSnapshot {
@@ -79,10 +101,18 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
             threads: Vec::new(),
             open_count: 0,
             outbound_mode,
+            operator_delivery_mode,
+            routes: Vec::new(),
         });
     }
 
-    let threads = query_threads(&state.db().map_err(db_binding_error)?, &operator).await?;
+    let db = state.db().map_err(db_binding_error)?;
+    let routes = query_route_health(&db).await?;
+    let threads = if operator_delivery_mode == "inbox_relay" {
+        Vec::new()
+    } else {
+        query_threads(&db, &operator).await?
+    };
     let open_count = threads
         .iter()
         .filter(|thread| thread.status == "open")
@@ -93,11 +123,18 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
         threads,
         open_count,
         outbound_mode,
+        operator_delivery_mode,
+        routes,
     })
 }
 
 pub async fn load_thread(thread_id: String) -> AppResult<ThreadDetail> {
     let state = app_state()?;
+    if operator_delivery_mode(&state) == "inbox_relay" {
+        return Err(AppError::client(
+            "Thread reading is disabled in inbox-relay mode. Use the routing-health dashboard.",
+        ));
+    }
     let operator = operator(&state)?;
     let thread_id = normalize_identifier(thread_id, "Thread reference is invalid.")?;
 
@@ -130,6 +167,11 @@ pub async fn queue_reply(
     body: String,
 ) -> AppResult<ReplyReceipt> {
     let state = app_state()?;
+    if operator_delivery_mode(&state) == "inbox_relay" {
+        return Err(AppError::client(
+            "Web replies are disabled in inbox-relay mode. Reply normally from the routed operator inbox.",
+        ));
+    }
     if state.preview() {
         return Err(AppError::client(
             "Replies are disabled while the desk is in template preview mode.",
@@ -217,6 +259,46 @@ async fn query_threads(db: &worker::D1Database, operator: &str) -> AppResult<Vec
         .map_err(|error| d1_error("Failed to decode operator thread rows.", error))?;
 
     rows.into_iter().map(map_thread).collect()
+}
+
+async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealthSummary>> {
+    let rows = db
+        .prepare(
+            "SELECT route_address, decision_kind, desired_provider, observed_provider,
+                    operator_count, reply_identity, inbound_status, reply_status,
+                    last_inbound_at, last_reply_at, last_error_code
+             FROM route_health
+             ORDER BY CASE
+               WHEN inbound_status IN ('partial_delivery', 'recovery_required', 'failed')
+                 OR reply_status IN ('partial_delivery', 'recovery_required', 'failed') THEN 0
+               ELSE 1
+             END, route_address ASC",
+        )
+        .all()
+        .await
+        .map_err(|error| d1_error("Failed to query route health.", error))?
+        .results::<RouteHealthRow>()
+        .map_err(|error| d1_error("Failed to decode route health.", error))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let operator_count = usize::try_from(row.operator_count)
+                .map_err(|error| AppError::internal("Stored operator count is invalid.", error))?;
+            Ok(RouteHealthSummary {
+                route_address: row.route_address,
+                decision_kind: row.decision_kind,
+                desired_provider: row.desired_provider,
+                observed_provider: row.observed_provider,
+                operator_count,
+                reply_identity: row.reply_identity,
+                inbound_status: row.inbound_status,
+                reply_status: row.reply_status,
+                last_inbound_at: row.last_inbound_at,
+                last_reply_at: row.last_reply_at,
+                last_error_code: row.last_error_code,
+            })
+        })
+        .collect()
 }
 
 async fn query_thread(
@@ -382,6 +464,15 @@ fn operator(state: &AppState) -> AppResult<String> {
         .operator()
         .map(str::to_string)
         .ok_or_else(|| AppError::client("Cloudflare Access identity is required."))
+}
+
+fn operator_delivery_mode(state: &AppState) -> String {
+    state
+        .env
+        .var("MAILDESK_OPERATOR_DELIVERY_MODE")
+        .ok()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "web_desk".to_string())
 }
 
 fn db_binding_error(error: worker::Error) -> AppError {

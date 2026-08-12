@@ -4,7 +4,7 @@
   "title": "maildesk-cf cfctl desired state",
   "type": "object",
   "additionalProperties": false,
-  "required": ["project", "domains", "workers", "storage", "sender", "verification"],
+  "required": ["project", "domains", "workers", "storage", "operator_delivery", "sender", "verification"],
   "properties": {
     "project": {
       "type": "object",
@@ -52,6 +52,26 @@
         "queue": { "$ref": "#/$defs/non_empty_string" }
       }
     },
+    "operator_delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "reply_domain",
+        "reply_token_ttl_days",
+        "spool_retention_days",
+        "max_encoded_message_bytes",
+        "banner_mode"
+      ],
+      "properties": {
+        "mode": { "type": "string", "enum": ["inbox_relay", "web_desk"] },
+        "reply_domain": { "$ref": "#/$defs/domain_name" },
+        "reply_token_ttl_days": { "type": "integer", "minimum": 1, "maximum": 365 },
+        "spool_retention_days": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "max_encoded_message_bytes": { "type": "integer", "minimum": 65536, "maximum": 5242880 },
+        "banner_mode": { "type": "string", "enum": ["inline"] }
+      }
+    },
     "sender": {
       "type": "object",
       "additionalProperties": false,
@@ -87,7 +107,7 @@
         "name": { "$ref": "#/$defs/domain_name" },
         "inbound_mx_provider": {
           "type": "string",
-          "enum": ["cloudflare_email_routing", "google_workspace", "external"]
+          "enum": ["cloudflare_email_routing", "google_workspace", "external", "excluded"]
         },
         "role_aliases": {
           "type": "array",
@@ -98,7 +118,8 @@
           "type": "array",
           "items": { "$ref": "#/$defs/alias" },
           "uniqueItems": true
-        }
+        },
+        "catch_all": { "type": "boolean" }
       }
     },
     "worker": {

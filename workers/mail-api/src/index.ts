@@ -1,12 +1,20 @@
 import {
+  InboxReplyReceivedJob,
   json,
   MailJob,
   MaildeskEnv,
   methodNotAllowed,
   notFound,
+  operatorDeliveryConfig,
   OutboundReplyRequestedJob,
   readiness,
 } from "../../shared/contracts";
+import {
+  assertWithinRelayLimit,
+  normalizeMailbox as normalizeRelayMailbox,
+  outboundReplyPayload,
+  parseRelayEmail,
+} from "../../shared/inbox-relay";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
 
 const RESEND_REQUEST_TIMEOUT_MS = 10_000;
@@ -118,8 +126,159 @@ function isOutboundReplyRequestedJob(value: unknown): value is OutboundReplyRequ
     (candidate.html === undefined || typeof candidate.html === "string") &&
     (typeof candidate.text === "string" || typeof candidate.html === "string") &&
     (candidate.headers === undefined || isStringRecord(candidate.headers)) &&
+    (candidate.attachments === undefined || isAttachmentArray(candidate.attachments)) &&
+    (candidate.relayAttemptId === undefined || typeof candidate.relayAttemptId === "string") &&
+    (candidate.relaySpoolKey === undefined || typeof candidate.relaySpoolKey === "string") &&
     typeof candidate.queuedAt === "string" &&
     (candidate.requestedIdentity === undefined || typeof candidate.requestedIdentity === "string")
+  );
+}
+
+async function processInboxReply(
+  job: InboxReplyReceivedJob,
+  env: Env,
+  attempt: number,
+): Promise<QueueDisposition> {
+  const relay = await env.DB.prepare(
+    "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id WHERE rr.id = ?1 LIMIT 1",
+  )
+    .bind(job.relayId)
+    .first<ReplyRelayJobRow>();
+  if (!relay || relay.revoked_at || Date.parse(relay.expires_at) <= Date.now()) {
+    await failRelayAttempt(job, env, "relay_inactive");
+    return ACK;
+  }
+  if (!normalizeRelayMailbox(relay.external_recipient) || !normalizeRelayMailbox(relay.reply_identity)) {
+    await failRelayAttempt(job, env, "relay_address_invalid");
+    return ACK;
+  }
+
+  const policy = await loadPolicy(env);
+  if (!policy) {
+    await recoverRelayAttempt(job, env, "policy_unavailable");
+    return ACK;
+  }
+  const authorization = authorizeReplyWithPolicy(policy, {
+    envelopeTo: relay.route_address,
+    operator: job.operator,
+    requestedIdentity: relay.reply_identity,
+  });
+  if (!authorization.ok || authorization.value.fromIdentity !== relay.reply_identity) {
+    await failRelayAttempt(job, env, "operator_no_longer_authorized");
+    return ACK;
+  }
+
+  const object = await env.RAW_MAIL.get(job.rawR2Key);
+  if (!object) {
+    await recoverRelayAttempt(job, env, "relay_spool_missing");
+    return ACK;
+  }
+  const config = operatorDeliveryConfig(env);
+  if (object.size > config.maxEncodedMessageBytes) {
+    await failRelayAttempt(job, env, "reply_too_large");
+    return ACK;
+  }
+
+  let parsed: Awaited<ReturnType<typeof parseRelayEmail>>;
+  try {
+    parsed = await parseRelayEmail(await object.arrayBuffer());
+  } catch {
+    await failRelayAttempt(job, env, "reply_mime_invalid");
+    return ACK;
+  }
+  if (normalizeRelayMailbox(parsed.from.address) !== normalizeRelayMailbox(job.operator)) {
+    await failRelayAttempt(job, env, "operator_identity_changed");
+    return ACK;
+  }
+
+  const payload = outboundReplyPayload(parsed);
+  try {
+    assertWithinRelayLimit(payload, config);
+  } catch {
+    await failRelayAttempt(job, env, "reply_too_large");
+    return ACK;
+  }
+  const references = storedReferences(relay.references_json);
+  if (relay.original_message_id && validMessageId(relay.original_message_id)) {
+    references.push(relay.original_message_id);
+  }
+  const headers: Record<string, string> = {};
+  if (relay.original_message_id && validMessageId(relay.original_message_id)) {
+    headers["In-Reply-To"] = relay.original_message_id;
+  }
+  if (references.length > 0) headers.References = [...new Set(references)].join(" ");
+
+  await env.DB.prepare(
+    "UPDATE relay_attempts SET status = 'authorized', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+  )
+    .bind(job.attemptId)
+    .run();
+  await recordAuditEvent(
+    env,
+    job.operator,
+    "inbox_reply_authorized",
+    { attemptId: job.attemptId, relayId: job.relayId, fromIdentity: relay.reply_identity },
+    `${job.attemptId}:inbox_reply_authorized`,
+    relay.thread_id,
+  );
+
+  const outbound: OutboundReplyRequestedJob = {
+    kind: "outbound_reply_requested",
+    messageId: job.attemptId.replace(/^relay-attempt:/, ""),
+    threadId: relay.thread_id,
+    operator: job.operator,
+    envelopeTo: relay.route_address,
+    fromIdentity: relay.reply_identity,
+    to: [relay.external_recipient],
+    replyTo: relay.reply_identity,
+    subject: payload.subject,
+    text: payload.text,
+    html: payload.html,
+    headers,
+    attachments: payload.attachments,
+    requestedIdentity: relay.reply_identity,
+    relayAttemptId: job.attemptId,
+    relaySpoolKey: job.rawR2Key,
+    queuedAt: job.receivedAt,
+  };
+  return recordQueueEvent(outbound, env, attempt);
+}
+
+async function failRelayAttempt(
+  job: InboxReplyReceivedJob,
+  env: Env,
+  errorCode: string,
+): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE relay_attempts SET status = 'failed', error_code = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+  )
+    .bind(errorCode, job.attemptId)
+    .run();
+  await recordAuditEvent(
+    env,
+    "system",
+    "inbox_reply_failed",
+    { attemptId: job.attemptId, relayId: job.relayId, errorCode },
+    `${job.attemptId}:inbox_reply_result`,
+  );
+}
+
+async function recoverRelayAttempt(
+  job: InboxReplyReceivedJob,
+  env: Env,
+  errorCode: string,
+): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE relay_attempts SET status = 'recovery_required', error_code = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+  )
+    .bind(errorCode, job.attemptId)
+    .run();
+  await recordAuditEvent(
+    env,
+    "system",
+    "inbox_reply_recovery_required",
+    { attemptId: job.attemptId, relayId: job.relayId, errorCode },
+    `${job.attemptId}:inbox_reply_result`,
   );
 }
 
@@ -128,6 +287,9 @@ async function recordQueueEvent(
   env: Env,
   attempt: number,
 ): Promise<QueueDisposition> {
+  if (job.kind === "inbox_reply_received") {
+    return processInboxReply(job, env, attempt);
+  }
   const base = dedupeBase(job);
 
   const claimed = await recordAuditEvent(
@@ -260,6 +422,31 @@ async function recordTerminalSendEvent(
     `${job.messageId}:outbound_reply_result`,
     job.threadId,
   );
+  if (job.relayAttemptId) {
+    const status = action === "outbound_reply_delivered"
+      ? "provider_accepted"
+      : action === "outbound_reply_recovery_required"
+        ? "recovery_required"
+        : "failed";
+    await env.DB.prepare(
+      "UPDATE relay_attempts SET status = ?1, provider_message_id = ?2, error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE id = ?4",
+    )
+      .bind(status, result.providerMessageId ?? null, result.error ? status : null, job.relayAttemptId)
+      .run();
+    await env.DB.prepare(
+      "UPDATE route_health SET reply_status = ?1, last_reply_at = CURRENT_TIMESTAMP, last_error_code = ?2, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?3)",
+    )
+      .bind(status, result.error ? status : null, job.relayAttemptId)
+      .run();
+    if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
+      await env.RAW_MAIL.delete(job.relaySpoolKey);
+      await env.DB.prepare(
+        "UPDATE relay_attempts SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+      )
+        .bind(job.relayAttemptId)
+        .run();
+    }
+  }
 }
 
 async function auditActionForDedupeKey(env: Env, dedupeKey: string): Promise<string | null> {
@@ -298,6 +485,7 @@ const ACK: QueueDisposition = { kind: "ack" };
 function dedupeBase(job: MailJob): string | undefined {
   if (job.kind === "inbound_email_received") return job.deliveryId;
   if (job.kind === "outbound_reply_requested") return job.messageId;
+  if (job.kind === "inbox_reply_received") return job.attemptId;
   return undefined;
 }
 
@@ -309,6 +497,16 @@ function jobThreadId(job: MailJob): string | undefined {
 }
 
 function auditDetailForJob(job: MailJob, env: Env): unknown {
+  if (job.kind === "inbox_reply_received") {
+    return {
+      kind: job.kind,
+      attemptId: job.attemptId,
+      relayId: job.relayId,
+      operator: job.operator,
+      operatorMessageId: job.operatorMessageId,
+      receivedAt: job.receivedAt,
+    };
+  }
   if (job.kind !== "outbound_reply_requested") return job;
 
   return {
@@ -325,6 +523,7 @@ function auditDetailForJob(job: MailJob, env: Env): unknown {
     subjectLength: job.subject.length,
     hasText: Boolean(job.text),
     hasHtml: Boolean(job.html),
+    attachmentCount: job.attachments?.length ?? 0,
     queuedAt: job.queuedAt,
   };
 }
@@ -378,6 +577,20 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return Object.values(value).every((entry) => typeof entry === "string");
 }
 
+function isAttachmentArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const attachment = entry as Record<string, unknown>;
+    return (
+      (attachment.disposition === "inline" || attachment.disposition === "attachment") &&
+      typeof attachment.filename === "string" &&
+      typeof attachment.type === "string" &&
+      attachment.content instanceof ArrayBuffer &&
+      (attachment.contentId === undefined || typeof attachment.contentId === "string")
+    );
+  });
+}
+
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
   const policyJson = env.MAILDESK_POLICY_JSON ?? (await loadPolicyFromR2(env));
   if (!policyJson) return null;
@@ -426,11 +639,12 @@ async function sendOutboundReply(
         to: job.to,
         cc: job.cc,
         bcc: job.bcc,
-        replyTo: job.replyTo,
+        replyTo: job.fromIdentity,
         subject: job.subject,
         text: job.text,
         html: job.html,
-        headers: job.headers,
+        headers: canonicalConversationHeaders(job),
+        attachments: job.attachments,
       });
       return { ok: true, provider: mode, providerMessageId: result.messageId };
     } catch {
@@ -446,6 +660,9 @@ async function sendOutboundReply(
   if (mode === "resend") {
     if (!env.RESEND_API_KEY) {
       return { ok: false, provider: mode, error: "RESEND_API_KEY is not configured" };
+    }
+    if (job.attachments && job.attachments.length > 0) {
+      return { ok: false, provider: mode, error: "Resend relay attachments are not configured" };
     }
 
     return sendWithResend(job, env.RESEND_API_KEY);
@@ -472,11 +689,11 @@ async function sendWithResend(
         to: job.to,
         cc: job.cc,
         bcc: job.bcc,
-        reply_to: job.replyTo ? [job.replyTo] : undefined,
+        reply_to: [job.fromIdentity],
         subject: job.subject,
         text: job.text,
         html: job.html,
-        headers: job.headers,
+        headers: canonicalConversationHeaders(job),
       }),
     });
 
@@ -547,6 +764,49 @@ function normalizeMailbox(address: string): string {
   return address.trim().toLowerCase();
 }
 
+function canonicalConversationHeaders(job: OutboundReplyRequestedJob): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Message-ID": outboundMessageId(job),
+  };
+  const inReplyTo = messageHeader(job.headers, "in-reply-to");
+  if (validMessageId(inReplyTo)) headers["In-Reply-To"] = inReplyTo;
+
+  const references = validMessageIdList(messageHeader(job.headers, "references"));
+  if (references.length > 0) headers.References = references.join(" ");
+  return headers;
+}
+
+function outboundMessageId(job: OutboundReplyRequestedJob): string {
+  const domain = senderDomain(job.fromIdentity) || "maildesk.invalid";
+  const local = job.messageId.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 160) || crypto.randomUUID();
+  return `<${local}@${domain}>`;
+}
+
+function messageHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const match = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return match?.[1];
+}
+
+function validMessageId(value: string | null | undefined): value is string {
+  return Boolean(value && value.length <= 998 && /^<[^<>\s]+>$/.test(value));
+}
+
+function validMessageIdList(value: string | null | undefined): string[] {
+  if (!value || value.length > 8_000) return [];
+  return [...new Set(value.match(/<[^<>\s]+>/g) ?? [])].slice(-50);
+}
+
+function storedReferences(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter((entry): entry is string => typeof entry === "string" && validMessageId(entry)))].slice(-50);
+  } catch {
+    return [];
+  }
+}
+
 function responseId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || !("id" in value)) return undefined;
   const id = (value as { id?: unknown }).id;
@@ -556,6 +816,18 @@ function responseId(value: unknown): string | undefined {
 interface ParsedMailbox {
   localPart: string;
   domain: string;
+}
+
+interface ReplyRelayJobRow {
+  id: string;
+  thread_id: string;
+  external_recipient: string;
+  reply_identity: string;
+  original_message_id: string | null;
+  references_json: string;
+  expires_at: string;
+  revoked_at: string | null;
+  route_address: string;
 }
 
 interface OutboundSendResult {

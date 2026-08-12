@@ -65,6 +65,8 @@ describe("production preflight", () => {
 
   test("requires an EMAIL send_email binding for Cloudflare Email Service mode", () => {
     const desiredPath = writeDesiredState("cloudflare_email_service");
+    const wranglerPath = join(mkdtempSync(join(tmpdir(), "maildesk-wrangler-")), "wrangler.toml");
+    writeFileSync(wranglerPath, 'name = "maildesk-test"\n');
     const env = {
       ...process.env,
       CFCTL_BIN: "/usr/bin/true",
@@ -74,6 +76,7 @@ describe("production preflight", () => {
       MAILDESK_API_TOKEN: "example-maildesk-token",
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_PROJECT_NAME: "maildesk-cf",
+      MAILDESK_MAIL_API_WRANGLER_PATH: wranglerPath,
       MAILDESK_VERIFIED_SENDER_DOMAINS: "example.com",
     };
 
@@ -84,7 +87,7 @@ describe("production preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('cloudflare_email_service mode requires wrangler.toml send_email binding named "EMAIL"');
+    expect(result.stderr).toContain(`cloudflare_email_service mode requires ${wranglerPath} send_email binding named "EMAIL"`);
   });
 
   test("does not treat a generic healthy cfctl lane as account or deploy authority", () => {
@@ -517,6 +520,14 @@ function writeDesiredState(mode: "disabled" | "cloudflare_email_service" | "rese
           account_id_env: "CLOUDFLARE_ACCOUNT_ID",
         },
         domains: [],
+        operator_delivery: {
+          mode: "web_desk",
+          reply_domain: "reply.maildesk.example.com",
+          reply_token_ttl_days: 90,
+          spool_retention_days: 7,
+          max_encoded_message_bytes: 5_242_880,
+          banner_mode: "inline",
+        },
         sender: {
           mode,
           authenticated_domains: mode === "disabled" ? [] : ["example.com"],

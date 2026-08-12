@@ -2,11 +2,26 @@ name = "maildesk-cf-router"
 main = "workers/mail-router/src/index.ts"
 compatibility_date = "2026-05-19"
 
+send_email = [
+  { name = "EMAIL" }
+]
+
 [build]
 command = "bun run build:router-wasm"
 
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
+MAILDESK_OPERATOR_DELIVERY_MODE = "web_desk"
+MAILDESK_REPLY_DOMAIN = "reply.maildesk.example.com"
+MAILDESK_REPLY_TOKEN_TTL_DAYS = "90"
+MAILDESK_SPOOL_RETENTION_DAYS = "7"
+MAILDESK_MAX_ENCODED_MESSAGE_BYTES = "5242880"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "RAW_MAIL"
