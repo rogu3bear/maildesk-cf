@@ -1,0 +1,6 @@
+// This invalid deployment candidate proves JSONC build commands are inspected.
+{
+  "build": {
+    "command": "bun run --cwd ../.. build:router-wasm",
+  },
+}
