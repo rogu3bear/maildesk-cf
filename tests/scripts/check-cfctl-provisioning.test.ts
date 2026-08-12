@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { wranglerBuildCommandFailure } from "../../scripts/wrangler-config";
 import { isRepositoryRelativePath } from "../../scripts/wrangler-config";
@@ -114,8 +114,48 @@ describe("cfctl provisioning contract check", () => {
       wranglerBuildCommandFailure('[build]\ncommand = "cd .. && bun run build:router-wasm"\n'),
     ).toContain("build command runs from the repository invocation directory");
     expect(
+      wranglerBuildCommandFailure("[build]\ncommand = 'cd .. && bun run build:router-wasm'\n"),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure(
+        '[build]\ncommand = "cd $IFS../.. && bun run build:router-wasm"\n',
+      ),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure(
+        '[build]\ncommand = "cd \\u002e\\u002e && bun run build:router-wasm"\n',
+      ),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run build:router-wasm"\n'),
     ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure("[build]\ncommand = 'bun run build:router-wasm' # literal\n"),
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = """bun run build:router-wasm"""\n'),
+    ).toContain("must use a supported single-line TOML string");
+    expect(
+      wranglerBuildCommandFailure('[vars]\ncommand = "cd .."\n'),
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure('{"build":{"command":"cd .."}}', "json"),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure(
+        '// comment\n{"build":{"command":"bun run --cwd ../.. build:router-wasm",},}',
+        "jsonc",
+      ),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('{"vars":{"command":"cd .."}}', "json"),
+    ).toBeNull();
+    expect(
+      wranglerBuildCommandFailure('{"build":{"command":false}}', "json"),
+    ).toContain("build command must be a string");
+    expect(
+      wranglerBuildCommandFailure('{"build":', "json"),
+    ).toContain("config must be valid JSON");
   });
 
   test("rejects Worker config paths that escape the repository", () => {
@@ -147,6 +187,34 @@ describe("cfctl provisioning contract check", () => {
     expect(isRepositoryRelativePath("C:/deploy/router/wrangler.toml")).toBe(false);
     expect(isRepositoryRelativePath("deploy//router/wrangler.toml")).toBe(false);
     expect(isRepositoryRelativePath("deploy/router/wrangler.toml")).toBe(true);
+  });
+
+  test("inspects JSONC build commands through the desired-state config path", () => {
+    const configPath = join(root, "tests/fixtures/wrangler-jsonc/wrangler.jsonc");
+    const desiredDir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-jsonc-"));
+    const desiredPath = join(desiredDir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as { workers: { mail_router: { config: string } } };
+    desired.workers.mail_router.config = relative(root, configPath);
+    writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        desiredPath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    rmSync(desiredDir, { force: true, recursive: true });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not traverse to a parent directory");
   });
 
   test("rejects desired state missing storage resources needed for provisioning", () => {

@@ -1,7 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
-import { isRepositoryRelativePath, wranglerBuildCommandFailure } from "./wrangler-config";
+import {
+  isRepositoryRelativePath,
+  type WranglerConfigFormat,
+  wranglerBuildCommandFailure,
+} from "./wrangler-config";
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
 
@@ -258,24 +262,34 @@ function validateWorker(worker: Record<string, unknown> | null, prefix: string) 
     return;
   }
   checkFile(config);
-  if (!matchesCanonicalWranglerBasename(config)) {
+  const format = wranglerConfigFormat(config);
+  if (!format) {
     failures.push(`${prefix}.config must use the canonical wrangler.toml, wrangler.json, or wrangler.jsonc basename`);
+    return;
   }
-  validateWranglerBuildCommand(config, prefix);
+  validateWranglerBuildCommand(config, prefix, format);
 }
 
-function matchesCanonicalWranglerBasename(path: string): boolean {
-  return ["wrangler.toml", "wrangler.json", "wrangler.jsonc"].includes(basename(path).toLowerCase());
+function wranglerConfigFormat(path: string): WranglerConfigFormat | null {
+  const name = basename(path).toLowerCase();
+  if (name === "wrangler.toml") return "toml";
+  if (name === "wrangler.json") return "json";
+  if (name === "wrangler.jsonc") return "jsonc";
+  return null;
 }
 
-function validateWranglerBuildCommand(path: string, prefix: string) {
+function validateWranglerBuildCommand(
+  path: string,
+  prefix: string,
+  format: WranglerConfigFormat,
+) {
   let contents: string;
   try {
     contents = readFileSync(resolve(root, path), "utf8");
   } catch {
     return;
   }
-  const failure = wranglerBuildCommandFailure(contents);
+  const failure = wranglerBuildCommandFailure(contents, format);
   if (failure) failures.push(`${prefix}.config ${failure}`);
 }
 
