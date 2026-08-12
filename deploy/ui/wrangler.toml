@@ -5,7 +5,7 @@ workers_dev = false
 upload_source_maps = true
 
 [build]
-command = "bash ../../scripts/build-ui-edge.sh"
+command = "bash scripts/build-ui-edge.sh"
 
 [assets]
 directory = "../../target/site"

@@ -7,7 +7,7 @@ send_email = [
 ]
 
 [build]
-command = "bun run --cwd ../.. build:router-wasm"
+command = "bun run build:router-wasm"
 
 [vars]
 MAILDESK_POLICY_R2_KEY = "config/policy.json"

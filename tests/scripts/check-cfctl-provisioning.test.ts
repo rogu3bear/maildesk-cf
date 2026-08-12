@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { wranglerBuildCommandFailure } from "../../scripts/wrangler-config";
+import { isRepositoryRelativePath } from "../../scripts/wrangler-config";
 
 const root = resolve(import.meta.dir, "../..");
 
@@ -95,9 +97,56 @@ describe("cfctl provisioning contract check", () => {
       ],
       { cwd: root, encoding: "utf8" },
     );
+    rmSync(dir, { force: true, recursive: true });
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("workers.mail_router.config must use the canonical wrangler.toml");
+  });
+
+  test("rejects nested Wrangler build commands that assume the config directory is cwd", () => {
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd ../.. build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd=../.. build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "cd .. && bun run build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "bun run build:router-wasm"\n'),
+    ).toBeNull();
+  });
+
+  test("rejects Worker config paths that escape the repository", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-config-path-"));
+    const desiredPath = join(dir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as { workers: { mail_router: { config: string } } };
+    desired.workers.mail_router.config = "../outside/wrangler.toml";
+    writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        desiredPath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    rmSync(dir, { force: true, recursive: true });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must be a normalized repository-relative path");
+    expect(isRepositoryRelativePath("./deploy/router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("C:/deploy/router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("deploy//router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("deploy/router/wrangler.toml")).toBe(true);
   });
 
   test("rejects desired state missing storage resources needed for provisioning", () => {
