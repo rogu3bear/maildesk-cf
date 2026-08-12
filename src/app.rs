@@ -6,7 +6,9 @@ use leptos_router::{
     ParamSegment, SsrMode, StaticSegment, WildcardSegment,
 };
 
-use crate::api::{load_desk, load_thread, DeskSnapshot, QueueReply, ThreadDetail};
+use crate::api::{
+    load_desk, load_thread, DeskSnapshot, QueueReply, RouteHealthSummary, ThreadDetail,
+};
 
 #[allow(dead_code)]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -344,7 +346,15 @@ fn DeskLoaded(data: DeskSnapshot, refresh: RwSignal<usize>) -> impl IntoView {
         threads,
         open_count,
         outbound_mode,
+        operator_delivery_mode,
+        routes,
     } = data;
+    if operator_delivery_mode == "inbox_relay" {
+        return view! {
+            <RoutingHealthDashboard operator=operator preview=preview routes=routes refresh=refresh/>
+        }
+        .into_any();
+    }
     let thread_count = threads.len();
     let has_threads = !threads.is_empty();
     let initials = operator
@@ -467,6 +477,138 @@ fn DeskLoaded(data: DeskSnapshot, refresh: RwSignal<usize>) -> impl IntoView {
                 </section>
             </main>
         </div>
+    }.into_any()
+}
+
+#[component]
+fn RoutingHealthDashboard(
+    operator: String,
+    preview: bool,
+    routes: Vec<RouteHealthSummary>,
+    refresh: RwSignal<usize>,
+) -> impl IntoView {
+    let exception_count = routes
+        .iter()
+        .filter(|route| route_needs_attention(route))
+        .count();
+    let ready_count = routes
+        .iter()
+        .filter(|route| {
+            route.inbound_status == "inbox_verified" && route.reply_status == "reply_verified"
+        })
+        .count();
+    let route_count = routes.len();
+
+    view! {
+        <div class="desk-page">
+            <header class="desk-topbar">
+                <A href="/" attr:class="brand brand--desk" attr:aria-label="maildesk-cf home">
+                    <span class="brand-mark" aria-hidden="true"><span></span><span></span></span>
+                    <span>"maildesk"<i>"·cf"</i></span>
+                </A>
+                <div class="desk-environment">
+                    <span class:preview-badge=preview class:live-badge=move || !preview>
+                        {if preview { "Template preview" } else { "Access protected" }}
+                    </span>
+                    <span>"Inbox relay · routing only"</span>
+                </div>
+                <div class="operator-pill"><div><strong>"Operator"</strong><small>{operator}</small></div></div>
+            </header>
+            <main class="desk-shell">
+                <aside class="desk-sidebar">
+                    <nav aria-label="Routing navigation">
+                        <a class="desk-nav-item desk-nav-item--active" href="#routes"><span>"Declared routes"</span><b>{route_count}</b></a>
+                        <a class="desk-nav-item" href="#exceptions"><span>"Exceptions"</span><b>{exception_count}</b></a>
+                        <a class="desk-nav-item" href="#proof"><span>"Mail-ready"</span><b>{ready_count}</b></a>
+                    </nav>
+                    <div class="sidebar-note">
+                        <span>"Product boundary"</span>
+                        <strong>"No message content"</strong>
+                        <p>"This surface shows declared configuration and evidence state. Read and reply to routed mail in the existing operator inbox."</p>
+                    </div>
+                </aside>
+                <section class="desk-workspace" id="routes">
+                    <header class="workspace-head">
+                        <div>
+                            <p class="eyebrow"><span></span>"Routing health"</p>
+                            <h1>{if exception_count == 0 { "Routes are declared. Proof remains explicit." } else { "Mail routes need attention." }}</h1>
+                            <p>"Provider acceptance, inbox receipt, and external reply receipt are independent states. Nothing becomes mail-ready from deployment alone."</p>
+                        </div>
+                        <button class="button button--quiet" type="button" on:click=move |_| refresh.update(|value| *value += 1)>"Refresh routes"</button>
+                    </header>
+                    <section class="thread-panel" id="exceptions" aria-labelledby="route-health-title">
+                        <div class="panel-title"><div><span>{format!("{route_count:02}")}</span><h2 id="route-health-title">"Domain and alias health"</h2></div><small>"Body-free metadata"</small></div>
+                        {if routes.is_empty() {
+                            view! { <div class="desk-empty"><h3>"No routes have been projected."</h3><p>"Run the policy-sync command against a migrated local D1 database before deployment planning."</p></div> }.into_any()
+                        } else {
+                            view! {
+                                <ol class="thread-list">
+                                    {routes.into_iter().map(|route| {
+                                        let needs_attention = route_needs_attention(&route);
+                                        let observed = route.observed_provider.clone().unwrap_or_else(|| "unobserved".to_string());
+                                        let inbound_provider = proof_timestamp(route.last_inbound_provider_accepted_at.as_deref());
+                                        let inbox_verified = proof_timestamp(route.last_inbox_verified_at.as_deref());
+                                        let reply_provider = proof_timestamp(route.last_reply_provider_accepted_at.as_deref());
+                                        let reply_verified = proof_timestamp(route.last_reply_verified_at.as_deref());
+                                        let next = next_route_action(&route);
+                                        view! {
+                                            <li>
+                                                <article class="thread-row" id="proof">
+                                                    <div class="thread-status" data-status=if needs_attention { "open" } else { "closed" }></div>
+                                                    <div class="thread-copy">
+                                                        <span>{route.decision_kind.clone()}" · "{route.operator_count}" destinations"</span>
+                                                        <strong>{route.route_address.clone()}</strong>
+                                                        <small>"Reply as "{route.reply_identity.clone()}</small>
+                                                        <small>"Desired "{route.desired_provider.clone()}" · observed "{observed}</small>
+                                                        <small>"Inbound "{route.inbound_status.clone()}" · reply "{route.reply_status.clone()}</small>
+                                                        <small>"Inbound provider accepted: "{inbound_provider}</small>
+                                                        <small>"Inbox verified: "{inbox_verified}</small>
+                                                        <small>"Reply provider accepted: "{reply_provider}</small>
+                                                        <small>"External reply verified: "{reply_verified}</small>
+                                                        <small>"Next: "{next}</small>
+                                                    </div>
+                                                    <time>{route.last_error_code.clone().unwrap_or_else(|| "No active error".to_string())}</time>
+                                                </article>
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ol>
+                            }.into_any()
+                        }}
+                    </section>
+                </section>
+            </main>
+        </div>
+    }
+}
+
+fn proof_timestamp(value: Option<&str>) -> String {
+    value.unwrap_or("Not recorded").to_string()
+}
+
+fn route_needs_attention(route: &RouteHealthSummary) -> bool {
+    matches!(
+        route.inbound_status.as_str(),
+        "partial_delivery" | "recovery_required" | "failed"
+    ) || matches!(
+        route.reply_status.as_str(),
+        "partial_delivery" | "recovery_required" | "failed"
+    )
+}
+
+fn next_route_action(route: &RouteHealthSummary) -> &'static str {
+    if route_needs_attention(route) {
+        "Reconcile the bounded failure before retrying"
+    } else if route.inbound_status == "intentionally_excluded" {
+        "No action; route is intentionally excluded"
+    } else if route.inbound_status == "declared" || route.inbound_status == "local_policy_valid" {
+        "Verify edge bindings and provider state"
+    } else if route.inbound_status != "inbox_verified" {
+        "Record a targeted inbox receipt"
+    } else if route.reply_status != "reply_verified" {
+        "Record a targeted external reply receipt"
+    } else {
+        "Maintain proof freshness"
     }
 }
 

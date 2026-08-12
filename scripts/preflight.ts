@@ -22,6 +22,14 @@ interface DesiredState {
     mode?: unknown;
     authenticated_domains?: unknown;
   };
+  operator_delivery?: {
+    mode?: unknown;
+    reply_domain?: unknown;
+    reply_token_ttl_days?: unknown;
+    spool_retention_days?: unknown;
+    max_encoded_message_bytes?: unknown;
+    banner_mode?: unknown;
+  };
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -56,6 +64,7 @@ const desiredStatePath =
     : "config/desired-state.example.json");
 const desiredState = checkJson<DesiredState>(desiredStatePath);
 checkDesiredSenderMode(desiredState);
+checkDesiredOperatorDelivery(desiredState);
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -75,6 +84,7 @@ if (mode === "production") {
   checkReplyApiEnv();
   checkAccessValidationEnv();
   checkOutboundEnv(desiredState);
+  checkOperatorDeliveryEnv(desiredState);
   checkWranglerPlaceholders();
 } else {
   checkTemplateExamples();
@@ -205,6 +215,60 @@ function desiredSenderMode(desiredState: DesiredState | null): SenderMode {
   return senderModeOrDefault(desiredState?.sender?.mode);
 }
 
+function checkDesiredOperatorDelivery(desiredState: DesiredState | null) {
+  const delivery = desiredState?.operator_delivery;
+  if (!delivery) {
+    failures.push("desired-state operator_delivery is required");
+    return;
+  }
+  if (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk") {
+    failures.push("desired-state operator_delivery.mode must be inbox_relay or web_desk");
+  }
+  if (!isUsableValue(delivery.reply_domain)) {
+    failures.push("desired-state operator_delivery.reply_domain is required");
+  }
+  checkDesiredInteger("operator_delivery.reply_token_ttl_days", delivery.reply_token_ttl_days, 1, 365);
+  checkDesiredInteger("operator_delivery.spool_retention_days", delivery.spool_retention_days, 1, 30);
+  checkDesiredInteger("operator_delivery.max_encoded_message_bytes", delivery.max_encoded_message_bytes, 65_536, 5_242_880);
+  if (delivery.banner_mode !== "inline") {
+    failures.push("desired-state operator_delivery.banner_mode must be inline");
+  }
+}
+
+function checkDesiredInteger(name: string, value: unknown, minimum: number, maximum: number) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > maximum) {
+    failures.push(`desired-state ${name} must be an integer from ${minimum} through ${maximum}`);
+  }
+}
+
+function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
+  const delivery = desiredState?.operator_delivery;
+  if (!delivery || (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk")) return;
+  const runtimeMode = process.env.MAILDESK_OPERATOR_DELIVERY_MODE?.trim() || "web_desk";
+  if (runtimeMode !== delivery.mode) {
+    failures.push(
+      `MAILDESK_OPERATOR_DELIVERY_MODE (${runtimeMode}) must match desired-state operator_delivery.mode (${delivery.mode})`,
+    );
+  }
+  if (delivery.mode !== "inbox_relay") return;
+
+  const replyDomain = process.env.MAILDESK_REPLY_DOMAIN?.trim();
+  if (replyDomain !== delivery.reply_domain) {
+    failures.push("MAILDESK_REPLY_DOMAIN must match desired-state operator_delivery.reply_domain");
+  }
+  checkRuntimeInteger("MAILDESK_REPLY_TOKEN_TTL_DAYS", delivery.reply_token_ttl_days);
+  checkRuntimeInteger("MAILDESK_SPOOL_RETENTION_DAYS", delivery.spool_retention_days);
+  checkRuntimeInteger("MAILDESK_MAX_ENCODED_MESSAGE_BYTES", delivery.max_encoded_message_bytes);
+  checkSendEmailBinding("wrangler.mail-router.toml");
+}
+
+function checkRuntimeInteger(name: string, desired: unknown) {
+  const runtime = process.env[name]?.trim();
+  if (typeof desired !== "number" || runtime !== String(desired)) {
+    failures.push(`${name} must match desired-state operator delivery configuration`);
+  }
+}
+
 function checkOutboundEnv(desiredState: DesiredState | null) {
   const outboundMode = process.env.MAILDESK_OUTBOUND_MODE?.trim() || "disabled";
   if (!isSenderMode(outboundMode)) {
@@ -229,7 +293,7 @@ function checkOutboundEnv(desiredState: DesiredState | null) {
     );
   }
   if (outboundMode === "cloudflare_email_service") {
-    checkSendEmailBinding();
+    checkSendEmailBinding(process.env.MAILDESK_MAIL_API_WRANGLER_PATH?.trim() || "wrangler.toml");
   }
   if (outboundMode === "resend") {
     checkRequiredEnvAny(["RESEND_API_KEY", "RESEND"]);
@@ -286,10 +350,16 @@ function checkWranglerPlaceholders() {
   }
 }
 
-function checkSendEmailBinding() {
-  const wrangler = readFileSync(resolve(root, "wrangler.toml"), "utf8");
+function checkSendEmailBinding(path: string) {
+  let wrangler: string;
+  try {
+    wrangler = readFileSync(resolve(root, path), "utf8");
+  } catch {
+    failures.push(`Cloudflare Email Service config is unreadable: ${path}`);
+    return;
+  }
   if (!/^\s*send_email\s*=/m.test(wrangler) || !/\bname\s*=\s*"EMAIL"/.test(wrangler)) {
-    failures.push('cloudflare_email_service mode requires wrangler.toml send_email binding named "EMAIL"');
+    failures.push(`cloudflare_email_service mode requires ${path} send_email binding named "EMAIL"`);
   }
 }
 

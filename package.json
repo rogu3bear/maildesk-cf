@@ -24,10 +24,11 @@
     "refresh:maildesk-acks": "bun run scripts/refresh-sender-domain-ack-manifest.ts",
     "send:maildesk-probes": "bun run scripts/send-mail-probes.ts",
     "verify:maildesk": "bun run scripts/verify-maildesk.ts",
-    "provision:email-routing": "bun run scripts/provision-email-routing.ts"
+    "provision:email-routing": "bun run scripts/provision-email-routing.ts",
+    "sync:route-policy": "bun run scripts/sync-route-policy.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260616.1",
+    "@cloudflare/workers-types": "5.20260812.1",
     "@types/node": "^25.9.3",
     "typescript": "^5.9.3",
     "wrangler": "^4.110.0"
@@ -37,6 +38,7 @@
     "esbuild": "0.28.1"
   },
   "dependencies": {
-    "jose": "6.2.8"
+    "jose": "6.2.8",
+    "postal-mime": "2.7.5"
   }
 }

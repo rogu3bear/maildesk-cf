@@ -3,6 +3,10 @@ main = "workers/mail-api/src/index.ts"
 compatibility_date = "2026-06-29"
 upload_source_maps = true
 
+send_email = [
+  { name = "EMAIL" }
+]
+
 [build]
 command = "bun run build:router-wasm"
 

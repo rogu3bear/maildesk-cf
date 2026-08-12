@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -129,5 +129,39 @@ describe("cfctl provisioning contract check", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("storage.queue is required");
     expect(result.stderr).not.toContain("maildesk-cf-db");
+  });
+
+  test("rejects malformed domain authorities before cfctl planning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-domain-"));
+    const desiredPath = join(dir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as {
+      domains: Array<{ name: string }>;
+      operator_delivery: { reply_domain: string };
+      sender: { authenticated_domains: string[] };
+    };
+    desired.domains[0]!.name = "-invalid.example.com";
+    desired.operator_delivery.reply_domain = "reply..maildesk.example.com";
+    desired.sender.authenticated_domains = ["-invalid.example.com"];
+    writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        desiredPath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("domains[].name is not a valid domain");
+    expect(result.stderr).toContain("operator_delivery.reply_domain must be a valid domain");
+    expect(result.stderr).toContain("sender.authenticated_domains entries must be valid domains");
   });
 });

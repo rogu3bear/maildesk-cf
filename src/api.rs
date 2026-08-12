@@ -21,6 +21,27 @@ pub struct DeskSnapshot {
     pub threads: Vec<ThreadSummary>,
     pub open_count: usize,
     pub outbound_mode: String,
+    pub operator_delivery_mode: String,
+    pub routes: Vec<RouteHealthSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteHealthSummary {
+    pub route_address: String,
+    pub decision_kind: String,
+    pub desired_provider: String,
+    pub observed_provider: Option<String>,
+    pub operator_count: usize,
+    pub reply_identity: String,
+    pub inbound_status: String,
+    pub reply_status: String,
+    pub last_inbound_at: Option<String>,
+    pub last_reply_at: Option<String>,
+    pub last_inbound_provider_accepted_at: Option<String>,
+    pub last_inbox_verified_at: Option<String>,
+    pub last_reply_provider_accepted_at: Option<String>,
+    pub last_reply_verified_at: Option<String>,
+    pub last_error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

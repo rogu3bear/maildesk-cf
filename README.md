@@ -1,8 +1,8 @@
 # maildesk-cf
 
-`maildesk-cf` is a standalone Cloudflare-edge mail desk template.
+`maildesk-cf` is a standalone Cloudflare-edge mail-routing template.
 
-It gives teams a reusable starting point for domain-consistent shared inboxes:
+It gives teams a reusable starting point for domain-consistent operator delivery:
 mail arrives through Cloudflare Email Routing, routing policy is decided by a
 Rust core, state is stored on Cloudflare, and replies are sent from approved
 domain identities.
@@ -16,8 +16,10 @@ domain identities.
 - use `leptos-cf` conventions when building the operator UI;
 - keep the router core independent, testable, and reusable.
 
-It is not a private mailbox configuration, a Gmail add-on, a marketing sender,
-or a generic helpdesk clone.
+It supports two explicit operator-delivery modes: `inbox_relay`, which wraps
+mail for an existing operator inbox and relays ordinary replies from the public
+route identity, and the legacy `web_desk` alternative. It is not a private
+mailbox, Gmail add-on, marketing sender, CRM, ticket system, or helpdesk clone.
 
 ## Core Loop
 
@@ -25,12 +27,15 @@ or a generic helpdesk clone.
 2. Cloudflare Email Routing invokes the inbound Worker.
 3. The Worker converts the event into a Rust router input.
 4. The router returns a policy-backed route decision.
-5. Metadata is stored in D1.
-6. Raw MIME and attachments are stored in R2.
-7. Queue jobs handle parsing, notifications, and delivery work.
-8. Operators reply through the app.
-9. Outbound mail is sent from an allowed domain identity.
-10. The audit log records the decision and delivery attempt.
+5. In `inbox_relay`, Maildesk generates one bannered delivery per authorized
+   operator with an opaque reply address; D1 stores only the token hash.
+6. The original MIME is parsed ephemerally and is not retained after successful
+   processing. R2 is a bounded relay/recovery spool only.
+7. The operator replies normally from the existing inbox.
+8. Maildesk re-authenticates the operator and asks the Rust router to authorize
+   the original public identity.
+9. A durable Queue job sends the reply through Cloudflare Email Service.
+10. Body-free D1 audit and route-health state record each distinct evidence plane.
 
 ## Repository Shape
 
@@ -104,7 +109,10 @@ Access-protected `/desk` and `/desk/api` routes. Production resource creation
 should still be driven by `cfctl`; these files document and typecheck the
 app-side bindings.
 
-The legacy shared-token `POST /api/replies` surface is disabled by default with
+The routing-health dashboard exposes declared provider state and proof status,
+never subjects, message bodies, attachments, thread history, or a composer.
+When `MAILDESK_OPERATOR_DELIVERY_MODE=inbox_relay`, `/desk/thread/:id` and web
+reply submission fail closed. The legacy shared-token `POST /api/replies` surface is disabled by default with
 `MAILDESK_REPLY_API_MODE=disabled`. The Access-protected Leptos desk is the
 normal human reply path. Enable `token` mode only for an explicitly
 service-bound integration and provision one of the documented API tokens.
@@ -128,6 +136,7 @@ bun run build:router-wasm
 cargo test --workspace --all-features
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
+bun run sync:route-policy
 CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-receipt-summary.json
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
@@ -272,8 +281,8 @@ The first milestone is deliberately narrow:
 - policy tests for role aliases and reply identities;
 - D1 schema skeleton;
 - Worker adapters;
-- Cargo-Leptos public site and operator desk with explicit empty, loading,
-  error, receive-only, and audited-reply states;
+- Cargo-Leptos public site and operator routing-health console with explicit
+  empty, loading, failure, provider, inbox-proof, and reply-proof states;
 - schema-backed `cfctl maildesk-cf` provisioning contract and local proof hook;
 - template hygiene check.
 

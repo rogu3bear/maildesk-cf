@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 
-type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external";
+type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
 
 interface DesiredState {
   project: {
@@ -22,6 +22,7 @@ interface DesiredState {
     r2_raw_mail_preview_bucket: string;
     queue: string;
   };
+  operator_delivery: OperatorDeliveryConfig;
   sender: {
     mode: SenderMode;
     authenticated_domains: string[];
@@ -37,6 +38,16 @@ interface DesiredDomain {
   inbound_mx_provider: InboundMxProvider;
   role_aliases: string[];
   personal_aliases: string[];
+  catch_all?: boolean;
+}
+
+interface OperatorDeliveryConfig {
+  mode: "inbox_relay" | "web_desk";
+  reply_domain: string;
+  reply_token_ttl_days: number;
+  spool_retention_days: number;
+  max_encoded_message_bytes: number;
+  banner_mode: "inline";
 }
 
 interface DesiredWorker {
@@ -148,6 +159,9 @@ function validateDesiredState(value: DesiredState) {
     failures.push("domains must contain at least one domain");
   }
   checkDuplicates(domainNames, "domains[].name");
+  for (const domain of domainNames) {
+    if (!validDomain(domain)) failures.push(`domains[].name is not a valid domain: ${domain}`);
+  }
   for (const [index, domain] of domains.entries()) {
     const prefix = `domains[${index}]`;
     requireString(domain, `${prefix}.name`);
@@ -155,11 +169,13 @@ function validateDesiredState(value: DesiredState) {
       "cloudflare_email_routing",
       "google_workspace",
       "external",
+      "excluded",
     ]);
     requireStringArray(domain, `${prefix}.role_aliases`);
     requireStringArray(domain, `${prefix}.personal_aliases`);
     checkDuplicates(stringArrayValue(domain["role_aliases"]), `${prefix}.role_aliases`);
     checkDuplicates(stringArrayValue(domain["personal_aliases"]), `${prefix}.personal_aliases`);
+    optionalBoolean(domain, `${prefix}.catch_all`);
   }
 
   const workers = requireObject(rootObject, "workers");
@@ -177,6 +193,22 @@ function validateDesiredState(value: DesiredState) {
     requireString(storage, "storage.queue");
   }
 
+  const operatorDelivery = requireObject(rootObject, "operator_delivery");
+  if (operatorDelivery) {
+    const mode = requireEnum(operatorDelivery, "operator_delivery.mode", ["inbox_relay", "web_desk"]);
+    const replyDomain = requireString(operatorDelivery, "operator_delivery.reply_domain");
+    if (replyDomain && !validDomain(replyDomain)) {
+      failures.push("operator_delivery.reply_domain must be a valid domain");
+    }
+    requireIntegerRange(operatorDelivery, "operator_delivery.reply_token_ttl_days", 1, 365);
+    requireIntegerRange(operatorDelivery, "operator_delivery.spool_retention_days", 1, 30);
+    requireIntegerRange(operatorDelivery, "operator_delivery.max_encoded_message_bytes", 65_536, 5_242_880);
+    requireEnum(operatorDelivery, "operator_delivery.banner_mode", ["inline"]);
+    if (mode === "inbox_relay" && operatorDelivery["max_encoded_message_bytes"] !== 5_242_880) {
+      failures.push("operator_delivery.max_encoded_message_bytes must be 5242880 for inbox_relay");
+    }
+  }
+
   const sender = requireObject(rootObject, "sender");
   if (sender) {
     const mode = requireEnum(sender, "sender.mode", [
@@ -192,6 +224,9 @@ function validateDesiredState(value: DesiredState) {
       failures.push("sender.authenticated_domains is required when sender.mode sends mail");
     }
     for (const domain of authenticatedDomains) {
+      if (!validDomain(domain)) {
+        failures.push("sender.authenticated_domains entries must be valid domains");
+      }
       if (!domainNames.includes(domain)) {
         failures.push("sender.authenticated_domains entries must also appear in domains[].name");
       }
@@ -242,6 +277,7 @@ function resourceSummary(desired: DesiredState) {
       `r2-preview:${desired.storage.r2_raw_mail_preview_bucket}`,
       `queue:${desired.storage.queue}`,
     ],
+    operator_delivery: desired.operator_delivery,
     email_routing_aliases: emailRoutingAliases(desired),
     sender: {
       mode: senderModeOrDefault(desired.sender.mode),
@@ -371,9 +407,40 @@ function requireBoolean(parent: Record<string, unknown>, path: string) {
   }
 }
 
+function optionalBoolean(parent: Record<string, unknown>, path: string): boolean | null {
+  const key = lastPathSegment(path);
+  const value = parent[key];
+  if (value === undefined) return null;
+  if (typeof value !== "boolean") {
+    failures.push(`${path} must be a boolean`);
+    return null;
+  }
+  return value;
+}
+
+function requireIntegerRange(
+  parent: Record<string, unknown>,
+  path: string,
+  minimum: number,
+  maximum: number,
+): number | null {
+  const key = lastPathSegment(path);
+  const value = parent[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > maximum) {
+    failures.push(`${path} must be an integer from ${minimum} through ${maximum}`);
+    return null;
+  }
+  return value;
+}
+
 function checkDuplicates(values: string[], path: string) {
   if (values.length === new Set(values).size) return;
   failures.push(`${path} must not contain duplicates`);
+}
+
+function validDomain(value: string): boolean {
+  const domain = value.trim().toLowerCase();
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(domain);
 }
 
 function lastPathSegment(path: string): string {

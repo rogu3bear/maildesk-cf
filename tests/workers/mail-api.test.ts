@@ -3,6 +3,82 @@ import { describe, expect, test } from "bun:test";
 import mailApiWorker from "../../workers/mail-api/src/index";
 
 describe("mail API outbound sender modes", () => {
+  test("an authorized inbox reply derives its external target from D1 and deletes the terminal spool", async () => {
+    const db = new D1Recorder({
+      id: "relay-1",
+      thread_id: "thread-relay",
+      external_recipient: "correspondent@example.net",
+      reply_identity: "security@tenant.example.com",
+      original_message_id: "<original@example.net>",
+      references_json: "[]",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      revoked_at: null,
+      route_address: "security@tenant.example.com",
+    });
+    const email = new SendEmailRecorder("provider-relay");
+    const raw = new TextEncoder().encode([
+      "From: Operator <operator@tenant.example.com>",
+      "To: r+opaque@reply.maildesk.example.com",
+      "Subject: Re: security question",
+      "Message-ID: <operator-reply@tenant.example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Authorized reply body",
+    ].join("\r\n")).buffer;
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbox_reply_received",
+      attemptId: "relay-attempt:reply-1",
+      relayId: "relay-1",
+      operator: "operator@tenant.example.com",
+      operatorMessageId: "<operator-reply@tenant.example.com>",
+      rawR2Key: "relay-spool/reply-1.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {
+        get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }),
+        delete: async (key: string) => { deleted.push(key); },
+      },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_POLICY_JSON: JSON.stringify({
+        default_reply_mode: "role_first",
+        domains: {
+          "tenant.example.com": {
+            role_aliases: {
+              security: {
+                operators: ["operator@tenant.example.com"],
+                reply_identity: "security@tenant.example.com",
+                allowed_reply_identities: ["security@tenant.example.com"],
+              },
+            },
+            personal_aliases: {},
+          },
+        },
+      }),
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+      MAILDESK_MAX_ENCODED_MESSAGE_BYTES: "5242880",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(1);
+    expect(email.messages[0]).toMatchObject({
+      from: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      replyTo: "security@tenant.example.com",
+    });
+    expect((email.messages[0] as { text: string }).text.trim()).toBe("Authorized reply body");
+    expect(JSON.stringify(email.messages[0])).not.toContain("r+opaque");
+    expect(deleted).toEqual(["relay-spool/reply-1.eml"]);
+    const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET reply_status"));
+    expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
+  });
+
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder([
@@ -399,6 +475,54 @@ describe("mail API outbound sender modes", () => {
     expect(response.status).toBe(404);
   });
 
+  test("readiness rejects an explicit invalid operator delivery mode", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox-relayy",
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "operator_delivery_mode",
+      ok: false,
+      detail: "invalid",
+    });
+  });
+
+  test("readiness rejects a malformed reply domain", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        EMAIL: new SendEmailRecorder("unused"),
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+        MAILDESK_REPLY_DOMAIN: "reply..maildesk.example.com",
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "reply_domain",
+      ok: false,
+      detail: "missing",
+    });
+  });
+
   test("cloudflare_email_service mode sends through EMAIL and records providerMessageId", async () => {
     const db = new D1Recorder();
     const email = new SendEmailRecorder("cf-message-id");
@@ -438,6 +562,44 @@ describe("mail API outbound sender modes", () => {
     expect(result.result).toMatchObject({
       provider: "cloudflare_email_service",
       providerMessageId: "cf-message-id",
+    });
+  });
+
+  test("runtime sender authorization rejects wildcard configuration", async () => {
+    const db = new D1Recorder();
+    const email = new SendEmailRecorder("must-not-send");
+    const batch = new MessageBatchRecorder([
+      {
+        kind: "outbound_reply_requested",
+        messageId: "message-wildcard-sender",
+        threadId: "thread-wildcard-sender",
+        operator: "operator@tenant.example.com",
+        envelopeTo: "founders@tenant.example.com",
+        fromIdentity: "founders@tenant.example.com",
+        to: ["proof@example.net"],
+        subject: "Wildcard sender proof",
+        text: "hello",
+        queuedAt: "2026-07-01T00:00:00.000Z",
+      },
+    ]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com,*",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    expect(batch.ackCount).toBe(1);
+    const result = db.auditDetail("outbound_reply_failed") as {
+      result?: { provider?: string; error?: string };
+    };
+    expect(result.result).toMatchObject({
+      provider: "cloudflare_email_service",
+      error: "sender domain is not verified",
     });
   });
 
@@ -571,6 +733,8 @@ class MessageBatchRecorder {
 class D1Recorder {
   readonly statements: RecordedStatement[] = [];
 
+  constructor(private readonly relayRow?: Record<string, unknown>) {}
+
   seedAudit(dedupeKey: string, action: string, detail: unknown = {}): void {
     this.statements.push({
       sql: "INSERT OR IGNORE INTO audit_events",
@@ -601,6 +765,9 @@ class D1Recorder {
       },
       async first() {
         statements.push(record);
+        if (record.sql.includes("FROM reply_relays rr")) {
+          return thisRelayRow;
+        }
         if (record.sql.includes("SELECT action FROM audit_events")) {
           const dedupeKey = record.binds[0];
           const existing = statements.find(
@@ -622,6 +789,7 @@ class D1Recorder {
         return { ok: 1 };
       },
     };
+    const thisRelayRow = this.relayRow ?? null;
     return prepared as unknown as D1PreparedStatement;
   }
 
