@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import { isRepositoryRelativePath, wranglerBuildCommandFailure } from "./wrangler-config";
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
 
@@ -252,14 +253,30 @@ function validateWorker(worker: Record<string, unknown> | null, prefix: string) 
   requireString(worker, `${prefix}.script_name`);
   const config = requireString(worker, `${prefix}.config`);
   if (!config) return;
+  if (!isRepositoryRelativePath(config)) {
+    failures.push(`${prefix}.config must be a normalized repository-relative path`);
+    return;
+  }
   checkFile(config);
   if (!matchesCanonicalWranglerBasename(config)) {
     failures.push(`${prefix}.config must use the canonical wrangler.toml, wrangler.json, or wrangler.jsonc basename`);
   }
+  validateWranglerBuildCommand(config, prefix);
 }
 
 function matchesCanonicalWranglerBasename(path: string): boolean {
   return ["wrangler.toml", "wrangler.json", "wrangler.jsonc"].includes(basename(path).toLowerCase());
+}
+
+function validateWranglerBuildCommand(path: string, prefix: string) {
+  let contents: string;
+  try {
+    contents = readFileSync(resolve(root, path), "utf8");
+  } catch {
+    return;
+  }
+  const failure = wranglerBuildCommandFailure(contents);
+  if (failure) failures.push(`${prefix}.config ${failure}`);
 }
 
 function lifecycleCommands(desiredStatePath: string): string[] {
