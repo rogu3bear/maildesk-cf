@@ -68,6 +68,26 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-b@example.com"))).toBe(true);
 });
 
+test("inbox relay binds the external destination to the visible sender, not an untrusted Reply-To", async () => {
+  const db = new RelayD1();
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({
+      from: "Alice Example <sender@example.net>",
+      replyTo: "redirect-target@example.org",
+      messageId: "<redirect-attempt@example.net>",
+    }),
+  );
+
+  await mailRouterWorker.email(message, relayEnv(db, []), {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  const relayInsert = db.calls.find((call) => call.sql.includes("INSERT INTO reply_relays"));
+  expect(relayInsert?.bindings[4]).toBe("sender@example.net");
+  expect(relayInsert?.bindings).not.toContain("redirect-target@example.org");
+});
+
 test("inbox relay rejects malformed and oversized messages without direct-forward fallback", async () => {
   const malformed = inboundMessage("sender@example.net", "security@example.com", "not mime");
   malformed.rawSize = 10;
@@ -179,9 +199,10 @@ function inboundMessage(from: string, to: string, raw: string) {
   return message;
 }
 
-function mime(input: { from: string; messageId: string }): string {
+function mime(input: { from: string; replyTo?: string; messageId: string }): string {
   return [
     `From: ${input.from}`,
+    ...(input.replyTo ? [`Reply-To: ${input.replyTo}`] : []),
     "To: security@example.com",
     "Subject: Security question",
     `Message-ID: ${input.messageId}`,

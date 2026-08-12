@@ -345,7 +345,10 @@ async function persistInboxRelay(
   const domainId = stableId("domain", recipient.domain);
   const identityId = stableId("identity", route.defaultReplyIdentity);
   const routeId = stableId("route", recipient.domain, recipient.localPart);
-  const externalSender = normalizeMailbox(parsed.replyTarget.address);
+  // Bind the outward destination to the same visible sender shown in the
+  // operator banner. An inbound Reply-To must not redirect a trusted operator's
+  // reply to an unrelated third party.
+  const externalSender = normalizeMailbox(parsed.from.address);
   const threadId = await resolveThreadId(
     env,
     routeId,

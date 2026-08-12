@@ -9,7 +9,6 @@ const MIME_OVERHEAD_BYTES = 16 * 1024;
 
 export interface ParsedRelayEmail {
   from: Mailbox;
-  replyTarget: Mailbox;
   subject: string;
   text: string;
   html?: string;
@@ -50,16 +49,8 @@ export async function parseRelayEmail(raw: ArrayBuffer): Promise<ParsedRelayEmai
   if (!from || !normalizeMailbox(from.address)) {
     throw new Error("message From header must contain one mailbox");
   }
-  const replyTarget = parsed.replyTo?.length === 1 ? singleMailbox(parsed.replyTo[0]) : null;
-  const normalizedReplyTarget = normalizeMailbox(replyTarget?.address ?? from.address);
-  if (!normalizedReplyTarget) throw new Error("message reply target is invalid");
-
   return {
     from: { name: boundedHeaderText(from.name, 200), address: normalizeMailbox(from.address) },
-    replyTarget: {
-      name: boundedHeaderText(replyTarget?.name ?? from.name, 200),
-      address: normalizedReplyTarget,
-    },
     subject: boundedHeaderText(parsed.subject || "(no subject)", 998),
     text: parsed.text || "",
     html: parsed.html || undefined,
