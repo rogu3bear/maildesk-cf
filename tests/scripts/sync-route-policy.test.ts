@@ -9,19 +9,28 @@ const root = resolve(import.meta.dir, "../..");
 test("private-scale policy projection is split into bounded local D1 batches", () => {
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-batches-"));
   try {
-    const aliases = Object.fromEntries(
-      Array.from({ length: 140 }, (_, index) => [
+    const aliases = Object.fromEntries([
+      ...Array.from({ length: 138 }, (_, index) => [
         `role-${String(index + 1).padStart(3, "0")}`,
         {
           operators: ["operator-a@example.net", "operator-b@example.net"],
           reply_identity: `role-${String(index + 1).padStart(3, "0")}@example.com`,
         },
-      ]),
-    );
+      ] as const),
+      ["team+ops", {
+        operators: ["operator-a@example.net", "operator-b@example.net"],
+        reply_identity: "team+ops@example.com",
+      }],
+      ["team_ops", {
+        operators: ["operator-a@example.net", "operator-b@example.net"],
+        reply_identity: "team_ops@example.com",
+      }],
+    ]);
     const policyPath = join(directory, "policy.json");
     const desiredPath = join(directory, "desired.json");
     const binDirectory = join(directory, "bin");
     const batchLog = join(directory, "batches.log");
+    const sqlLog = join(directory, "projection.sql");
     writeFileSync(
       policyPath,
       JSON.stringify({
@@ -44,7 +53,7 @@ test("private-scale policy projection is split into bounded local D1 batches", (
         domains: [
           {
             name: "example.com",
-            inbound_mx_provider: "cloudflare_email_routing",
+            inbound_mx_provider: "excluded",
             role_aliases: Object.keys(aliases),
             personal_aliases: [],
             catch_all: true,
@@ -70,6 +79,7 @@ done
 bytes=$(wc -c < "$file" | tr -d ' ')
 [ "$bytes" -le 49152 ]
 printf '%s\n' "$bytes" >> "$MAILDESK_POLICY_BATCH_LOG"
+cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
 `,
       { mode: 0o700 },
     );
@@ -92,6 +102,7 @@ printf '%s\n' "$bytes" >> "$MAILDESK_POLICY_BATCH_LOG"
           ...process.env,
           PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
           MAILDESK_POLICY_BATCH_LOG: batchLog,
+          MAILDESK_POLICY_SQL_LOG: sqlLog,
         },
       },
     );
@@ -103,6 +114,10 @@ printf '%s\n' "$bytes" >> "$MAILDESK_POLICY_BATCH_LOG"
     expect(summary.local_batches).toBeGreaterThan(1);
     expect(batchSizes).toHaveLength(summary.local_batches);
     expect(Math.max(...batchSizes)).toBeLessThanOrEqual(48 * 1024);
+    const sql = readFileSync(sqlLog, "utf8");
+    expect(sql).toContain("route:example.com:team%2Bops");
+    expect(sql).toContain("route:example.com:team_ops");
+    expect(sql).toContain("'excluded'");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

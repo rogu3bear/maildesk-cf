@@ -51,7 +51,7 @@ export interface RouteHealthSummary {
   routeId: string;
   routeAddress: string;
   routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  desiredProvider: "cloudflare_email_routing" | "google_workspace" | "external";
+  desiredProvider: "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
   observedProvider?: string;
   operatorCount: number;
   replyIdentity: string;
@@ -296,7 +296,10 @@ export function errorDetail(error: unknown): string {
 
 function normalizeDomain(value: string | undefined): string | null {
   const domain = value?.trim().toLowerCase();
-  if (!domain || domain.length > 253 || !/^[a-z0-9.-]+$/.test(domain)) return null;
+  if (
+    !domain ||
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(domain)
+  ) return null;
   return domain;
 }
 

@@ -75,6 +75,8 @@ describe("mail API outbound sender modes", () => {
     expect((email.messages[0] as { text: string }).text.trim()).toBe("Authorized reply body");
     expect(JSON.stringify(email.messages[0])).not.toContain("r+opaque");
     expect(deleted).toEqual(["relay-spool/reply-1.eml"]);
+    const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET reply_status"));
+    expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
   });
 
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
@@ -493,6 +495,31 @@ describe("mail API outbound sender modes", () => {
       name: "operator_delivery_mode",
       ok: false,
       detail: "invalid",
+    });
+  });
+
+  test("readiness rejects a malformed reply domain", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        EMAIL: new SendEmailRecorder("unused"),
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+        MAILDESK_REPLY_DOMAIN: "reply..maildesk.example.com",
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "reply_domain",
+      ok: false,
+      detail: "missing",
     });
   });
 

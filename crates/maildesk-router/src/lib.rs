@@ -171,7 +171,7 @@ pub fn route_message(
     }
 
     if let Some(catch_all_policy) = &domain_policy.catch_all {
-        return catch_all_decision(domain, local_part, catch_all_policy);
+        return catch_all_decision(domain, "*".to_string(), catch_all_policy);
     }
 
     Err(RouteError::UnknownAlias(local_part, domain))
@@ -635,7 +635,7 @@ mod tests {
         )?;
 
         assert_eq!(decision.route_kind, RouteKind::CatchAll);
-        assert_eq!(decision.local_part, "anything-unlisted");
+        assert_eq!(decision.local_part, "*");
         assert_eq!(decision.operators, vec!["operator-a@example.com"]);
         assert_eq!(decision.default_reply_identity, "info@example.com");
         assert!(decision

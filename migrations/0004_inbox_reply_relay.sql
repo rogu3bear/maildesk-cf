@@ -97,7 +97,7 @@ CREATE TABLE route_health (
   decision_kind TEXT NOT NULL
     CHECK (decision_kind IN ('role_alias', 'personal_alias', 'catch_all', 'sink')),
   desired_provider TEXT NOT NULL
-    CHECK (desired_provider IN ('cloudflare_email_routing', 'google_workspace', 'external')),
+    CHECK (desired_provider IN ('cloudflare_email_routing', 'google_workspace', 'external', 'excluded')),
   observed_provider TEXT,
   operator_count INTEGER NOT NULL DEFAULT 0 CHECK (operator_count >= 0),
   reply_identity TEXT NOT NULL,

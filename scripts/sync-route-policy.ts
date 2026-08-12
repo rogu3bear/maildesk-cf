@@ -42,7 +42,7 @@ interface ProjectedRoute {
   localPart: string;
   decisionKind: DecisionKind;
   storageKind: "role" | "personal";
-  desiredProvider: Exclude<InboundProvider, "excluded">;
+  desiredProvider: InboundProvider;
   operators: string[];
   replyIdentity: string;
   initialStatus: "local_policy_valid" | "declared" | "intentionally_excluded";
@@ -165,13 +165,12 @@ function projectedRoute(
   const operators = [...new Set(rawOperators.map(normalizeMailbox))].sort();
   const replyIdentity = normalizeMailbox(rawReplyIdentity);
   if (decisionKind !== "sink" && operators.length === 0) fail(`${localPart}@${domain} has no operator destination`);
-  const desiredProvider = provider === "excluded" ? "external" : provider;
   const initialStatus = decisionKind === "sink" || provider === "excluded"
     ? "intentionally_excluded"
     : provider === "cloudflare_email_routing"
       ? "local_policy_valid"
       : "declared";
-  return { domain, localPart, decisionKind, storageKind, desiredProvider, operators, replyIdentity, initialStatus };
+  return { domain, localPart, decisionKind, storageKind, desiredProvider: provider, operators, replyIdentity, initialStatus };
 }
 
 function projectionSql(routes: ProjectedRoute[], maxBatchBytes: number): { canonical: string; batches: string[] } {
@@ -250,8 +249,12 @@ function requireSameSet(left: Set<string>, right: Set<string>, label: string) {
 
 function normalizeDomain(value: string): string {
   const domain = value.trim().toLowerCase();
-  if (!/^(?=.{1,253}$)[a-z0-9.-]+$/.test(domain)) fail("domain is invalid");
+  if (!validDomain(domain)) fail("domain is invalid");
   return domain;
+}
+
+function validDomain(domain: string): boolean {
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(domain);
 }
 
 function normalizeLocalPart(value: string): string {
@@ -269,7 +272,7 @@ function normalizeMailbox(value: string): string {
 }
 
 function stableId(prefix: string, ...parts: string[]): string {
-  return [prefix, ...parts.map((value) => value.toLowerCase().replace(/[^a-z0-9._-]+/g, "_"))].join(":");
+  return [prefix, ...parts.map((value) => encodeURIComponent(value.trim().toLowerCase()))].join(":");
 }
 
 function sql(value: string): string {

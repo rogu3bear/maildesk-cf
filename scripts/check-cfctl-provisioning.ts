@@ -159,6 +159,9 @@ function validateDesiredState(value: DesiredState) {
     failures.push("domains must contain at least one domain");
   }
   checkDuplicates(domainNames, "domains[].name");
+  for (const domain of domainNames) {
+    if (!validDomain(domain)) failures.push(`domains[].name is not a valid domain: ${domain}`);
+  }
   for (const [index, domain] of domains.entries()) {
     const prefix = `domains[${index}]`;
     requireString(domain, `${prefix}.name`);
@@ -193,7 +196,10 @@ function validateDesiredState(value: DesiredState) {
   const operatorDelivery = requireObject(rootObject, "operator_delivery");
   if (operatorDelivery) {
     const mode = requireEnum(operatorDelivery, "operator_delivery.mode", ["inbox_relay", "web_desk"]);
-    requireString(operatorDelivery, "operator_delivery.reply_domain");
+    const replyDomain = requireString(operatorDelivery, "operator_delivery.reply_domain");
+    if (replyDomain && !validDomain(replyDomain)) {
+      failures.push("operator_delivery.reply_domain must be a valid domain");
+    }
     requireIntegerRange(operatorDelivery, "operator_delivery.reply_token_ttl_days", 1, 365);
     requireIntegerRange(operatorDelivery, "operator_delivery.spool_retention_days", 1, 30);
     requireIntegerRange(operatorDelivery, "operator_delivery.max_encoded_message_bytes", 65_536, 5_242_880);
@@ -218,6 +224,9 @@ function validateDesiredState(value: DesiredState) {
       failures.push("sender.authenticated_domains is required when sender.mode sends mail");
     }
     for (const domain of authenticatedDomains) {
+      if (!validDomain(domain)) {
+        failures.push("sender.authenticated_domains entries must be valid domains");
+      }
       if (!domainNames.includes(domain)) {
         failures.push("sender.authenticated_domains entries must also appear in domains[].name");
       }
@@ -427,6 +436,11 @@ function requireIntegerRange(
 function checkDuplicates(values: string[], path: string) {
   if (values.length === new Set(values).size) return;
   failures.push(`${path} must not contain duplicates`);
+}
+
+function validDomain(value: string): boolean {
+  const domain = value.trim().toLowerCase();
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(domain);
 }
 
 function lastPathSegment(path: string): string {

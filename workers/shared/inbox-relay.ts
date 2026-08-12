@@ -31,7 +31,8 @@ export interface OperatorDeliveryMessage {
 
 export interface OperatorDeliveryInput {
   operator: string;
-  routeAddress: string;
+  receivedAddress: string;
+  replyIdentity: string;
   routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
   operatorCount: number;
   relayAddress: string;
@@ -73,20 +74,20 @@ export function buildOperatorDelivery(
   const bannerText = [
     "Maildesk route",
     "",
-    `Received at: ${input.routeAddress}`,
+    `Received at: ${input.receivedAddress}`,
     `Original sender: ${formatMailbox(parsed.from)}`,
     `Policy result: ${policyResult}`,
     "",
     "Reply behavior:",
-    `Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${input.routeAddress}.`,
+    `Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${input.replyIdentity}.`,
     "Your personal operator address will not be sent to the correspondent.",
   ].join("\n");
-  const bannerHtml = `<section style="border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:0 0 20px;font-family:system-ui,sans-serif;color:#0f172a;background:#f8fafc"><strong>Maildesk route</strong><dl><dt>Received at</dt><dd>${escapeHtml(input.routeAddress)}</dd><dt>Original sender</dt><dd>${escapeHtml(formatMailbox(parsed.from))}</dd><dt>Policy result</dt><dd>${escapeHtml(policyResult)}</dd></dl><p><strong>Reply behavior:</strong><br>Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${escapeHtml(input.routeAddress)}. Your personal operator address will not be sent to the correspondent.</p></section>`;
+  const bannerHtml = `<section style="border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:0 0 20px;font-family:system-ui,sans-serif;color:#0f172a;background:#f8fafc"><strong>Maildesk route</strong><dl><dt>Received at</dt><dd>${escapeHtml(input.receivedAddress)}</dd><dt>Original sender</dt><dd>${escapeHtml(formatMailbox(parsed.from))}</dd><dt>Policy result</dt><dd>${escapeHtml(policyResult)}</dd></dl><p><strong>Reply behavior:</strong><br>Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${escapeHtml(input.replyIdentity)}. Your personal operator address will not be sent to the correspondent.</p></section>`;
   const headers: Record<string, string> = {
     "Message-ID": input.deliveryMessageId,
-    "X-Maildesk-Original-To": input.routeAddress,
+    "X-Maildesk-Original-To": input.receivedAddress,
     "X-Maildesk-Route-Kind": input.routeKind,
-    "X-Maildesk-Reply-Identity": input.routeAddress,
+    "X-Maildesk-Reply-Identity": input.replyIdentity,
   };
   if (parsed.messageId) headers["In-Reply-To"] = parsed.messageId;
   const references = [...parsed.references, parsed.messageId].filter((value): value is string => Boolean(value));
@@ -94,8 +95,8 @@ export function buildOperatorDelivery(
 
   return {
     from: {
-      name: boundedHeaderText(`${senderLabel} via ${input.routeAddress}`, 200),
-      email: input.routeAddress,
+      name: boundedHeaderText(`${senderLabel} via ${input.receivedAddress}`, 200),
+      email: input.replyIdentity,
     },
     to: input.operator,
     replyTo: input.relayAddress,
@@ -199,11 +200,13 @@ export function relayRecordIsActive(
 export function normalizeMailbox(value: string): string {
   const mailbox = value.trim().toLowerCase();
   const at = mailbox.lastIndexOf("@");
+  const domain = mailbox.slice(at + 1);
   if (
     at <= 0 ||
     at === mailbox.length - 1 ||
     mailbox.length > 320 ||
-    mailbox.slice(at + 1).includes("@") ||
+    domain.includes("@") ||
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(domain) ||
     /[\s\x00-\x1f\x7f]/.test(mailbox)
   ) {
     return "";

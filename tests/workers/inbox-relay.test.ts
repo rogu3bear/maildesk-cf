@@ -67,6 +67,10 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(recipientAudits).toHaveLength(2);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-a@example.com"))).toBe(true);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-b@example.com"))).toBe(true);
+  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
+  expect(healthInsert?.sql).not.toContain("inbound_status = 'local_policy_valid'");
+  const healthResult = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
+  expect(healthResult?.sql).toContain("inbound_status = 'inbox_verified'");
 });
 
 test("inbox relay binds the external destination to the visible sender, not an untrusted Reply-To", async () => {
@@ -87,6 +91,92 @@ test("inbox relay binds the external destination to the visible sender, not an u
   const relayInsert = db.calls.find((call) => call.sql.includes("INSERT INTO reply_relays"));
   expect(relayInsert?.bindings[4]).toBe("sender@example.net");
   expect(relayInsert?.bindings).not.toContain("redirect-target@example.org");
+});
+
+test("route identifiers preserve distinct valid alias characters", async () => {
+  const db = new RelayD1();
+  const message = inboundMessage(
+    "sender@example.net",
+    "team+ops@example.com",
+    mime({ from: "sender@example.net", messageId: "<plus-route@example.net>" }),
+  );
+  const env = {
+    ...relayEnv(db, []),
+    MAILDESK_POLICY_JSON: JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {
+            "team+ops": {
+              operators: ["operator-a@example.com"],
+              reply_identity: "team+ops@example.com",
+              allowed_reply_identities: ["team+ops@example.com"],
+            },
+          },
+          personal_aliases: {},
+        },
+      },
+    }),
+  };
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toBeUndefined();
+  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
+  expect(routeInsert?.bindings[0]).toBe("route:example.com:team%2Bops");
+});
+
+test("catch-all delivery advances the declared wildcard route while showing the actual recipient", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "unlisted@example.com",
+    mime({ from: "sender@example.net", messageId: "<catch-all@example.net>" }),
+  );
+  const env = {
+    ...relayEnv(db, deliveries),
+    MAILDESK_POLICY_JSON: JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {},
+          personal_aliases: {},
+          catch_all: {
+            operators: ["operator-a@example.com"],
+            reply_identity: "info@example.com",
+            allowed_reply_identities: ["info@example.com"],
+          },
+        },
+      },
+    }),
+  };
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(1);
+  expect(deliveries[0]?.from).toEqual({
+    name: "sender@example.net via unlisted@example.com",
+    email: "info@example.com",
+  });
+  expect(deliveries[0]?.text).toContain("Received at: unlisted@example.com");
+  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
+  expect(routeInsert?.bindings.slice(0, 3)).toEqual([
+    "route:example.com:*",
+    "domain:example.com",
+    "*",
+  ]);
+  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
+  expect(healthInsert?.bindings[1]).toBe("*@example.com");
 });
 
 test("inbox relay rejects malformed and oversized messages without direct-forward fallback", async () => {
@@ -155,13 +245,22 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
   })).buffer);
   const delivery = buildOperatorDelivery(parsed, {
     operator: "operator-a@example.com",
-    routeAddress: "security@example.com",
+    receivedAddress: "unlisted@example.com",
+    replyIdentity: "info@example.com",
     routeKind: "role_alias",
     operatorCount: 2,
     relayAddress: relayAddress("b".repeat(64), "reply.maildesk.example.com"),
     deliveryMessageId: "<delivery@reply.maildesk.example.com>",
   });
   expect(relayTokenFromRecipient(String(delivery.replyTo), "reply.maildesk.example.com")).toBe("b".repeat(64));
+  expect(delivery.from).toEqual({
+    name: "Alice Example via unlisted@example.com",
+    email: "info@example.com",
+  });
+  expect(delivery.text).toContain("Received at: unlisted@example.com");
+  expect(delivery.text).toContain("send the response to the correspondent from info@example.com");
+  expect(delivery.headers["X-Maildesk-Original-To"]).toBe("unlisted@example.com");
+  expect(delivery.headers["X-Maildesk-Reply-Identity"]).toBe("info@example.com");
   expect(encodedMessageUpperBound(delivery)).toBeGreaterThan(delivery.text.length);
   expect(operatorAuthenticationPassed(
     new Headers({ "Authentication-Results": "mx.cloudflare.net; dkim=pass header.d=example.com" }),

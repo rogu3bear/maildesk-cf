@@ -106,7 +106,8 @@ async function acceptInboxRelay(
   const deliveries = route.operators.map((operator, index) =>
     buildOperatorDelivery(parsed, {
       operator,
-      routeAddress: route.defaultReplyIdentity,
+      receivedAddress: normalizeMailbox(message.to),
+      replyIdentity: route.defaultReplyIdentity,
       routeKind: route.routeKind,
       operatorCount: route.operators.length,
       relayAddress: replyTo,
@@ -349,7 +350,7 @@ async function persistInboxRelay(
   if (!recipient) throw new Error("invalid envelope recipient");
   const domainId = stableId("domain", recipient.domain);
   const identityId = stableId("identity", route.defaultReplyIdentity);
-  const routeId = stableId("route", recipient.domain, recipient.localPart);
+  const routeId = stableId("route", recipient.domain, route.localPart);
   // Bind the outward destination to the same visible sender shown in the
   // operator banner. An inbound Reply-To must not redirect a trusted operator's
   // reply to an unrelated third party.
@@ -373,7 +374,7 @@ async function persistInboxRelay(
     ).bind(identityId, domainId, route.defaultReplyIdentity, storageKind),
     env.DB.prepare(
       "INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind",
-    ).bind(routeId, domainId, recipient.localPart, storageKind, identityId, route.routeKind),
+    ).bind(routeId, domainId, route.localPart, storageKind, identityId, route.routeKind),
   ]);
   for (const operator of route.operators) {
     const operatorId = stableId("operator", operator);
@@ -405,8 +406,8 @@ async function persistInboxRelay(
       relay.expiresAt,
     ),
     env.DB.prepare(
-      "INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, last_inbound_at, updated_at) VALUES (?1, ?2, ?3, 'cloudflare_email_routing', ?4, ?5, 'local_policy_valid', 'declared', ?6, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, inbound_status = 'local_policy_valid', last_inbound_at = excluded.last_inbound_at, updated_at = CURRENT_TIMESTAMP",
-    ).bind(routeId, normalizeMailbox(message.to), route.routeKind, route.operators.length, route.defaultReplyIdentity, relay.receivedAt),
+      "INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, last_inbound_at, updated_at) VALUES (?1, ?2, ?3, 'cloudflare_email_routing', ?4, ?5, 'local_policy_valid', 'declared', ?6, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, last_inbound_at = excluded.last_inbound_at, updated_at = CURRENT_TIMESTAMP",
+    ).bind(routeId, `${route.localPart}@${recipient.domain}`, route.routeKind, route.operators.length, route.defaultReplyIdentity, relay.receivedAt),
   ]);
   await recordAudit(
     env,
@@ -434,7 +435,7 @@ async function recordDeliveryResults(
 ): Promise<void> {
   const acceptedCount = results.filter((result) => result.ok).length;
   await env.DB.prepare(
-    "UPDATE route_health SET inbound_status = ?1, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?4",
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?4",
   )
     .bind(status, acceptedCount, status === "provider_accepted" ? null : status, inbound.routeId)
     .run();
@@ -480,7 +481,7 @@ async function persistSinkRoute(
   if (!recipient) return;
   const domainId = stableId("domain", recipient.domain);
   const identityId = stableId("identity", route.defaultReplyIdentity);
-  const routeId = stableId("route", recipient.domain, recipient.localPart);
+  const routeId = stableId("route", recipient.domain, route.localPart);
   await env.DB.batch([
     env.DB.prepare("INSERT OR IGNORE INTO domains (id, domain) VALUES (?1, ?2)").bind(domainId, recipient.domain),
     env.DB.prepare(
@@ -488,10 +489,10 @@ async function persistSinkRoute(
     ).bind(identityId, domainId, route.defaultReplyIdentity),
     env.DB.prepare(
       "INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (?1, ?2, ?3, 'role', ?4, 'sink') ON CONFLICT(id) DO UPDATE SET decision_kind = 'sink'",
-    ).bind(routeId, domainId, recipient.localPart, identityId),
+    ).bind(routeId, domainId, route.localPart, identityId),
     env.DB.prepare(
       "INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, last_inbound_at, updated_at) VALUES (?1, ?2, 'sink', 'cloudflare_email_routing', 0, ?3, 'intentionally_excluded', 'intentionally_excluded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET inbound_status = 'intentionally_excluded', reply_status = 'intentionally_excluded', last_inbound_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
-    ).bind(routeId, normalizeMailbox(message.to), route.defaultReplyIdentity),
+    ).bind(routeId, `${route.localPart}@${recipient.domain}`, route.defaultReplyIdentity),
   ]);
 }
 
@@ -582,7 +583,7 @@ async function persistWebDeskMetadata(
   if (!recipient) return;
   const domainId = stableId("domain", recipient.domain);
   const identityId = stableId("identity", route.defaultReplyIdentity);
-  const routeId = stableId("route", recipient.domain, recipient.localPart);
+  const routeId = stableId("route", recipient.domain, route.localPart);
   const threadId = await resolveThreadId(
     env,
     routeId,
@@ -600,7 +601,7 @@ async function persistWebDeskMetadata(
   ).bind(identityId, domainId, route.defaultReplyIdentity, storageKind).run();
   await env.DB.prepare(
     "INSERT OR IGNORE INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-  ).bind(routeId, domainId, recipient.localPart, storageKind, identityId, route.routeKind).run();
+  ).bind(routeId, domainId, route.localPart, storageKind, identityId, route.routeKind).run();
   await env.DB.prepare(
     "UPDATE alias_routes SET kind = ?1, default_reply_identity_id = ?2, decision_kind = ?3 WHERE id = ?4",
   ).bind(storageKind, identityId, route.routeKind, routeId).run();
@@ -673,7 +674,7 @@ function parseMailbox(address: string): ParsedMailbox | null {
 }
 
 function stableId(prefix: string, ...parts: string[]): string {
-  return [prefix, ...parts.map((value) => value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_"))].join(":");
+  return [prefix, ...parts.map((value) => encodeURIComponent(value.trim().toLowerCase()))].join(":");
 }
 
 async function collisionResistantId(prefix: string, ...parts: string[]): Promise<string> {
