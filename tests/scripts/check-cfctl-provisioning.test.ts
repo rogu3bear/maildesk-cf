@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { wranglerBuildCommandFailure } from "../../scripts/wrangler-config";
+import { isRepositoryRelativePath } from "../../scripts/wrangler-config";
 
 const root = resolve(import.meta.dir, "../..");
 
@@ -107,6 +108,12 @@ describe("cfctl provisioning contract check", () => {
       wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd ../.. build:router-wasm"\n'),
     ).toContain("build command runs from the repository invocation directory");
     expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd=../.. build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure('[build]\ncommand = "cd .. && bun run build:router-wasm"\n'),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run build:router-wasm"\n'),
     ).toBeNull();
   });
@@ -136,6 +143,10 @@ describe("cfctl provisioning contract check", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("must be a normalized repository-relative path");
+    expect(isRepositoryRelativePath("./deploy/router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("C:/deploy/router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("deploy//router/wrangler.toml")).toBe(false);
+    expect(isRepositoryRelativePath("deploy/router/wrangler.toml")).toBe(true);
   });
 
   test("rejects desired state missing storage resources needed for provisioning", () => {
