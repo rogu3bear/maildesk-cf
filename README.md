@@ -103,8 +103,8 @@ Domain-consistent replies are covered in
 - Queues
 
 The HTTP API Worker uses `wrangler.toml`. The inbound Email Worker uses
-`wrangler.mail-router.toml`. The Leptos operator experience uses
-`wrangler.ui.toml`, with public explanatory routes and Cloudflare
+`deploy/mail-router/wrangler.toml`. The Leptos operator experience uses
+`deploy/ui/wrangler.toml`, with public explanatory routes and Cloudflare
 Access-protected `/desk` and `/desk/api` routes. Production resource creation
 should still be driven by `cfctl`; these files document and typecheck the
 app-side bindings.
@@ -116,6 +116,13 @@ reply submission fail closed. The legacy shared-token `POST /api/replies` surfac
 `MAILDESK_REPLY_API_MODE=disabled`. The Access-protected Leptos desk is the
 normal human reply path. Enable `token` mode only for an explicitly
 service-bound integration and provision one of the documented API tokens.
+
+For a dark deployment, keep `MAILDESK_RELAY_PROCESSING_MODE=disabled`. The
+Email Worker then rejects both new inbox-relay deliveries and opaque-token
+replies without forwarding, persisting, or enqueueing them. Enable it only in
+the separately reviewed canary transaction after the candidate Worker is bound
+to the intended route and its D1, R2, Queue, Email Service, and sender-domain
+readbacks are exact.
 
 Optional fallback sender adapters can be added later. The default path should
 remain Cloudflare-first.
@@ -156,7 +163,7 @@ Cloudflare account state.
 For a local edge-rendered preview of the public site and empty operator state:
 
 ```bash
-bunx wrangler dev --config wrangler.ui.toml --local --port 8788 \
+bunx wrangler dev --config deploy/ui/wrangler.toml --local --port 8788 \
   --var MAILDESK_UI_AUTH_MODE:preview
 ```
 

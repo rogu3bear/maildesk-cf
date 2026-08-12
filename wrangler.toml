@@ -14,6 +14,7 @@ command = "bun run build:router-wasm"
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
 MAILDESK_OUTBOUND_MODE = "disabled"
 MAILDESK_REPLY_API_MODE = "disabled"
+MAILDESK_RELAY_PROCESSING_MODE = "disabled"
 MAILDESK_VERIFIED_SENDER_DOMAINS = "example.com"
 
 [[d1_databases]]

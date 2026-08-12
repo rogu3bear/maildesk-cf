@@ -498,6 +498,32 @@ describe("mail API outbound sender modes", () => {
     });
   });
 
+  test("readiness rejects an explicit invalid relay processing mode", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        EMAIL: new SendEmailRecorder("unused"),
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+        MAILDESK_RELAY_PROCESSING_MODE: "enabledd",
+        MAILDESK_REPLY_DOMAIN: "reply.maildesk.example.com",
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "relay_processing_mode",
+      ok: false,
+      detail: "invalid",
+    });
+  });
+
   test("readiness rejects a malformed reply domain", async () => {
     const response = await mailApiWorker.fetch(
       new Request("https://maildesk.example.com/readyz"),

@@ -73,5 +73,5 @@ bun run build:router-wasm
 bun run test:workers
 cargo test -p maildesk-router
 bunx wrangler deploy --dry-run --config wrangler.toml
-bunx wrangler deploy --dry-run --config wrangler.mail-router.toml
+bunx wrangler deploy --dry-run --config deploy/mail-router/wrangler.toml
 ```
