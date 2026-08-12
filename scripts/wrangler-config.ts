@@ -20,7 +20,7 @@ export function wranglerBuildCommandFailure(contents: string): string | null {
   if (command === null) {
     return "build command must use a supported single-line TOML string";
   }
-  return /(^|[^A-Za-z0-9_.-])\.\.(?:[\\/]|(?=\s|$|["']))/.test(command)
+  return command.includes("..")
     ? "build command runs from the repository invocation directory and must not traverse to a parent directory"
     : null;
 }

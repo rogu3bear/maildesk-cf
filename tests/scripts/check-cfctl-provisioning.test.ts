@@ -118,6 +118,11 @@ describe("cfctl provisioning contract check", () => {
     ).toContain("build command runs from the repository invocation directory");
     expect(
       wranglerBuildCommandFailure(
+        '[build]\ncommand = "cd $IFS../.. && bun run build:router-wasm"\n',
+      ),
+    ).toContain("build command runs from the repository invocation directory");
+    expect(
+      wranglerBuildCommandFailure(
         '[build]\ncommand = "cd \\u002e\\u002e && bun run build:router-wasm"\n',
       ),
     ).toContain("build command runs from the repository invocation directory");
