@@ -223,20 +223,35 @@ export function operatorAuthenticationPassed(headers: Headers, operator: string)
   const authservId = results.split(";", 1)[0]?.trim() ?? "";
   if (authservId !== "mx.cloudflare.net") return false;
 
-  const sections = results.split(";").map((section) => section.trim());
-  const spfPass = sections.some(
-    (section) =>
-      section.startsWith("spf=pass") &&
-      (section.includes(`smtp.mailfrom=${mailbox}`) || section.includes(`smtp.mailfrom=${domain}`)),
-  );
-  const dkimPass = sections.some(
-    (section) =>
-      section.startsWith("dkim=pass") &&
-      (section.includes(`header.d=${domain}`) ||
-        section.includes(`header.i=@${domain}`) ||
-        section.includes(`header.i=${mailbox}`)),
-  );
+  const sections = results.split(";").map(parseAuthenticationResultSection);
+  const spfPass = sections.some((section) => {
+    const resultPassed = section.get("spf")?.includes("pass") === true;
+    const senderAligned = section.get("smtp.mailfrom")
+      ?.some((value) => value === mailbox || value === domain) === true;
+    return resultPassed && senderAligned;
+  });
+  const dkimPass = sections.some((section) => {
+    const resultPassed = section.get("dkim")?.includes("pass") === true;
+    const signingDomainAligned = section.get("header.d")?.includes(domain) === true;
+    const identityAligned = section.get("header.i")
+      ?.some((value) => value === `@${domain}` || value === mailbox) === true;
+    return resultPassed && (signingDomainAligned || identityAligned);
+  });
   return spfPass || dkimPass;
+}
+
+function parseAuthenticationResultSection(section: string): Map<string, string[]> {
+  const properties = new Map<string, string[]>();
+  const propertyPattern = /(?:^|\s)([a-z][a-z0-9._-]*)\s*=\s*(?:"([^"]*)"|([^\s;]+))/g;
+  for (const match of section.trim().matchAll(propertyPattern)) {
+    const name = match[1];
+    const value = match[2] ?? match[3];
+    if (!name || value === undefined) continue;
+    const values = properties.get(name) ?? [];
+    values.push(value);
+    properties.set(name, values);
+  }
+  return properties;
 }
 
 export function safeConversationHeaders(parsed: ParsedRelayEmail): Record<string, string> {

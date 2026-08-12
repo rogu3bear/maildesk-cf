@@ -168,9 +168,25 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
     "operator-a@example.com",
   )).toBe(true);
   expect(operatorAuthenticationPassed(
+    new Headers({ "Authentication-Results": "mx.cloudflare.net; spf = pass smtp.mailfrom=\"operator-a@example.com\"" }),
+    "operator-a@example.com",
+  )).toBe(true);
+  expect(operatorAuthenticationPassed(
     new Headers({ "Authentication-Results": "notcloudflare.example; dkim=pass header.d=example.com" }),
     "operator-a@example.com",
   )).toBe(false);
+  for (const lookalike of [
+    "mx.cloudflare.net; spf=passive smtp.mailfrom=operator-a@example.com",
+    "mx.cloudflare.net; spf=pass smtp.mailfrom=operator-a@example.com.attacker.invalid",
+    "mx.cloudflare.net; dkim=passive header.d=example.com",
+    "mx.cloudflare.net; dkim=pass header.d=example.com.attacker.invalid",
+    "mx.cloudflare.net; dkim=pass header.i=@example.com.attacker.invalid",
+  ]) {
+    expect(operatorAuthenticationPassed(
+      new Headers({ "Authentication-Results": lookalike }),
+      "operator-a@example.com",
+    )).toBe(false);
+  }
   const duplicatedResults = new Headers();
   duplicatedResults.append(
     "Authentication-Results",
