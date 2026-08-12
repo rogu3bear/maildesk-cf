@@ -515,6 +515,44 @@ describe("mail API outbound sender modes", () => {
     });
   });
 
+  test("runtime sender authorization rejects wildcard configuration", async () => {
+    const db = new D1Recorder();
+    const email = new SendEmailRecorder("must-not-send");
+    const batch = new MessageBatchRecorder([
+      {
+        kind: "outbound_reply_requested",
+        messageId: "message-wildcard-sender",
+        threadId: "thread-wildcard-sender",
+        operator: "operator@tenant.example.com",
+        envelopeTo: "founders@tenant.example.com",
+        fromIdentity: "founders@tenant.example.com",
+        to: ["proof@example.net"],
+        subject: "Wildcard sender proof",
+        text: "hello",
+        queuedAt: "2026-07-01T00:00:00.000Z",
+      },
+    ]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com,*",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    expect(batch.ackCount).toBe(1);
+    const result = db.auditDetail("outbound_reply_failed") as {
+      result?: { provider?: string; error?: string };
+    };
+    expect(result.result).toMatchObject({
+      provider: "cloudflare_email_service",
+      error: "sender domain is not verified",
+    });
+  });
+
   test("resend mode bounds the provider request and preserves the idempotency key", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder([

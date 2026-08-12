@@ -736,12 +736,12 @@ function configuredOutboundMode(env: Env): OutboundMode {
 function isVerifiedSenderDomain(domain: string, env: Env): boolean {
   const configured = env.MAILDESK_VERIFIED_SENDER_DOMAINS?.trim();
   if (!configured) return false;
-  if (configured === "*") return true;
-  return configured
+  const domains = configured
     .split(",")
     .map((value) => value.trim().toLowerCase())
-    .filter(Boolean)
-    .includes(domain);
+    .filter(Boolean);
+  if (domains.some((value) => value.includes("*"))) return false;
+  return domains.includes(domain);
 }
 
 function senderDomain(address: string): string {
