@@ -32,6 +32,7 @@ describe("cfctl provisioning contract check", () => {
       cfctl_commands: string[];
       resources: {
         workers: string[];
+        worker_configs: string[];
         storage: string[];
         email_routing_aliases: string[];
       };
@@ -50,7 +51,12 @@ describe("cfctl provisioning contract check", () => {
     expect(receipt.cfctl_commands).toContain(
       "cfctl maildesk-cf verify --file config/desired-state.example.json",
     );
-    expect(receipt.resources.workers).toEqual(["maildesk-cf", "maildesk-cf-router"]);
+    expect(receipt.resources.workers).toEqual(["maildesk-cf", "maildesk-cf-router", "maildesk-cf-ui"]);
+    expect(receipt.resources.worker_configs).toEqual([
+      "deploy/mail-router/wrangler.toml",
+      "deploy/ui/wrangler.toml",
+      "wrangler.toml",
+    ]);
     expect(receipt.resources.storage).toEqual([
       "d1:maildesk-cf-db",
       "d1-preview:maildesk-cf-preview-db",
@@ -66,6 +72,32 @@ describe("cfctl provisioning contract check", () => {
       "review the cfctl provision preview and provide its operation id before --ack-plan",
       "run targeted cfctl maildesk-cf verify and mail proof readbacks after mutation",
     ]);
+  });
+
+  test("rejects noncanonical Worker config basenames before cfctl planning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-config-"));
+    const desiredPath = join(dir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as { workers: { mail_router: { config: string } } };
+    desired.workers.mail_router.config = "wrangler.mail-router.toml";
+    writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/check-cfctl-provisioning.ts",
+        "--",
+        "--desired-state",
+        desiredPath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("workers.mail_router.config must use the canonical wrangler.toml");
   });
 
   test("rejects desired state missing storage resources needed for provisioning", () => {
@@ -91,7 +123,11 @@ describe("cfctl provisioning contract check", () => {
             mail_api: { script_name: "maildesk-cf", config: "wrangler.toml" },
             mail_router: {
               script_name: "maildesk-cf-router",
-              config: "wrangler.mail-router.toml",
+              config: "deploy/mail-router/wrangler.toml",
+            },
+            ui: {
+              script_name: "maildesk-cf-ui",
+              config: "deploy/ui/wrangler.toml",
             },
           },
           storage: {

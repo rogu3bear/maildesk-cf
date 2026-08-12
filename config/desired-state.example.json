@@ -19,7 +19,11 @@
     },
     "mail_router": {
       "script_name": "maildesk-cf-router",
-      "config": "wrangler.mail-router.toml"
+      "config": "deploy/mail-router/wrangler.toml"
+    },
+    "ui": {
+      "script_name": "maildesk-cf-ui",
+      "config": "deploy/ui/wrangler.toml"
     }
   },
   "storage": {
@@ -31,6 +35,7 @@
   },
   "operator_delivery": {
     "mode": "inbox_relay",
+    "processing_mode": "disabled",
     "reply_domain": "reply.maildesk.example.com",
     "reply_token_ttl_days": 90,
     "spool_retention_days": 7,

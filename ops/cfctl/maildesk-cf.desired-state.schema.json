@@ -28,10 +28,11 @@
     "workers": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mail_api", "mail_router"],
+      "required": ["mail_api", "mail_router", "ui"],
       "properties": {
         "mail_api": { "$ref": "#/$defs/worker" },
-        "mail_router": { "$ref": "#/$defs/worker" }
+        "mail_router": { "$ref": "#/$defs/worker" },
+        "ui": { "$ref": "#/$defs/worker" }
       }
     },
     "storage": {
@@ -57,6 +58,7 @@
       "additionalProperties": false,
       "required": [
         "mode",
+        "processing_mode",
         "reply_domain",
         "reply_token_ttl_days",
         "spool_retention_days",
@@ -65,6 +67,7 @@
       ],
       "properties": {
         "mode": { "type": "string", "enum": ["inbox_relay", "web_desk"] },
+        "processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
         "reply_domain": { "$ref": "#/$defs/domain_name" },
         "reply_token_ttl_days": { "type": "integer", "minimum": 1, "maximum": 365 },
         "spool_retention_days": { "type": "integer", "minimum": 1, "maximum": 30 },

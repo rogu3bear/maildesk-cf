@@ -197,6 +197,50 @@ test("inbox relay rejects malformed and oversized messages without direct-forwar
   expect(oversized.forwarded).toHaveLength(0);
 });
 
+test("inbox relay is fail-closed until relay processing is explicitly enabled", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<dark@example.net>" }),
+  );
+  const env = relayEnv(db, deliveries);
+  delete env.MAILDESK_RELAY_PROCESSING_MODE;
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toContain("relay processing is disabled");
+  expect(deliveries).toHaveLength(0);
+  expect(db.calls).toHaveLength(0);
+  expect(message.forwarded).toHaveLength(0);
+});
+
+test("inbox relay rejects an invalid relay processing mode", async () => {
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<invalid-processing@example.net>" }),
+  );
+  const env = {
+    ...relayEnv(new RelayD1(), []),
+    MAILDESK_RELAY_PROCESSING_MODE: "enabledd",
+  };
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toContain("processing mode is invalid");
+  expect(message.forwarded).toHaveLength(0);
+});
+
 test("invalid delivery configuration and relay timestamps fail closed", async () => {
   const message = inboundMessage(
     "sender@example.net",
@@ -315,6 +359,7 @@ function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {
     } as SendEmail,
     MAILDESK_POLICY_JSON: JSON.stringify(policy),
     MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+    MAILDESK_RELAY_PROCESSING_MODE: "enabled" as const,
     MAILDESK_REPLY_DOMAIN: "reply.maildesk.example.com",
     MAILDESK_REPLY_TOKEN_TTL_DAYS: "90",
     MAILDESK_SPOOL_RETENTION_DAYS: "7",

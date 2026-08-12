@@ -24,7 +24,12 @@ The Email Worker receives Cloudflare Email Routing events. In `inbox_relay` it s
 It should not own policy. If policy logic appears in TypeScript, move it back
 into `crates/maildesk-router`.
 
-The template deploy target for this Worker is `wrangler.mail-router.toml`.
+The template deploy target for this Worker is `deploy/mail-router/wrangler.toml`.
+`MAILDESK_RELAY_PROCESSING_MODE` defaults to `disabled`; while disabled, the
+Worker fails closed before routing, D1/R2 writes, Queue work, operator delivery,
+or opaque-token reply processing. A dark candidate remains unattached to live
+Email Routing rules, and a separately reviewed canary changes this mode to
+`enabled` only when the intended route is attached.
 
 The reserved reply-domain path runs before ordinary alias lookup. It requires a
 live, unexpired relay; matching envelope and visible operator identity; aligned
@@ -61,7 +66,7 @@ authentication. `MAILDESK_ACCESS_TEAM_DOMAIN` and `MAILDESK_ACCESS_AUD` are
 required production inputs; local template preview bypasses Access only when
 `MAILDESK_UI_AUTH_MODE=preview` is set explicitly.
 
-The template deploy target for this Worker is `wrangler.ui.toml`, which keeps
+The template deploy target for this Worker is `deploy/ui/wrangler.toml`, which keeps
 `workers_dev = false` so an alternate public origin cannot bypass the Access
 application on the production hostname.
 

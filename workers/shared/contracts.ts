@@ -12,6 +12,7 @@ export interface MaildeskEnv {
   MAILDESK_POLICY_R2_KEY?: string;
   MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
   MAILDESK_OPERATOR_DELIVERY_MODE?: "web_desk" | "inbox_relay";
+  MAILDESK_RELAY_PROCESSING_MODE?: "disabled" | "enabled";
   MAILDESK_REPLY_DOMAIN?: string;
   MAILDESK_REPLY_TOKEN_TTL_DAYS?: string;
   MAILDESK_SPOOL_RETENTION_DAYS?: string;
@@ -28,6 +29,7 @@ export type OperatorDeliveryMode = "web_desk" | "inbox_relay" | "invalid";
 
 export interface OperatorDeliveryConfig {
   mode: OperatorDeliveryMode;
+  processingMode: "disabled" | "enabled" | "invalid";
   replyDomain: string | null;
   replyTokenTtlDays: number;
   spoolRetentionDays: number;
@@ -190,6 +192,12 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
       ? "inbox_relay"
       : "invalid";
   const replyDomain = normalizeDomain(env.MAILDESK_REPLY_DOMAIN);
+  const configuredProcessingMode = env.MAILDESK_RELAY_PROCESSING_MODE as string | undefined;
+  const processingMode = configuredProcessingMode === undefined || configuredProcessingMode === "disabled"
+    ? "disabled"
+    : configuredProcessingMode === "enabled"
+      ? "enabled"
+      : "invalid";
   const replyTokenTtlDays = boundedPositiveInteger(env.MAILDESK_REPLY_TOKEN_TTL_DAYS, 90, 1, 365);
   const spoolRetentionDays = boundedPositiveInteger(env.MAILDESK_SPOOL_RETENTION_DAYS, 7, 1, 30);
   const maxEncodedMessageBytes = boundedPositiveInteger(
@@ -201,6 +209,7 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
 
   return {
     mode,
+    processingMode,
     replyDomain,
     replyTokenTtlDays,
     spoolRetentionDays,
@@ -236,6 +245,11 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     detail: delivery.mode,
   });
   if (delivery.mode === "inbox_relay") {
+    checks.push({
+      name: "relay_processing_mode",
+      ok: delivery.processingMode !== "invalid",
+      detail: delivery.processingMode,
+    });
     checks.push({
       name: "reply_domain",
       ok: Boolean(delivery.replyDomain),

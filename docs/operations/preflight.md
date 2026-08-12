@@ -46,6 +46,12 @@ values.
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_CFCTL_PROFILE` | optional | explicit account-bound `cfctl` profile; avoids changing shared global profile selection |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
+| `MAILDESK_OPERATOR_DELIVERY_MODE` | production inbox relay | `inbox_relay` or `web_desk`; must match `operator_delivery.mode` |
+| `MAILDESK_RELAY_PROCESSING_MODE` | production inbox relay | `disabled` for dark deployment or `enabled` only for a separately reviewed canary; must match `operator_delivery.processing_mode` |
+| `MAILDESK_REPLY_DOMAIN` | production inbox relay | dedicated relay domain; must match `operator_delivery.reply_domain` |
+| `MAILDESK_REPLY_TOKEN_TTL_DAYS` | production inbox relay | token lifetime; must match desired state |
+| `MAILDESK_SPOOL_RETENTION_DAYS` | production inbox relay | recovery-spool ceiling; must match desired state and the prefix-scoped R2 lifecycle |
+| `MAILDESK_MAX_ENCODED_MESSAGE_BYTES` | production inbox relay | encoded MIME ceiling; must match desired state and cannot exceed 5 MiB |
 | `MAILDESK_REPLY_API_MODE` | production | `disabled` by default; `token` only for an explicitly service-bound legacy reply integration |
 | `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | token reply API only | bearer token required only when `MAILDESK_REPLY_API_MODE=token`; proof-only closeout may use the secondary token without rotating the primary token |
 | `MAILDESK_ACCESS_TEAM_DOMAIN` | production | HTTPS Access team origin used to fetch rotating JWKS, such as `https://team-name.cloudflareaccess.com` |
@@ -73,8 +79,8 @@ file. The account target can come from `CLOUDFLARE_ACCOUNT_ID`, a literal
 `project.account_id` in ignored desired state, an env name referenced by
 `project.account_id_env`, or the healthy `cfctl doctor` lane described above.
 
-Production mode also fails if `wrangler.toml`, `wrangler.mail-router.toml`, or
-`wrangler.ui.toml` still contains placeholder Cloudflare resource IDs. That is
+Production mode also fails if `wrangler.toml`, `deploy/mail-router/wrangler.toml`, or
+`deploy/ui/wrangler.toml` still contains placeholder Cloudflare resource IDs. That is
 intentional. Placeholder IDs are acceptable in the public template and
 unacceptable before real provisioning.
 

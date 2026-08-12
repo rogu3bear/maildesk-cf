@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
@@ -14,6 +14,7 @@ interface DesiredState {
   workers: {
     mail_api: DesiredWorker;
     mail_router: DesiredWorker;
+    ui: DesiredWorker;
   };
   storage: {
     d1_database: string;
@@ -43,6 +44,7 @@ interface DesiredDomain {
 
 interface OperatorDeliveryConfig {
   mode: "inbox_relay" | "web_desk";
+  processing_mode: "disabled" | "enabled";
   reply_domain: string;
   reply_token_ttl_days: number;
   spool_retention_days: number;
@@ -182,6 +184,7 @@ function validateDesiredState(value: DesiredState) {
   if (workers) {
     validateWorker(requireObject(workers, "workers.mail_api"), "workers.mail_api");
     validateWorker(requireObject(workers, "workers.mail_router"), "workers.mail_router");
+    validateWorker(requireObject(workers, "workers.ui"), "workers.ui");
   }
 
   const storage = requireObject(rootObject, "storage");
@@ -196,6 +199,7 @@ function validateDesiredState(value: DesiredState) {
   const operatorDelivery = requireObject(rootObject, "operator_delivery");
   if (operatorDelivery) {
     const mode = requireEnum(operatorDelivery, "operator_delivery.mode", ["inbox_relay", "web_desk"]);
+    requireEnum(operatorDelivery, "operator_delivery.processing_mode", ["disabled", "enabled"]);
     const replyDomain = requireString(operatorDelivery, "operator_delivery.reply_domain");
     if (replyDomain && !validDomain(replyDomain)) {
       failures.push("operator_delivery.reply_domain must be a valid domain");
@@ -246,7 +250,16 @@ function validateDesiredState(value: DesiredState) {
 function validateWorker(worker: Record<string, unknown> | null, prefix: string) {
   if (!worker) return;
   requireString(worker, `${prefix}.script_name`);
-  requireString(worker, `${prefix}.config`);
+  const config = requireString(worker, `${prefix}.config`);
+  if (!config) return;
+  checkFile(config);
+  if (!matchesCanonicalWranglerBasename(config)) {
+    failures.push(`${prefix}.config must use the canonical wrangler.toml, wrangler.json, or wrangler.jsonc basename`);
+  }
+}
+
+function matchesCanonicalWranglerBasename(path: string): boolean {
+  return ["wrangler.toml", "wrangler.json", "wrangler.jsonc"].includes(basename(path).toLowerCase());
 }
 
 function lifecycleCommands(desiredStatePath: string): string[] {
@@ -265,10 +278,12 @@ function resourceSummary(desired: DesiredState) {
     workers: [
       desired.workers.mail_api.script_name,
       desired.workers.mail_router.script_name,
+      desired.workers.ui.script_name,
     ].sort(),
     worker_configs: [
       desired.workers.mail_api.config,
       desired.workers.mail_router.config,
+      desired.workers.ui.config,
     ].sort(),
     storage: [
       `d1:${desired.storage.d1_database}`,

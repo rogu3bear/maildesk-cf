@@ -39,6 +39,14 @@ async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<
     message.setReject("maildesk operator delivery mode is invalid");
     return;
   }
+  if (config.mode === "inbox_relay" && config.processingMode !== "enabled") {
+    message.setReject(
+      config.processingMode === "invalid"
+        ? "maildesk relay processing mode is invalid"
+        : "maildesk relay processing is disabled",
+    );
+    return;
+  }
   const token = config.replyDomain
     ? relayTokenFromRecipient(message.to, config.replyDomain)
     : null;
@@ -181,7 +189,7 @@ async function acceptOperatorReply(
   env: Env,
 ): Promise<void> {
   const config = operatorDeliveryConfig(env);
-  if (config.mode !== "inbox_relay" || !config.replyDomain) {
+  if (config.mode !== "inbox_relay" || config.processingMode !== "enabled" || !config.replyDomain) {
     message.setReject("maildesk reply relay is disabled");
     return;
   }

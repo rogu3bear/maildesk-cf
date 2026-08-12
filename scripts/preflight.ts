@@ -24,6 +24,7 @@ interface DesiredState {
   };
   operator_delivery?: {
     mode?: unknown;
+    processing_mode?: unknown;
     reply_domain?: unknown;
     reply_token_ttl_days?: unknown;
     spool_retention_days?: unknown;
@@ -52,7 +53,7 @@ checkCommand(process.env.CFCTL_BIN ?? "cfctl", ["--help"], mode === "production"
 
 checkFile("Cargo.toml");
 checkFile("wrangler.toml");
-checkFile("wrangler.mail-router.toml");
+checkFile("deploy/mail-router/wrangler.toml");
 checkFile("config/policy.example.json");
 checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
@@ -224,6 +225,9 @@ function checkDesiredOperatorDelivery(desiredState: DesiredState | null) {
   if (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk") {
     failures.push("desired-state operator_delivery.mode must be inbox_relay or web_desk");
   }
+  if (delivery.processing_mode !== "disabled" && delivery.processing_mode !== "enabled") {
+    failures.push("desired-state operator_delivery.processing_mode must be disabled or enabled");
+  }
   if (!isUsableValue(delivery.reply_domain)) {
     failures.push("desired-state operator_delivery.reply_domain is required");
   }
@@ -252,6 +256,15 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   }
   if (delivery.mode !== "inbox_relay") return;
 
+  const relayProcessingMode = process.env.MAILDESK_RELAY_PROCESSING_MODE?.trim() || "disabled";
+  if (relayProcessingMode !== "disabled" && relayProcessingMode !== "enabled") {
+    failures.push("MAILDESK_RELAY_PROCESSING_MODE must be disabled or enabled");
+  } else if (relayProcessingMode !== delivery.processing_mode) {
+    failures.push(
+      `MAILDESK_RELAY_PROCESSING_MODE (${relayProcessingMode}) must match desired-state operator_delivery.processing_mode (${delivery.processing_mode})`,
+    );
+  }
+
   const replyDomain = process.env.MAILDESK_REPLY_DOMAIN?.trim();
   if (replyDomain !== delivery.reply_domain) {
     failures.push("MAILDESK_REPLY_DOMAIN must match desired-state operator_delivery.reply_domain");
@@ -259,7 +272,7 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   checkRuntimeInteger("MAILDESK_REPLY_TOKEN_TTL_DAYS", delivery.reply_token_ttl_days);
   checkRuntimeInteger("MAILDESK_SPOOL_RETENTION_DAYS", delivery.spool_retention_days);
   checkRuntimeInteger("MAILDESK_MAX_ENCODED_MESSAGE_BYTES", delivery.max_encoded_message_bytes);
-  checkSendEmailBinding("wrangler.mail-router.toml");
+  checkSendEmailBinding("deploy/mail-router/wrangler.toml");
 }
 
 function checkRuntimeInteger(name: string, desired: unknown) {
@@ -342,7 +355,7 @@ function checkAccessValidationEnv() {
 }
 
 function checkWranglerPlaceholders() {
-  for (const file of ["wrangler.toml", "wrangler.mail-router.toml", "wrangler.ui.toml"]) {
+  for (const file of ["wrangler.toml", "deploy/mail-router/wrangler.toml", "deploy/ui/wrangler.toml"]) {
     const wrangler = readFileSync(resolve(root, file), "utf8");
     if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
       failures.push(`${file} still contains placeholder Cloudflare resource IDs`);
