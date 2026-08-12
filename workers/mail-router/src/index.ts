@@ -424,11 +424,28 @@ async function recordDeliveryResults(
   spoolKey: string | null,
   env: Env,
 ): Promise<void> {
+  const acceptedCount = results.filter((result) => result.ok).length;
   await env.DB.prepare(
-    "UPDATE route_health SET inbound_status = ?1, last_error_code = ?2, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?3",
+    "UPDATE route_health SET inbound_status = ?1, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?4",
   )
-    .bind(status, status === "provider_accepted" ? null : status, inbound.routeId)
+    .bind(status, acceptedCount, status === "provider_accepted" ? null : status, inbound.routeId)
     .run();
+  await Promise.all(results.map(async (result, index) => {
+    await recordAudit(
+      env,
+      `${inbound.deliveryId}:operator_delivery:${index}`,
+      inbound.threadId,
+      "system",
+      result.ok ? "operator_delivery_recipient_provider_accepted" : "operator_delivery_recipient_recovery_required",
+      {
+        deliveryId: inbound.deliveryId,
+        relayId: inbound.relayId,
+        operatorRef: await sha256Hex(result.operator),
+        providerMessageId: result.providerMessageId,
+        errorCode: result.errorCode,
+      },
+    );
+  }));
   await recordAudit(
     env,
     `${inbound.deliveryId}:operator_delivery_result`,
@@ -438,7 +455,7 @@ async function recordDeliveryResults(
     {
       deliveryId: inbound.deliveryId,
       relayId: inbound.relayId,
-      acceptedCount: results.filter((result) => result.ok).length,
+      acceptedCount,
       failedCount: results.filter((result) => !result.ok).length,
       providerMessageIds: results.flatMap((result) => result.providerMessageId ? [result.providerMessageId] : []),
       recoverySpool: Boolean(spoolKey),

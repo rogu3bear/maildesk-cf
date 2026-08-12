@@ -59,6 +59,10 @@ struct RouteHealthRow {
     reply_status: String,
     last_inbound_at: Option<String>,
     last_reply_at: Option<String>,
+    last_inbound_provider_accepted_at: Option<String>,
+    last_inbox_verified_at: Option<String>,
+    last_reply_provider_accepted_at: Option<String>,
+    last_reply_verified_at: Option<String>,
     last_error_code: Option<String>,
 }
 
@@ -266,7 +270,10 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
         .prepare(
             "SELECT route_address, decision_kind, desired_provider, observed_provider,
                     operator_count, reply_identity, inbound_status, reply_status,
-                    last_inbound_at, last_reply_at, last_error_code
+                    last_inbound_at, last_reply_at,
+                    last_inbound_provider_accepted_at, last_inbox_verified_at,
+                    last_reply_provider_accepted_at, last_reply_verified_at,
+                    last_error_code
              FROM route_health
              ORDER BY CASE
                WHEN inbound_status IN ('partial_delivery', 'recovery_required', 'failed')
@@ -295,6 +302,10 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
                 reply_status: row.reply_status,
                 last_inbound_at: row.last_inbound_at,
                 last_reply_at: row.last_reply_at,
+                last_inbound_provider_accepted_at: row.last_inbound_provider_accepted_at,
+                last_inbox_verified_at: row.last_inbox_verified_at,
+                last_reply_provider_accepted_at: row.last_reply_provider_accepted_at,
+                last_reply_verified_at: row.last_reply_verified_at,
                 last_error_code: row.last_error_code,
             })
         })

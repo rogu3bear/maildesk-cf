@@ -37,6 +37,10 @@ pub struct RouteHealthSummary {
     pub reply_status: String,
     pub last_inbound_at: Option<String>,
     pub last_reply_at: Option<String>,
+    pub last_inbound_provider_accepted_at: Option<String>,
+    pub last_inbox_verified_at: Option<String>,
+    pub last_reply_provider_accepted_at: Option<String>,
+    pub last_reply_verified_at: Option<String>,
     pub last_error_code: Option<String>,
 }
 

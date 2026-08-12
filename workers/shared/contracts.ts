@@ -59,6 +59,10 @@ export interface RouteHealthSummary {
   replyStatus: RouteProofStatus;
   lastInboundAt?: string;
   lastReplyAt?: string;
+  lastInboundProviderAcceptedAt?: string;
+  lastInboxVerifiedAt?: string;
+  lastReplyProviderAcceptedAt?: string;
+  lastReplyVerifiedAt?: string;
   lastErrorCode?: string;
 }
 

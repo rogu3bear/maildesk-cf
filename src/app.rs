@@ -546,7 +546,10 @@ fn RoutingHealthDashboard(
                                     {routes.into_iter().map(|route| {
                                         let needs_attention = route_needs_attention(&route);
                                         let observed = route.observed_provider.clone().unwrap_or_else(|| "unobserved".to_string());
-                                        let last_proof = route.last_reply_at.clone().or(route.last_inbound_at.clone()).unwrap_or_else(|| "No proof recorded".to_string());
+                                        let inbound_provider = proof_timestamp(route.last_inbound_provider_accepted_at.as_deref());
+                                        let inbox_verified = proof_timestamp(route.last_inbox_verified_at.as_deref());
+                                        let reply_provider = proof_timestamp(route.last_reply_provider_accepted_at.as_deref());
+                                        let reply_verified = proof_timestamp(route.last_reply_verified_at.as_deref());
                                         let next = next_route_action(&route);
                                         view! {
                                             <li>
@@ -558,9 +561,13 @@ fn RoutingHealthDashboard(
                                                         <small>"Reply as "{route.reply_identity.clone()}</small>
                                                         <small>"Desired "{route.desired_provider.clone()}" · observed "{observed}</small>
                                                         <small>"Inbound "{route.inbound_status.clone()}" · reply "{route.reply_status.clone()}</small>
+                                                        <small>"Inbound provider accepted: "{inbound_provider}</small>
+                                                        <small>"Inbox verified: "{inbox_verified}</small>
+                                                        <small>"Reply provider accepted: "{reply_provider}</small>
+                                                        <small>"External reply verified: "{reply_verified}</small>
                                                         <small>"Next: "{next}</small>
                                                     </div>
-                                                    <time>{last_proof}</time>
+                                                    <time>{route.last_error_code.clone().unwrap_or_else(|| "No active error".to_string())}</time>
                                                 </article>
                                             </li>
                                         }
@@ -573,6 +580,10 @@ fn RoutingHealthDashboard(
             </main>
         </div>
     }
+}
+
+fn proof_timestamp(value: Option<&str>) -> String {
+    value.unwrap_or("Not recorded").to_string()
 }
 
 fn route_needs_attention(route: &RouteHealthSummary) -> bool {
