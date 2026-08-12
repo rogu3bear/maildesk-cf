@@ -55,6 +55,7 @@ test("accepted inbound role alias persists D1 metadata", async () => {
 
   const allBinds = db.statements.flatMap((statement) => statement.binds);
   expect(allBinds).toContain("example.com");
+  expect(allBinds).toContain("route:example.com:founders");
   expect(allBinds).toContain("founders@example.com");
   expect(allBinds).toContain("sender@example.net");
   expect(allBinds).toContain("<message-1@example.net>");

@@ -648,7 +648,7 @@ function parseMailbox(address: string): ParsedMailbox | null {
 }
 
 function stableId(prefix: string, ...parts: string[]): string {
-  return [prefix, ...parts.map((value) => normalizeMailbox(value).replace(/[^a-z0-9._-]+/g, "_"))].join(":");
+  return [prefix, ...parts.map((value) => value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_"))].join(":");
 }
 
 async function collisionResistantId(prefix: string, ...parts: string[]): Promise<string> {
