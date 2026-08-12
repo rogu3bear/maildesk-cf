@@ -56,6 +56,7 @@ const desiredStatePath = resolve(
   argValue("--desired-state") ?? defaultPath("config/desired-state.local.json", "config/desired-state.example.json"),
 );
 const executeLocal = args.includes("--local");
+const maxLocalBatchBytes = 48 * 1024;
 
 if (args.includes("--remote")) {
   fail("remote policy sync is a protected action; use a reviewed cfctl plan instead");
@@ -64,11 +65,11 @@ if (args.includes("--remote")) {
 const policy = readJson<RouterPolicy>(policyPath, "policy");
 const desired = readJson<DesiredState>(desiredStatePath, "desired state");
 const routes = projectRoutes(policy, desired);
-const projection = projectionSql(routes);
-const digest = createHash("sha256").update(projection).digest("hex");
+const projection = projectionSql(routes, maxLocalBatchBytes);
+const digest = createHash("sha256").update(projection.canonical).digest("hex");
 
 if (executeLocal) {
-  executeLocalProjection(projection, argValue("--database") ?? desired.storage.d1_database);
+  executeLocalProjection(projection.batches, argValue("--database") ?? desired.storage.d1_database);
 }
 
 console.log(JSON.stringify({
@@ -80,6 +81,7 @@ console.log(JSON.stringify({
   personal_routes: routes.filter((route) => route.decisionKind === "personal_alias").length,
   catch_all_routes: routes.filter((route) => route.decisionKind === "catch_all").length,
   sink_routes: routes.filter((route) => route.decisionKind === "sink").length,
+  local_batches: projection.batches.length,
   projection_sha256: digest,
 }, null, 2));
 
@@ -172,18 +174,18 @@ function projectedRoute(
   return { domain, localPart, decisionKind, storageKind, desiredProvider, operators, replyIdentity, initialStatus };
 }
 
-function projectionSql(routes: ProjectedRoute[]): string {
-  const statements = ["PRAGMA foreign_keys = ON;", "BEGIN TRANSACTION;"];
+function projectionSql(routes: ProjectedRoute[], maxBatchBytes: number): { canonical: string; batches: string[] } {
+  const routeGroups: string[][] = [];
   for (const route of routes) {
     const domainId = stableId("domain", route.domain);
     const identityId = stableId("identity", route.replyIdentity);
     const routeId = stableId("route", route.domain, route.localPart);
-    statements.push(
+    const statements = [
       `INSERT OR IGNORE INTO domains (id, domain) VALUES (${sql(domainId)}, ${sql(route.domain)});`,
       `INSERT INTO identities (id, domain_id, address, kind) VALUES (${sql(identityId)}, ${sql(domainId)}, ${sql(route.replyIdentity)}, ${sql(route.storageKind)}) ON CONFLICT(id) DO UPDATE SET address = excluded.address, kind = excluded.kind;`,
       `INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (${sql(routeId)}, ${sql(domainId)}, ${sql(route.localPart)}, ${sql(route.storageKind)}, ${sql(identityId)}, ${sql(route.decisionKind)}) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind;`,
       `DELETE FROM alias_route_operators WHERE route_id = ${sql(routeId)};`,
-    );
+    ];
     for (const operator of route.operators) {
       const operatorId = stableId("operator", operator);
       statements.push(
@@ -194,23 +196,47 @@ function projectionSql(routes: ProjectedRoute[]): string {
     statements.push(
       `INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, updated_at) VALUES (${sql(routeId)}, ${sql(`${route.localPart}@${route.domain}`)}, ${sql(route.decisionKind)}, ${sql(route.desiredProvider)}, ${route.operators.length}, ${sql(route.replyIdentity)}, ${sql(route.initialStatus)}, ${sql(route.initialStatus)}, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, desired_provider = excluded.desired_provider, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, inbound_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.inbound_status = 'intentionally_excluded' THEN excluded.inbound_status ELSE route_health.inbound_status END, reply_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.reply_status = 'intentionally_excluded' THEN excluded.reply_status ELSE route_health.reply_status END, updated_at = CURRENT_TIMESTAMP;`,
     );
+    routeGroups.push(statements);
   }
-  statements.push("COMMIT;");
-  return `${statements.join("\n")}\n`;
+  const canonical = transaction(routeGroups.flat());
+  const batches: string[] = [];
+  let current: string[] = [];
+  for (const group of routeGroups) {
+    const candidate = transaction([...current, ...group]);
+    if (Buffer.byteLength(candidate, "utf8") > maxBatchBytes && current.length > 0) {
+      batches.push(transaction(current));
+      current = [...group];
+    } else {
+      current.push(...group);
+    }
+    if (Buffer.byteLength(transaction(current), "utf8") > maxBatchBytes) {
+      fail("one projected route exceeds the local D1 batch limit");
+    }
+  }
+  if (current.length > 0) batches.push(transaction(current));
+  return { canonical, batches };
 }
 
-function executeLocalProjection(sqlText: string, database: string) {
+function transaction(statements: string[]): string {
+  return ["PRAGMA foreign_keys = ON;", "BEGIN TRANSACTION;", ...statements, "COMMIT;", ""].join("\n");
+}
+
+function executeLocalProjection(sqlBatches: string[], database: string) {
   if (!/^[a-zA-Z0-9._-]+$/.test(database)) fail("D1 database name is invalid");
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-sync-"));
-  const file = join(directory, "projection.sql");
   try {
-    writeFileSync(file, sqlText, { encoding: "utf8", mode: 0o600 });
-    const result = spawnSync(
-      "bunx",
-      ["wrangler", "d1", "execute", database, "--local", "--file", file],
-      { cwd: root, encoding: "utf8", env: process.env },
-    );
-    if (result.status !== 0) fail(`local D1 policy sync failed: ${boundedError(result.stderr || result.stdout)}`);
+    for (const [index, sqlText] of sqlBatches.entries()) {
+      const file = join(directory, `projection-${String(index + 1).padStart(3, "0")}.sql`);
+      writeFileSync(file, sqlText, { encoding: "utf8", mode: 0o600 });
+      const result = spawnSync(
+        "bunx",
+        ["wrangler", "d1", "execute", database, "--local", "--file", file],
+        { cwd: root, encoding: "utf8", env: process.env },
+      );
+      if (result.status !== 0) {
+        fail(`local D1 policy sync batch ${index + 1}/${sqlBatches.length} failed: ${boundedError(result.stderr || result.stdout)}`);
+      }
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
