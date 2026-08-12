@@ -121,6 +121,20 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
     new Headers({ "Authentication-Results": "mx.cloudflare.net; dkim=pass header.d=example.com" }),
     "operator-a@example.com",
   )).toBe(true);
+  expect(operatorAuthenticationPassed(
+    new Headers({ "Authentication-Results": "notcloudflare.example; dkim=pass header.d=example.com" }),
+    "operator-a@example.com",
+  )).toBe(false);
+  const duplicatedResults = new Headers();
+  duplicatedResults.append(
+    "Authentication-Results",
+    "mx.cloudflare.net; spf=fail smtp.mailfrom=operator-a@example.com",
+  );
+  duplicatedResults.append(
+    "Authentication-Results",
+    "attacker.example; dkim=pass header.d=example.com",
+  );
+  expect(operatorAuthenticationPassed(duplicatedResults, "operator-a@example.com")).toBe(false);
 });
 
 function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {

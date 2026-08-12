@@ -215,8 +215,12 @@ export function operatorAuthenticationPassed(headers: Headers, operator: string)
   const domain = mailbox.split("@")[1];
   if (!domain) return false;
   const results = headers.get("authentication-results")?.toLowerCase() ?? "";
+  // The Fetch Headers implementation combines duplicate fields with a comma.
+  // A sender-controlled Authentication-Results field must never be allowed to
+  // contribute a later pass result alongside Cloudflare's trusted field.
+  if (!results || results.includes(",")) return false;
   const authservId = results.split(";", 1)[0]?.trim() ?? "";
-  if (!authservId.includes("cloudflare")) return false;
+  if (authservId !== "mx.cloudflare.net") return false;
 
   const sections = results.split(";").map((section) => section.trim());
   const spfPass = sections.some(
