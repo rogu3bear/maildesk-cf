@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -28,5 +30,15 @@ describe("dark deployment blueprint", () => {
     expect(JSON.stringify(plan)).not.toContain("access-application-and-policy-readback");
     expect(JSON.stringify(plan)).not.toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/);
     expect(plan.explicit_exclusions).toContain("live inbound or outbound email probes");
+  });
+
+  test("binds every D1 migration to cfctl's prefixed content digest", () => {
+    const pack = readFileSync(resolve(root, ".cfctl/operations/d1-migrations.toml"), "utf8");
+    const migrations = [...pack.matchAll(/path = "([^"]+)"\nsha256 = "([^"]+)"/g)];
+    expect(migrations).toHaveLength(6);
+    for (const [, path, declared] of migrations) {
+      const observed = `sha256:${createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex")}`;
+      expect(declared).toBe(observed);
+    }
   });
 });
