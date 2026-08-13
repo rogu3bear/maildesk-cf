@@ -362,6 +362,24 @@ test("a superseded all-pending claim is retired before its MIME is rerouted", as
   expect(db.inboundDelivery?.status).toBe("provider_accepted");
 });
 
+test("an obsolete invocation cannot claim a replacement spool generation", async () => {
+  const db = new RelayD1(undefined, false, undefined, "relay-spool/replacement-generation.eml");
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<replacement-generation@example.net>" }),
+  );
+
+  await mailRouterWorker.email(message, relayEnv(db, deliveries), {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(0);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "pending")).toBe(true);
+  expect(db.inboundDelivery?.raw_r2_key).toBe("relay-spool/replacement-generation.eml");
+  expect(db.inboundDelivery?.status).toBe("recovery_required");
+});
+
 test("a policy revision change during persistence rejects without rewriting route authority", async () => {
   const db = new RelayD1(undefined, true);
   const deliveries: EmailMessageBuilder[] = [];
@@ -682,6 +700,7 @@ class RelayD1 {
     private readonly failOnceSql?: string,
     private readonly rejectPolicyBoundPersistence = false,
     private readonly supersedingPolicy?: RouterPolicy,
+    private readonly replacementSpoolKey?: string,
   ) {}
 
   prepare(sql: string): D1PreparedStatement {
@@ -697,7 +716,8 @@ class RelayD1 {
         if (sql.includes("UPDATE inbound_recipient_deliveries SET status = 'sending'")) {
           const recipient = this.recipientDeliveries.find((row) =>
             row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending" &&
-            this.inboundDelivery?.policy_sha256 === call.bindings[2]
+            this.inboundDelivery?.policy_sha256 === call.bindings[2] &&
+            this.inboundDelivery.raw_r2_key === call.bindings[3]
           );
           if (!recipient) return { success: true, meta: { changes: 0 } };
           recipient.status = "sending";
@@ -793,6 +813,9 @@ class RelayD1 {
     if (this.supersedingPolicy && calls.some((call) => call.sql.includes("INSERT INTO inbound_deliveries"))) {
       const json = JSON.stringify(this.supersedingPolicy);
       this.activePolicy = { sha256: createHash("sha256").update(json).digest("hex"), json };
+    }
+    if (this.replacementSpoolKey && this.inboundDelivery) {
+      this.inboundDelivery.raw_r2_key = this.replacementSpoolKey;
     }
     return statements.map((_, index) => ({
       success: true,

@@ -98,6 +98,48 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.binds[5]).toBe("a".repeat(64));
   });
 
+  test("a superseded ambiguous inbound result retains its recovery spool", async () => {
+    const db = new D1Recorder(
+      undefined,
+      undefined,
+      undefined,
+      "UPDATE route_health SET inbound_status",
+      "b".repeat(64),
+    );
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-policy-a-ambiguous",
+      relayId: "relay-policy-a-ambiguous",
+      threadId: "thread-policy-a-ambiguous",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "recovery_required",
+      results: [{ operatorRef: "operator-ref-a", ok: false, errorCode: "provider_outcome_unknown" }],
+      relaySpoolKey: "relay-spool/delivery-policy-a-ambiguous.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      MAILDESK_OUTBOUND_MODE: "disabled",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(deleted).toHaveLength(0);
+    expect(db.hasAuditAction("operator_delivery_result_superseded")).toBe(true);
+    const deliveryUpdate = db.statements.find((entry) =>
+      entry.sql.includes("UPDATE inbound_deliveries SET status") &&
+      entry.binds[0] === "recovery_required"
+    );
+    expect(deliveryUpdate?.sql).toContain(
+      "raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL ELSE raw_r2_key END",
+    );
+  });
+
   test("a missing active-revision health row retains recovery state for retry", async () => {
     const db = new D1Recorder(
       undefined,

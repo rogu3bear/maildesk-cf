@@ -258,7 +258,13 @@ async function acceptInboxRelay(
     const operatorRef = operatorRefs[index]!;
     let claimed = false;
     try {
-      claimed = await claimInboundRecipient(deliveryId, operatorRef, policySha256, env);
+      claimed = await claimInboundRecipient(
+        deliveryId,
+        operatorRef,
+        policySha256,
+        candidateSpoolKey,
+        env,
+      );
     } catch {
       // No provider call occurred. The durable delivery remains visible for
       // recovery rather than bypassing the recipient claim boundary.
@@ -717,7 +723,10 @@ async function discardSupersededUnsentInbound(
   const discarded = await env.DB.prepare(
     DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
   ).bind(inbound.relay_id, inbound.policy_sha256, inbound.id).run();
-  return Number(discarded.meta?.changes ?? 0) === 1;
+  // SQLite-compatible runtimes may report the root relay deletion together
+  // with its foreign-key cascades. Any positive count means the guarded root
+  // delete won; zero means a recipient crossed the provider boundary first.
+  return Number(discarded.meta?.changes ?? 0) > 0;
 }
 
 async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Promise<void> {
@@ -770,11 +779,12 @@ async function claimInboundRecipient(
   deliveryId: string,
   operatorRef: string,
   policySha256: string,
+  spoolKey: string,
   env: Env,
 ): Promise<boolean> {
   const claimed = await env.DB.prepare(
-    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.id = inbound_recipient_deliveries.delivery_id AND d.policy_sha256 = ?3)",
-  ).bind(deliveryId, operatorRef, policySha256).run();
+    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.id = inbound_recipient_deliveries.delivery_id AND d.policy_sha256 = ?3 AND d.raw_r2_key = ?4)",
+  ).bind(deliveryId, operatorRef, policySha256, spoolKey).run();
   return Number(claimed.meta?.changes ?? 0) === 1;
 }
 
