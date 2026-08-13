@@ -176,6 +176,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
     "name", "main", "compatibility_date", "workers_dev", "send_email", "build", "vars",
     "d1_databases", "r2_buckets", "queues",
   ]);
+  requireWorkersDevOff(router, routerPath);
   requireExactEmailBinding(router, routerPath);
   assertConfigName(router, routerPath, desired.workers.relay_router.script_name);
   const routerVars = record(router.vars, `${routerPath} [vars]`);
@@ -201,6 +202,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
     "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "send_email",
     "build", "vars", "d1_databases", "r2_buckets", "queues",
   ]);
+  requireWorkersDevOff(outbound, outboundPath);
   requireExactEmailBinding(outbound, outboundPath);
   assertConfigName(outbound, outboundPath, desired.workers.relay_outbound.script_name);
   assertStorageBindings(outbound, outboundPath, desired);
@@ -215,6 +217,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   assertExactTopLevelKeys(health, healthPath, [
     "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "build", "assets", "vars", "d1_databases",
   ]);
+  requireWorkersDevOff(health, healthPath);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   requireExactArrayLength(health, healthPath, "d1_databases", 1);
@@ -252,6 +255,10 @@ function assertDesiredStatePath(path: string): string {
 
 function assertConfigName(config: Record<string, unknown>, path: string, expected: string): void {
   requireConfigValue(config, path, "name", expected);
+}
+
+function requireWorkersDevOff(config: Record<string, unknown>, path: string): void {
+  if (config.workers_dev !== false) throw new Error(`${path} must set workers_dev = false`);
 }
 
 function assertStorageBindings(config: Record<string, unknown>, path: string, desired: DesiredState): void {
