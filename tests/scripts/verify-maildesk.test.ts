@@ -36,11 +36,12 @@ describe("maildesk verifier", () => {
     });
   });
 
-  test("policy bucket existence cannot stand in for an exact policy object digest", () => {
+  test("policy bucket existence and a matching legacy local digest cannot stand in for active R2 readback", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const evidencePath = join(dir, "evidence.json");
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      r2_policy_sha256: fileSha256(resolve(root, "config/policy.example.json")),
       cfctl_maildesk: {
         storage: { r2_policy_bucket: "ok" },
       },
@@ -109,7 +110,7 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
-      r2_policy_sha256: fileSha256(policyPath),
+      active_policy: activePolicyEvidence(policyPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -229,7 +230,7 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
-      r2_policy_sha256: fileSha256(policyPath),
+      active_policy: activePolicyEvidence(policyPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: true,
@@ -347,7 +348,7 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
-      r2_policy_sha256: fileSha256(policyPath),
+      active_policy: activePolicyEvidence(policyPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: true,
@@ -442,6 +443,22 @@ function writeJson(path: string, value: unknown) {
 
 function fileSha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function activePolicyEvidence(path: string) {
+  const digest = fileSha256(path);
+  const key = `config/policy/${digest}.json`;
+  return {
+    active_policy_sha256: digest,
+    active_policy_r2_key: key,
+    revision_r2_key: key,
+    object_key: key,
+    object_sha256: digest,
+    expected_domain_count: 1,
+    expected_route_count: 1,
+    projected_domain_count: 1,
+    projected_route_count: 1,
+  };
 }
 
 function canonicalTopology() {

@@ -17,7 +17,7 @@ interface Evidence {
   zones?: string[];
   email_routing?: Record<string, { role_aliases: string[]; personal_aliases: string[] }>;
   dns_mx?: Record<string, string[]>;
-  r2_policy_sha256?: string;
+  active_policy?: ActivePolicyEvidence;
   readyz?: unknown;
   d1?: {
     tables?: string[];
@@ -27,6 +27,18 @@ interface Evidence {
   inbound_proofs?: Record<string, InboundProof>;
   outbound_proofs?: Record<string, OutboundProof>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
+}
+
+interface ActivePolicyEvidence {
+  active_policy_sha256: string;
+  active_policy_r2_key: string;
+  revision_r2_key: string;
+  object_key: string;
+  object_sha256: string;
+  expected_domain_count: number;
+  expected_route_count: number;
+  projected_domain_count: number;
+  projected_route_count: number;
 }
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
@@ -80,7 +92,6 @@ const outputPath = resolve(root, argValue("--out") ?? "var/maildesk-live-evidenc
 const cfctlBin = process.env.CFCTL_BIN ?? argValue("--cfctl") ?? "cfctl";
 const wranglerBin = process.env.WRANGLER_BIN ?? argValue("--wrangler") ?? "wrangler";
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
-const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-policy-path");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
 const desiredState = readJson<DesiredState>(desiredStatePath);
@@ -140,10 +151,6 @@ if (Object.keys(dnsMx).length > 0) {
   evidence.dns_mx = { ...(evidence.dns_mx ?? {}), ...dnsMx };
 }
 
-if (r2PolicyPath) {
-  evidence.r2_policy_sha256 = sha256(readFileSync(resolve(root, r2PolicyPath), "utf8"));
-}
-
 if (readyzUrl) {
   const readyz = fetchJson(["-fsS", readyzUrl]);
   if (readyz.ok) evidence.readyz = readyz.value;
@@ -151,6 +158,8 @@ if (readyzUrl) {
 
 const d1Name = desiredState.storage?.d1_database ?? d1Database;
 if (d1Name) {
+  const activePolicy = collectActivePolicyEvidence(d1Name, desiredState.storage.r2_policy_bucket);
+  if (activePolicy) evidence.active_policy = activePolicy;
   evidence.d1 = collectD1Evidence(d1Name);
   const inboundProofs = collectInboundProofs(d1Name);
   if (Object.keys(inboundProofs).length > 0) {
@@ -160,6 +169,44 @@ if (d1Name) {
   if (Object.keys(outboundProofs).length > 0) {
     evidence.outbound_proofs = outboundProofs;
   }
+}
+
+function collectActivePolicyEvidence(
+  databaseName: string,
+  policyBucket: string,
+): ActivePolicyEvidence | null {
+  const [row] = wranglerD1Results(
+    databaseName,
+    "SELECT rs.active_policy_sha256, rs.active_policy_r2_key, pr.r2_object_key AS revision_r2_key, pr.expected_domain_count, pr.expected_route_count, (SELECT COUNT(*) FROM domains d WHERE EXISTS (SELECT 1 FROM alias_routes ar WHERE ar.domain_id = d.id AND ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256)) AS projected_domain_count, (SELECT COUNT(*) FROM alias_routes ar WHERE ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256) AS projected_route_count FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1;",
+  );
+  if (
+    typeof row?.active_policy_sha256 !== "string" ||
+    typeof row.active_policy_r2_key !== "string" ||
+    typeof row.revision_r2_key !== "string" ||
+    typeof row.expected_domain_count !== "number" ||
+    typeof row.expected_route_count !== "number" ||
+    typeof row.projected_domain_count !== "number" ||
+    typeof row.projected_route_count !== "number"
+  ) return null;
+
+  const object = spawnSync(
+    wranglerBin,
+    ["r2", "object", "get", `${policyBucket}/${row.active_policy_r2_key}`, "--remote", "--pipe"],
+    { cwd: root, encoding: null, maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (object.status !== 0 || !object.stdout) return null;
+
+  return {
+    active_policy_sha256: row.active_policy_sha256,
+    active_policy_r2_key: row.active_policy_r2_key,
+    revision_r2_key: row.revision_r2_key,
+    object_key: row.active_policy_r2_key,
+    object_sha256: createHash("sha256").update(object.stdout).digest("hex"),
+    expected_domain_count: row.expected_domain_count,
+    expected_route_count: row.expected_route_count,
+    projected_domain_count: row.projected_domain_count,
+    projected_route_count: row.projected_route_count,
+  };
 }
 
 if (useResend) {

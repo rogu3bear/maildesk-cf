@@ -49,7 +49,7 @@ describe("maildesk receipt workflow", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
-      r2_policy_sha256: fileSha256(policyPath),
+      active_policy: activePolicyEvidence(policyPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -195,6 +195,22 @@ function writeJson(path: string, value: unknown) {
 
 function fileSha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function activePolicyEvidence(path: string) {
+  const digest = fileSha256(path);
+  const key = `config/policy/${digest}.json`;
+  return {
+    active_policy_sha256: digest,
+    active_policy_r2_key: key,
+    revision_r2_key: key,
+    object_key: key,
+    object_sha256: digest,
+    expected_domain_count: 1,
+    expected_route_count: 1,
+    projected_domain_count: 1,
+    projected_route_count: 1,
+  };
 }
 
 function canonicalTopology() {

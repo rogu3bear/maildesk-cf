@@ -325,7 +325,17 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
       "route3.mx.cloudflare.net"
     ]
   },
-  "r2_policy_sha256": "<sha256-of-local-policy-json>",
+  "active_policy": {
+    "active_policy_sha256": "<d1-active-sha256>",
+    "active_policy_r2_key": "config/policy/<d1-active-sha256>.json",
+    "revision_r2_key": "config/policy/<d1-active-sha256>.json",
+    "object_key": "config/policy/<d1-active-sha256>.json",
+    "object_sha256": "<sha256-of-authenticated-r2-readback-bytes>",
+    "expected_domain_count": 1,
+    "expected_route_count": 3,
+    "projected_domain_count": 1,
+    "projected_route_count": 3
+  },
   "readyz": {
     "ok": true,
     "checks": [
@@ -351,11 +361,13 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
       "status": "ok",
       "envelope_to": "founders@example.com",
       "route_kind": "role_alias",
-      "forwarded_to": ["operator-a@example.com", "operator-b@example.com"],
-      "forward_errors": [],
+      "operator_count": 2,
+      "policy_sha256": "<d1-active-sha256>",
+      "provider_message_ids": ["provider-message-id-a", "provider-message-id-b"],
+      "provider_accepted_at": "2026-05-20T00:00:00Z",
+      "inbox_verified_at": "2026-05-20T00:01:00Z",
       "default_reply_identity": "founders@example.com",
-      "raw_r2_key": "raw/2026-05-20/example.eml",
-      "audit_event_at": "2026-05-20T00:00:00Z"
+      "provider": "cloudflare_email_service"
     }
   },
   "outbound_proofs": {
@@ -370,9 +382,12 @@ Wrangler readbacks, provider readbacks, and targeted probes. A minimal shape is:
 }
 ```
 
-Inbound proof is policy-checked. A bare `status: ok` is not enough: the proof
-must identify the routed mailbox, forwarded operators, reply identity, stored
-raw mail key, and absence of forward errors.
+Inbox-relay proof is policy-checked and body-free. A bare `status: ok` is not
+enough: the proof must bind the routed mailbox, route kind, operator count,
+active policy digest, public reply identity, provider message IDs, provider
+acceptance timestamp, and separately verified inbox-receipt timestamp. It must
+not expose operator addresses or a raw MIME object key. Google Workspace routes
+use their provider-native membership and receipt evidence instead.
 
 D1 proof is stricter when present. `/readyz` proves the binding can query; the
 optional `d1.tables` readback proves the audit schema actually exists. When

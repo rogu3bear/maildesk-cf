@@ -49,7 +49,7 @@ interface LiveEvidence {
   zones?: string[];
   email_routing?: Record<string, RoutingEvidence>;
   dns_mx?: Record<string, string[]>;
-  r2_policy_sha256?: string;
+  active_policy?: ActivePolicyEvidence;
   readyz?: {
     ok?: boolean;
     checks?: Array<{ name: string; ok: boolean; detail?: string }>;
@@ -59,6 +59,18 @@ interface LiveEvidence {
   inbound_proofs?: Record<string, ProofEvidence>;
   outbound_proofs?: Record<string, ProofEvidence>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
+}
+
+interface ActivePolicyEvidence {
+  active_policy_sha256?: string;
+  active_policy_r2_key?: string;
+  revision_r2_key?: string;
+  object_key?: string;
+  object_sha256?: string;
+  expected_domain_count?: number;
+  expected_route_count?: number;
+  projected_domain_count?: number;
+  projected_route_count?: number;
 }
 
 interface D1Evidence {
@@ -457,8 +469,18 @@ function checkInboundMx(
 }
 
 function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
-  if (!live.r2_policy_sha256) return "not_checked";
-  return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
+  const proof = live.active_policy;
+  if (!proof) return "not_checked";
+  const canonicalKey = `config/policy/${localPolicySha256}.json`;
+  return proof.active_policy_sha256 === localPolicySha256 &&
+      proof.active_policy_r2_key === canonicalKey &&
+      proof.revision_r2_key === canonicalKey &&
+      proof.object_key === canonicalKey &&
+      proof.object_sha256 === localPolicySha256 &&
+      proof.expected_domain_count === proof.projected_domain_count &&
+      proof.expected_route_count === proof.projected_route_count
+    ? "ok"
+    : "drift";
 }
 
 function cloudflareEmailRoutingMx(): string[] {
@@ -790,7 +812,7 @@ function hasLiveEvidence(live: LiveEvidence): boolean {
     live.zones ||
       live.email_routing ||
       live.dns_mx ||
-      live.r2_policy_sha256 ||
+      live.active_policy ||
       live.readyz ||
       live.d1 ||
       live.sender_domains ||
