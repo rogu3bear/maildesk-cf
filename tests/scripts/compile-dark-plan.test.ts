@@ -75,4 +75,79 @@ describe("dark deployment blueprint", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  test("rejects desired-state drift from router activation and UI Access config", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const cases: Array<[string, "relay_router" | "routing_health", (config: string) => string, string]> = [
+      [
+        "enabled router",
+        "relay_router",
+        (config) => config.replace('MAILDESK_INBOUND_RELAY_MODE = "disabled"', 'MAILDESK_INBOUND_RELAY_MODE = "enabled"'),
+        "must exist, equal disabled, and match desired state",
+      ],
+      [
+        "legacy and split switches",
+        "relay_router",
+        (config) => config.replace("[vars]", '[vars]\nMAILDESK_RELAY_PROCESSING_MODE = "disabled"'),
+        "must not combine the legacy relay processing switch",
+      ],
+      [
+        "desk-only UI",
+        "routing_health",
+        (config) => config.replace('MAILDESK_UI_ACCESS_SCOPE = "all_routes"', 'MAILDESK_UI_ACCESS_SCOPE = "desk_only"'),
+        "must require Cloudflare Access for all_routes",
+      ],
+      [
+        "preview UI",
+        "routing_health",
+        (config) => config.replace('MAILDESK_UI_AUTH_MODE = "access"', 'MAILDESK_UI_AUTH_MODE = "preview"'),
+        "must require Cloudflare Access for all_routes",
+      ],
+    ];
+    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-config-"));
+
+    try {
+      for (const [name, role, mutate, expected] of cases) {
+        const desired = structuredClone(original);
+        const sourcePath = resolve(root, desired.workers[role].config);
+        const roleDirectory = role === "relay_router" ? "mail-router" : "routing-health";
+        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-${name.toLowerCase().replaceAll(" ", "-")}.toml`;
+        const absolutePath = resolve(root, relativePath);
+        writeFileSync(absolutePath, mutate(readFileSync(sourcePath, "utf8")));
+        desired.workers[role].config = relativePath;
+        const desiredPath = join(directory, `${name.replaceAll(" ", "-")}.json`);
+        writeFileSync(desiredPath, JSON.stringify(desired));
+
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
+          cwd: root,
+          encoding: "utf8",
+        });
+
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain(expected);
+        rmSync(absolutePath);
+      }
+
+      const desired = structuredClone(original);
+      desired.workers.relay_router.config = "config/desired-state.example.json";
+      const desiredPath = join(directory, "arbitrary-path.json");
+      writeFileSync(desiredPath, JSON.stringify(desired));
+      const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("repository-relative canonical deploy/mail-router/wrangler*.toml path");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      for (const directoryName of ["mail-router", "routing-health"]) {
+        const directoryPath = resolve(root, "deploy", directoryName);
+        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+          rmSync(resolve(directoryPath, name), { force: true });
+        }
+      }
+    }
+  });
 });

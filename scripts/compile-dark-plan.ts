@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { isRepositoryRelativePath } from "./wrangler-config";
 
 interface DesiredState {
   project: { name: string };
@@ -25,6 +26,7 @@ const desiredPath = arg("--desired-state") ?? "config/desired-state.example.json
 const outputPath = arg("--out");
 const desired = json<DesiredState>(desiredPath);
 assertDarkActivation(desired.operator_delivery);
+assertDarkWorkerConfigs(desired);
 const head = git("rev-parse", "HEAD");
 const tree = git("rev-parse", "HEAD^{tree}");
 const dirty = git("status", "--porcelain").length > 0;
@@ -151,6 +153,55 @@ function assertDarkActivation(operatorDelivery: DesiredState["operator_delivery"
   }
 }
 
+function assertDarkWorkerConfigs(desired: DesiredState): void {
+  const routerPath = assertWorkerConfigPath("relay_router", desired.workers.relay_router.config, "mail-router");
+  const healthPath = assertWorkerConfigPath("routing_health", desired.workers.routing_health.config, "routing-health");
+  assertWorkerConfigPath("relay_outbound", desired.workers.relay_outbound.config, "mail-outbound");
+
+  const router = wranglerConfig(routerPath);
+  const routerVars = record(router.vars, `${routerPath} [vars]`);
+  if ("MAILDESK_RELAY_PROCESSING_MODE" in routerVars) {
+    throw new Error(`${routerPath} must not combine the legacy relay processing switch with split activation switches`);
+  }
+  for (const [key, desiredValue] of [
+    ["MAILDESK_INBOUND_RELAY_MODE", desired.operator_delivery.inbound_processing_mode],
+    ["MAILDESK_REPLY_RELAY_MODE", desired.operator_delivery.reply_processing_mode],
+  ] as const) {
+    if (routerVars[key] !== "disabled" || routerVars[key] !== desiredValue) {
+      throw new Error(`${routerPath} ${key} must exist, equal disabled, and match desired state`);
+    }
+  }
+
+  const health = wranglerConfig(healthPath);
+  const healthVars = record(health.vars, `${healthPath} [vars]`);
+  if (healthVars.MAILDESK_UI_AUTH_MODE !== "access" || healthVars.MAILDESK_UI_ACCESS_SCOPE !== "all_routes") {
+    throw new Error(`${healthPath} must require Cloudflare Access for all_routes`);
+  }
+}
+
+function assertWorkerConfigPath(role: string, path: string, directory: string): string {
+  const pattern = new RegExp(`^deploy/${directory}/wrangler(?:\\.[a-z0-9-]+)?\\.toml$`);
+  if (!isRepositoryRelativePath(path) || !pattern.test(path)) {
+    throw new Error(`${role} config must be a repository-relative canonical deploy/${directory}/wrangler*.toml path`);
+  }
+  return path;
+}
+
+function wranglerConfig(path: string): Record<string, unknown> {
+  try {
+    return record(Bun.TOML.parse(readFileSync(resolve(root, path), "utf8")), path);
+  } catch (error) {
+    throw new Error(`${path} must be readable valid TOML: ${detail(error)}`);
+  }
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 function shaFile(path: string): string {
   return createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex");
 }
@@ -159,4 +210,8 @@ function git(...args: string[]): string {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed`);
   return result.stdout.trim();
+}
+
+function detail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

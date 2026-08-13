@@ -13,7 +13,7 @@ binding = "ASSETS"
 
 [vars]
 MAILDESK_UI_AUTH_MODE = "access"
-MAILDESK_UI_ACCESS_SCOPE = "desk_only"
+MAILDESK_UI_ACCESS_SCOPE = "all_routes"
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"
 MAILDESK_OUTBOUND_MODE = "disabled"
 

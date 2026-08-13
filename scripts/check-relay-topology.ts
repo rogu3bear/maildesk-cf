@@ -14,6 +14,10 @@ interface DesiredState {
     queue: string;
     dead_letter_queue: string;
   };
+  operator_delivery: {
+    inbound_processing_mode: string;
+    reply_processing_mode: string;
+  };
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -51,6 +55,9 @@ function checkRouter(desired: DesiredState): void {
   requireValue(config, path, "queue", desired.storage.queue);
   forbid(config, path, /\[\[queues\.consumers\]\]/, "Queue consumer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
+  forbid(config, path, /^MAILDESK_RELAY_PROCESSING_MODE\s*=/m, "legacy relay processing switch");
+  requireAssignment(config, path, "MAILDESK_INBOUND_RELAY_MODE", desired.operator_delivery.inbound_processing_mode);
+  requireAssignment(config, path, "MAILDESK_REPLY_RELAY_MODE", desired.operator_delivery.reply_processing_mode);
 }
 
 function checkOutbound(desired: DesiredState): void {
@@ -87,6 +94,8 @@ function checkRoutingHealth(desired: DesiredState): void {
   forbid(config, path, /\[\[r2_buckets\]\]/, "R2 binding");
   forbid(config, path, /\[\[queues\./, "Queue binding");
   forbid(config, path, /^send_email\s*=/m, "Email binding");
+  requireAssignment(config, path, "MAILDESK_UI_AUTH_MODE", "access");
+  requireAssignment(config, path, "MAILDESK_UI_ACCESS_SCOPE", "all_routes");
 }
 
 function readJson<T>(path: string): T | null {
