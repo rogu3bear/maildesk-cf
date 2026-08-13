@@ -77,6 +77,11 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(db.calls.some((call) => call.sql.includes("INSERT INTO route_health"))).toBe(false);
   const healthResult = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
   expect(healthResult?.sql).toContain("inbound_status = 'inbox_verified'");
+  expect(healthResult?.sql).toContain("policy_sha256 = ?6");
+  expect(healthResult?.sql).toContain("rs.active_policy_sha256 = ?6");
+  expect(healthResult?.bindings[5]).toBe(
+    createHash("sha256").update(JSON.stringify(policy)).digest("hex"),
+  );
 });
 
 test("inbox relay binds the external destination to the visible sender, not an untrusted Reply-To", async () => {
@@ -226,6 +231,7 @@ test("accepted inbound deliveries retain a spool and enqueue body-free recovery 
   expect(queued).toHaveLength(1);
   expect(queued[0]).toMatchObject({
     kind: "inbound_delivery_result",
+    policySha256: createHash("sha256").update(JSON.stringify(policy)).digest("hex"),
     status: "provider_accepted",
     results: [
       { ok: true, providerMessageId: "provider-1" },

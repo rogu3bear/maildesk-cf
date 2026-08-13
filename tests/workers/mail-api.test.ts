@@ -14,6 +14,7 @@ describe("mail API outbound sender modes", () => {
       relayId: "relay-recovery",
       threadId: "thread-recovery",
       routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
       status: "provider_accepted",
       results: [
         { operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" },
@@ -43,6 +44,86 @@ describe("mail API outbound sender modes", () => {
       2,
       JSON.stringify(["provider-a", "provider-b"]),
     ]);
+    expect(healthUpdate?.sql).toContain("policy_sha256 = ?6");
+    expect(healthUpdate?.sql).toContain("rs.active_policy_sha256 = ?6");
+    expect(healthUpdate?.binds[5]).toBe("a".repeat(64));
+  });
+
+  test("a delayed inbound result cannot advance a superseding policy revision", async () => {
+    const db = new D1Recorder(
+      undefined,
+      undefined,
+      undefined,
+      "UPDATE route_health SET inbound_status",
+      "b".repeat(64),
+    );
+    const email = new SendEmailRecorder("must-not-send");
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-policy-a",
+      relayId: "relay-policy-a",
+      threadId: "thread-policy-a",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "provider_accepted",
+      results: [{ operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" }],
+      relaySpoolKey: "relay-spool/delivery-policy-a.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(deleted).toEqual(["relay-spool/delivery-policy-a.eml"]);
+    expect(db.hasAuditAction("operator_delivery_result_superseded")).toBe(true);
+    expect(db.hasAuditAction("operator_delivery_provider_accepted")).toBe(false);
+    const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET inbound_status"));
+    expect(healthUpdate?.binds[5]).toBe("a".repeat(64));
+  });
+
+  test("a missing active-revision health row retains recovery state for retry", async () => {
+    const db = new D1Recorder(
+      undefined,
+      undefined,
+      undefined,
+      "UPDATE route_health SET inbound_status",
+      "a".repeat(64),
+    );
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-active-recovery",
+      relayId: "relay-active-recovery",
+      threadId: "thread-active-recovery",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "provider_accepted",
+      results: [{ operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" }],
+      relaySpoolKey: "relay-spool/delivery-active-recovery.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await expect(mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      MAILDESK_OUTBOUND_MODE: "disabled",
+    } as unknown as Env)).rejects.toThrow("active route health revision is unavailable");
+
+    expect(batch.ackCount).toBe(0);
+    expect(deleted).toHaveLength(0);
+    expect(db.hasAuditAction("operator_delivery_result_superseded")).toBe(false);
   });
 
   test("an authorized inbox reply derives its external target from D1 and deletes the terminal spool", async () => {
@@ -1009,6 +1090,8 @@ class D1Recorder {
     private readonly relayRow?: Record<string, unknown>,
     private readonly activePolicyJson?: string,
     private readonly failOnceSql?: string,
+    private readonly zeroChangesSql?: string,
+    private readonly runtimePolicySha256?: string,
   ) {}
 
   seedAudit(dedupeKey: string, action: string, detail: unknown = {}): void {
@@ -1031,6 +1114,10 @@ class D1Recorder {
           recorder.failedOnce = true;
           throw new Error(`forced D1 failure for ${recorder.failOnceSql}`);
         }
+        if (recorder.zeroChangesSql && sql.includes(recorder.zeroChangesSql)) {
+          statements.push(record);
+          return { success: true, meta: { changes: 0 } };
+        }
         const dedupeKey = record.binds[1];
         if (
           dedupeKey &&
@@ -1045,6 +1132,11 @@ class D1Recorder {
       },
       async first() {
         statements.push(record);
+        if (record.sql.includes("SELECT active_policy_sha256 FROM runtime_state")) {
+          return recorder.runtimePolicySha256
+            ? { active_policy_sha256: recorder.runtimePolicySha256 }
+            : null;
+        }
         if (record.sql.includes("SELECT rs.active_policy_sha256") && activePolicyJson) {
           const digest = createHash("sha256").update(activePolicyJson).digest("hex");
           return {

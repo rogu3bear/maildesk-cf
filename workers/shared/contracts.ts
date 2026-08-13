@@ -121,6 +121,8 @@ export interface InboundDeliveryResultJob {
   relayId: string;
   threadId: string;
   routeId: string;
+  /** Immutable policy revision that authorized the provider delivery. */
+  policySha256: string;
   status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
   results: Array<{
     operatorRef: string;

@@ -442,8 +442,8 @@ async function projectInboundDeliveryResult(
   const providerMessageIds = job.results.flatMap((result) =>
     result.providerMessageId ? [result.providerMessageId] : []
   );
-  await env.DB.prepare(
-    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5",
+  const projected = await env.DB.prepare(
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5 AND policy_sha256 = ?6 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?6)",
   )
     .bind(
       job.status,
@@ -451,8 +451,36 @@ async function projectInboundDeliveryResult(
       JSON.stringify(providerMessageIds),
       job.status === "provider_accepted" ? null : job.status,
       job.routeId,
+      job.policySha256,
     )
     .run();
+  if (Number(projected.meta?.changes ?? 0) === 0) {
+    const runtime = await env.DB.prepare(
+      "SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1",
+    ).first<{ active_policy_sha256: string }>();
+    if (!runtime?.active_policy_sha256 || runtime.active_policy_sha256 === job.policySha256) {
+      throw new Error("active route health revision is unavailable for inbound result projection");
+    }
+    await recordAuditEvent(
+      env,
+      "system",
+      "operator_delivery_result_superseded",
+      {
+        deliveryId: job.deliveryId,
+        relayId: job.relayId,
+        routeId: job.routeId,
+        policySha256: job.policySha256,
+        acceptedCount,
+        failedCount: job.results.length - acceptedCount,
+        providerMessageIds,
+      },
+      `${job.deliveryId}:operator_delivery_result_superseded`,
+      job.threadId,
+    );
+    if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+    await env.RELAY_SPOOL.delete(job.relaySpoolKey);
+    return;
+  }
   for (const [index, result] of job.results.entries()) {
     await recordAuditEvent(
       env,

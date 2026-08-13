@@ -504,7 +504,7 @@ async function persistInboxRelay(
       relayId: relay.relayId,
     },
   );
-  return { deliveryId: relay.deliveryId, relayId: relay.relayId, routeId, threadId };
+  return { deliveryId: relay.deliveryId, relayId: relay.relayId, routeId, threadId, policySha256 };
 }
 
 async function recordDeliveryResults(
@@ -518,8 +518,8 @@ async function recordDeliveryResults(
   const providerMessageIds = results.flatMap((result) =>
     result.providerMessageId ? [result.providerMessageId] : []
   );
-  await env.DB.prepare(
-    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5",
+  const projected = await env.DB.prepare(
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5 AND policy_sha256 = ?6 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?6)",
   )
     .bind(
       status,
@@ -527,8 +527,12 @@ async function recordDeliveryResults(
       JSON.stringify(providerMessageIds),
       status === "provider_accepted" ? null : status,
       inbound.routeId,
+      inbound.policySha256,
     )
     .run();
+  if (Number(projected.meta?.changes ?? 0) === 0) {
+    throw new Error("inbound provider result belongs to a superseded policy revision");
+  }
   await Promise.all(results.map(async (result, index) => {
     await recordAudit(
       env,
@@ -575,6 +579,7 @@ async function inboundDeliveryResultJob(
     relayId: inbound.relayId,
     threadId: inbound.threadId,
     routeId: inbound.routeId,
+    policySha256: inbound.policySha256,
     status,
     results: await Promise.all(results.map(async (result) => ({
       operatorRef: await sha256Hex(result.operator),
@@ -807,6 +812,7 @@ interface PersistedInbound {
   relayId: string;
   routeId: string;
   threadId: string;
+  policySha256: string;
 }
 
 interface PolicyBoundRoute {
