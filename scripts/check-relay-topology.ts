@@ -43,6 +43,7 @@ function checkRouter(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_router.script_name);
+  requireAssignment(config, path, "main", "../../workers/mail-router/src/index.ts");
   requireWorkersDevOff(config, path);
   requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
   requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
@@ -69,6 +70,7 @@ function checkOutbound(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_outbound.script_name);
+  requireAssignment(config, path, "main", "../../workers/mail-outbound/src/index.ts");
   requireWorkersDevOff(config, path);
   requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
   requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
@@ -96,6 +98,7 @@ function checkRoutingHealth(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.routing_health.script_name);
+  requireAssignment(config, path, "main", "../../build/_worker.js");
   requireWorkersDevOff(config, path);
   requireBinding(config, path, "d1_databases", "DB");
   requireValue(config, path, "database_name", desired.storage.d1_database);

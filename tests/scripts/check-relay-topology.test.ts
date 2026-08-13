@@ -17,6 +17,43 @@ describe("relay deployment topology", () => {
     expect(result.stdout).toContain("relay topology ok");
   });
 
+  test("rejects role-swapped Worker entrypoints", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const cases: Array<[
+      "relay_router" | "relay_outbound" | "routing_health",
+      string,
+      string,
+      string,
+    ]> = [
+      ["relay_router", "mail-router", "../../workers/mail-outbound/src/index.ts", "main = ../../workers/mail-router/src/index.ts"],
+      ["relay_outbound", "mail-outbound", "../../workers/mail-router/src/index.ts", "main = ../../workers/mail-outbound/src/index.ts"],
+      ["routing_health", "routing-health", "../../workers/mail-api/src/index.ts", "main = ../../build/_worker.js"],
+    ];
+
+    for (const [role, directory, swappedMain, expected] of cases) {
+      const desired = structuredClone(original);
+      const configPath = `deploy/${directory}/wrangler.review-${process.pid}-${role}-entrypoint.toml`;
+      const desiredPath = `config/desired-state.review-${process.pid}-${role}-entrypoint.local.json`;
+      const config = readFileSync(resolve(root, desired.workers[role].config), "utf8")
+        .replace(/^main\s*=\s*"[^"]+"$/m, `main = "${swappedMain}"`);
+      try {
+        writeFileSync(resolve(root, configPath), config);
+        desired.workers[role].config = configPath;
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/check-relay-topology.ts", desiredPath], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, role).not.toBe(0);
+        expect(result.stdout, role).toBe("");
+        expect(result.stderr, role).toContain(expected);
+      } finally {
+        rmSync(resolve(root, configPath), { force: true });
+        rmSync(resolve(root, desiredPath), { force: true });
+      }
+    }
+  });
+
   test("rejects policy and spool bucket targets swapped across canonical bindings", () => {
     const desired = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
     const configPath = `deploy/mail-router/wrangler.review-${process.pid}-topology-swap.toml`;

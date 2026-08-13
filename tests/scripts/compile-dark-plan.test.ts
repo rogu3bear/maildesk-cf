@@ -81,6 +81,24 @@ describe("dark deployment blueprint", () => {
     const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
     const cases: Array<[string, "relay_router" | "relay_outbound" | "routing_health", (config: string) => string, string]> = [
       [
+        "router role entrypoint",
+        "relay_router",
+        (config) => config.replace('../../workers/mail-router/src/index.ts', '../../workers/mail-outbound/src/index.ts'),
+        "main must equal desired value ../../workers/mail-router/src/index.ts",
+      ],
+      [
+        "outbound role entrypoint",
+        "relay_outbound",
+        (config) => config.replace('../../workers/mail-outbound/src/index.ts', '../../workers/mail-router/src/index.ts'),
+        "main must equal desired value ../../workers/mail-outbound/src/index.ts",
+      ],
+      [
+        "health role entrypoint",
+        "routing_health",
+        (config) => config.replace('../../build/_worker.js', '../../workers/mail-api/src/index.ts'),
+        "main must equal desired value ../../build/_worker.js",
+      ],
+      [
         "router workers dev",
         "relay_router",
         (config) => config.replace("workers_dev = false", "workers_dev = true"),

@@ -179,6 +179,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireWorkersDevOff(router, routerPath);
   requireExactEmailBinding(router, routerPath);
   assertConfigName(router, routerPath, desired.workers.relay_router.script_name);
+  requireConfigValue(router, routerPath, "main", "../../workers/mail-router/src/index.ts");
   const routerVars = record(router.vars, `${routerPath} [vars]`);
   if ("MAILDESK_RELAY_PROCESSING_MODE" in routerVars) {
     throw new Error(`${routerPath} must not combine the legacy relay processing switch with split activation switches`);
@@ -205,6 +206,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireWorkersDevOff(outbound, outboundPath);
   requireExactEmailBinding(outbound, outboundPath);
   assertConfigName(outbound, outboundPath, desired.workers.relay_outbound.script_name);
+  requireConfigValue(outbound, outboundPath, "main", "../../workers/mail-outbound/src/index.ts");
   assertStorageBindings(outbound, outboundPath, desired);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "queue", desired.storage.queue);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "dead_letter_queue", desired.storage.dead_letter_queue);
@@ -219,6 +221,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   ]);
   requireWorkersDevOff(health, healthPath);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
+  requireConfigValue(health, healthPath, "main", "../../build/_worker.js");
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   requireExactArrayLength(health, healthPath, "d1_databases", 1);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
