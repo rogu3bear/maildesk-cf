@@ -71,6 +71,63 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
   });
 
+  test("redelivery resumes terminal D1 projection and spool cleanup without sending twice", async () => {
+    const db = new D1Recorder(undefined, undefined, "UPDATE relay_attempts SET status = ?1");
+    const email = new SendEmailRecorder("provider-terminal-resume");
+    const deleted: string[] = [];
+    const job: MailJob = {
+      kind: "outbound_reply_requested",
+      messageId: "message-terminal-resume",
+      threadId: "thread-terminal-resume",
+      operator: "operator@tenant.example.com",
+      envelopeTo: "security@tenant.example.com",
+      fromIdentity: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      replyTo: "security@tenant.example.com",
+      subject: "Terminal resume proof",
+      text: "Authorized reply body",
+      requestedIdentity: "security@tenant.example.com",
+      relayAttemptId: "relay-attempt:terminal-resume",
+      relaySpoolKey: "relay-spool/terminal-resume.eml",
+      queuedAt: "2026-08-12T00:00:00.000Z",
+    };
+    const env = {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: {
+        delete: async (key: string) => { deleted.push(key); },
+      },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env;
+
+    const first = new MessageBatchRecorder([job]);
+    await expect(
+      mailApiWorker.queue(first as unknown as MessageBatch<MailJob>, env),
+    ).rejects.toThrow("forced D1 failure");
+
+    expect(email.messages).toHaveLength(1);
+    expect(first.ackCount).toBe(0);
+    expect(db.hasAuditAction("outbound_reply_delivered")).toBe(true);
+    expect(deleted).toEqual([]);
+
+    const redelivery = new MessageBatchRecorder([job], 2);
+    await mailApiWorker.queue(redelivery as unknown as MessageBatch<MailJob>, env);
+
+    expect(email.messages).toHaveLength(1);
+    expect(redelivery.ackCount).toBe(1);
+    expect(deleted).toEqual(["relay-spool/terminal-resume.eml"]);
+    expect(db.statements.some((entry) =>
+      entry.sql.includes("UPDATE relay_attempts SET status = ?1") &&
+      entry.binds[0] === "provider_accepted"
+    )).toBe(true);
+    expect(db.statements.some((entry) =>
+      entry.sql.includes("UPDATE relay_attempts SET raw_r2_key = NULL")
+    )).toBe(true);
+  });
+
   test("inbox relay rejects opaque outbound attachments before provider send", async () => {
     const policyJson = inboxRelayPolicyJson();
     const db = new D1Recorder({
@@ -905,10 +962,12 @@ class MessageBatchRecorder {
 
 class D1Recorder {
   readonly statements: RecordedStatement[] = [];
+  private failedOnce = false;
 
   constructor(
     private readonly relayRow?: Record<string, unknown>,
     private readonly activePolicyJson?: string,
+    private readonly failOnceSql?: string,
   ) {}
 
   seedAudit(dedupeKey: string, action: string, detail: unknown = {}): void {
@@ -927,6 +986,10 @@ class D1Recorder {
         return prepared;
       },
       async run() {
+        if (!recorder.failedOnce && recorder.failOnceSql && sql.includes(recorder.failOnceSql)) {
+          recorder.failedOnce = true;
+          throw new Error(`forced D1 failure for ${recorder.failOnceSql}`);
+        }
         const dedupeKey = record.binds[1];
         if (
           dedupeKey &&
@@ -957,14 +1020,14 @@ class D1Recorder {
         if (record.sql.includes("FROM reply_relays rr")) {
           return thisRelayRow;
         }
-        if (record.sql.includes("SELECT action FROM audit_events")) {
+        if (record.sql.includes("SELECT action, detail_json FROM audit_events")) {
           const dedupeKey = record.binds[0];
           const existing = statements.find(
             (entry) =>
               entry.sql.includes("INSERT OR IGNORE INTO audit_events") &&
               entry.binds[1] === dedupeKey,
           );
-          return existing ? { action: existing.binds[4] } : null;
+          return existing ? { action: existing.binds[4], detail_json: existing.binds[5] } : null;
         }
         if (record.sql.includes("SELECT detail_json FROM audit_events")) {
           const dedupeKey = record.binds[0];
@@ -978,6 +1041,7 @@ class D1Recorder {
         return { ok: 1 };
       },
     };
+    const recorder = this;
     const thisRelayRow = this.relayRow ?? null;
     const activePolicyJson = this.activePolicyJson;
     return prepared as unknown as D1PreparedStatement;

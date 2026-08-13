@@ -327,11 +327,17 @@ async function recordQueueEvent(
   // expose an equivalent key, so an interrupted transition is surfaced for
   // deliberate recovery instead of risking a duplicate send.
   if (!claimed) {
-    const terminalAction = await auditActionForDedupeKey(
+    const terminal = await terminalSendRecordForDedupeKey(
       env,
       `${job.messageId}:outbound_reply_result`,
     );
-    if (terminalAction) return ACK;
+    if (terminal) {
+      // The provider transition is already terminal. Resume only the
+      // idempotent D1 projections and spool cleanup that may have been
+      // interrupted after the terminal audit was committed.
+      await finalizeTerminalSendState(job, env, terminal.action, terminal.result);
+      return ACK;
+    }
 
     const currentMode = configuredOutboundMode(env);
     const claimedMode = await auditOutboundModeForClaim(
@@ -443,6 +449,15 @@ async function recordTerminalSendEvent(
     `${job.messageId}:outbound_reply_result`,
     job.threadId,
   );
+  await finalizeTerminalSendState(job, env, action, result);
+}
+
+async function finalizeTerminalSendState(
+  job: OutboundReplyRequestedJob,
+  env: Env,
+  action: TerminalSendAction,
+  result: OutboundSendResult,
+): Promise<void> {
   if (job.relayAttemptId) {
     const status = action === "outbound_reply_delivered"
       ? "provider_accepted"
@@ -476,13 +491,53 @@ async function recordTerminalSendEvent(
   }
 }
 
-async function auditActionForDedupeKey(env: Env, dedupeKey: string): Promise<string | null> {
+async function terminalSendRecordForDedupeKey(
+  env: Env,
+  dedupeKey: string,
+): Promise<{ action: TerminalSendAction; result: OutboundSendResult } | null> {
   const row = await env.DB.prepare(
-    "SELECT action FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+    "SELECT action, detail_json FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
   )
     .bind(dedupeKey)
-    .first<{ action: string }>();
-  return row?.action ?? null;
+    .first<{ action: string; detail_json: string }>();
+  if (!row) return null;
+  if (!isTerminalSendAction(row.action)) {
+    throw new Error("outbound terminal audit action is invalid");
+  }
+  let detail: unknown;
+  try {
+    detail = JSON.parse(row.detail_json);
+  } catch {
+    throw new Error("outbound terminal audit detail is invalid");
+  }
+  if (!detail || typeof detail !== "object" || !("result" in detail)) {
+    throw new Error("outbound terminal audit result is missing");
+  }
+  const result = (detail as { result: unknown }).result;
+  if (!isStoredOutboundSendResult(result)) {
+    throw new Error("outbound terminal audit result is invalid");
+  }
+  return { action: row.action, result };
+}
+
+function isTerminalSendAction(value: string): value is TerminalSendAction {
+  return value === "outbound_reply_delivered" ||
+    value === "outbound_reply_failed" ||
+    value === "outbound_reply_recovery_required";
+}
+
+function isStoredOutboundSendResult(value: unknown): value is OutboundSendResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.ok === "boolean" &&
+    typeof result.provider === "string" &&
+    (result.providerMessageId === undefined || typeof result.providerMessageId === "string") &&
+    (result.error === undefined || typeof result.error === "string") &&
+    (result.status === undefined || typeof result.status === "number") &&
+    (result.retryable === undefined || typeof result.retryable === "boolean") &&
+    (result.ambiguous === undefined || typeof result.ambiguous === "boolean")
+  );
 }
 
 async function auditOutboundModeForClaim(env: Env, dedupeKey: string): Promise<string | null> {
@@ -929,6 +984,11 @@ interface OutboundSendResult {
   ambiguous?: boolean;
   response?: unknown;
 }
+
+type TerminalSendAction =
+  | "outbound_reply_delivered"
+  | "outbound_reply_failed"
+  | "outbound_reply_recovery_required";
 
 type QueueDisposition = { kind: "ack" } | { kind: "retry"; delaySeconds: number };
 type OutboundMode = "disabled" | "cloudflare_email_service" | "resend" | "invalid";
