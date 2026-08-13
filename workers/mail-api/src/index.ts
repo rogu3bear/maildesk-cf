@@ -410,7 +410,11 @@ async function recordQueueEvent(
   }
 
   await recordTerminalSendEvent(job, env, "outbound_reply_failed", sendResult);
-  return ACK;
+  // With the production consumer's max_retries = 5, requesting retry on the
+  // sixth total attempt transfers this already-recorded terminal failure to
+  // the configured DLQ. Definitive non-retryable failures are complete and can
+  // be acknowledged without entering recovery triage.
+  return sendResult.retryable ? { kind: "retry", delaySeconds: 0 } : ACK;
 }
 
 async function recordTerminalSendEvent(

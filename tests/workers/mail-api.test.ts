@@ -290,7 +290,7 @@ describe("mail API outbound sender modes", () => {
     expect(auditJson.length).toBeLessThan(2_000);
   });
 
-  test("an exhausted Resend failure records a terminal result instead of retrying forever", async () => {
+  test("an exhausted Resend failure records a terminal result and enters the configured DLQ", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder(
       [
@@ -325,8 +325,9 @@ describe("mail API outbound sender modes", () => {
       globalThis.fetch = originalFetch;
     }
 
-    expect(batch.retryCount).toBe(0);
-    expect(batch.ackCount).toBe(1);
+    expect(batch.retryCount).toBe(1);
+    expect(batch.retryDelaySeconds).toBe(0);
+    expect(batch.ackCount).toBe(0);
     expect(db.hasAuditAction("outbound_reply_failed")).toBe(true);
   });
 
