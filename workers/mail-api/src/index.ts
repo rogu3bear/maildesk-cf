@@ -602,7 +602,7 @@ async function recordInboundCleanupComplete(
   job: InboundDeliveryResultJob,
   env: Env,
 ): Promise<void> {
-  await recordAuditEvent(
+  const inserted = await recordAuditEvent(
     env,
     "system",
     "operator_delivery_cleanup_complete",
@@ -610,6 +610,9 @@ async function recordInboundCleanupComplete(
     `${job.deliveryId}:operator_delivery_cleanup_complete`,
     job.threadId,
   );
+  if (!inserted && !(await inboundCleanupAlreadyComplete(job, env))) {
+    throw new Error("inbound result cleanup receipt conflicts with durable state");
+  }
 }
 
 async function inboundCleanupAlreadyComplete(
@@ -633,6 +636,16 @@ async function inboundCleanupAlreadyComplete(
 }
 
 async function inboundResultSha256(job: InboundDeliveryResultJob): Promise<string> {
+  const results = job.results.map((result) => ({
+    operatorRef: result.operatorRef,
+    deliveryPayloadR2Key: result.deliveryPayloadR2Key,
+    ok: result.ok,
+    providerMessageId: result.providerMessageId ?? null,
+    errorCode: result.errorCode ?? null,
+  })).sort((left, right) =>
+    left.operatorRef.localeCompare(right.operatorRef) ||
+    left.deliveryPayloadR2Key.localeCompare(right.deliveryPayloadR2Key)
+  );
   return sha256Hex(JSON.stringify({
     deliveryId: job.deliveryId,
     relayId: job.relayId,
@@ -640,7 +653,7 @@ async function inboundResultSha256(job: InboundDeliveryResultJob): Promise<strin
     routeId: job.routeId,
     policySha256: job.policySha256,
     status: job.status,
-    results: job.results,
+    results,
     relaySpoolKey: job.relaySpoolKey,
     receivedAt: job.receivedAt,
   }));

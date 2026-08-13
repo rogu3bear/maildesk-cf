@@ -135,11 +135,59 @@ describe("mail API outbound sender modes", () => {
       "relay-spool/delivery-cleanup-retry.eml",
     ]);
 
-    const terminalRedelivery = new MessageBatchRecorder([job], 3);
+    const terminalRedelivery = new MessageBatchRecorder([{
+      ...job,
+      results: [...job.results].reverse(),
+    }], 3);
     await mailApiWorker.queue(terminalRedelivery as unknown as MessageBatch<MailJob>, env);
     expect(terminalRedelivery.ackCount).toBe(1);
     expect(email.messages).toHaveLength(0);
     expect(deleteAttempts).toHaveLength(4);
+  });
+
+  test("a conflicting terminal cleanup receipt cannot retire D1 cleanup authority", async () => {
+    const db = new D1Recorder();
+    db.seedAudit(
+      "delivery-cleanup-conflict:operator_delivery_cleanup_complete",
+      "operator_delivery_cleanup_complete",
+      { deliveryId: "delivery-cleanup-conflict", resultSha256: "0".repeat(64) },
+    );
+    const deleted: string[] = [];
+    const job: MailJob = {
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-cleanup-conflict",
+      relayId: "relay-cleanup-conflict",
+      threadId: "thread-cleanup-conflict",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "provider_accepted",
+      results: [{
+        operatorRef: "operator-ref-a",
+        deliveryPayloadR2Key: "relay-spool/delivery-cleanup-conflict.a.json",
+        ok: true,
+        providerMessageId: "provider-a",
+      }],
+      relaySpoolKey: "relay-spool/delivery-cleanup-conflict.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    };
+    const batch = new MessageBatchRecorder([job]);
+
+    await expect(mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      MAILDESK_OUTBOUND_MODE: "disabled",
+    } as unknown as Env)).rejects.toThrow("cleanup receipt conflicts with durable state");
+
+    expect(batch.ackCount).toBe(0);
+    expect(deleted).toEqual([
+      "relay-spool/delivery-cleanup-conflict.a.json",
+      "relay-spool/delivery-cleanup-conflict.eml",
+    ]);
+    expect(db.statements.some((entry) =>
+      entry.sql.includes("UPDATE inbound_deliveries SET raw_r2_key = NULL")
+    )).toBe(false);
   });
 
   test("a counterfeit inbound result cannot project health or delete Queue-selected spool keys", async () => {
