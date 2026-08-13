@@ -340,6 +340,27 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
   expect(encodedMessageUpperBound(delivery)).toBeGreaterThan(delivery.text.length);
 });
 
+test("encoded-size ceiling covers transfer encoding and base64 line wrapping", () => {
+  const unicodeText = "é=".repeat(1_000);
+  const attachment = new Uint8Array(7_600).buffer;
+  const rawTextBytes = new TextEncoder().encode(unicodeText).byteLength;
+  const base64Bytes = Math.ceil(attachment.byteLength / 3) * 4;
+  const base64LineBreaks = Math.ceil(base64Bytes / 76) * 2;
+  const bound = encodedMessageUpperBound({
+    subject: unicodeText,
+    text: unicodeText,
+    attachments: [{
+      disposition: "inline",
+      filename: "résumé=.txt",
+      type: "text/plain",
+      contentId: "operator-image@example.invalid",
+      content: attachment,
+    }],
+  });
+
+  expect(bound).toBeGreaterThanOrEqual(16 * 1024 + rawTextBytes * 8 + base64Bytes + base64LineBreaks);
+});
+
 function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: RouterPolicy = policy) {
   const policyJson = JSON.stringify(policyValue);
   const policySha256 = createHash("sha256").update(policyJson).digest("hex");

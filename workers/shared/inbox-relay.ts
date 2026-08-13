@@ -131,16 +131,26 @@ export function encodedMessageUpperBound(input: {
 }): number {
   const encoder = new TextEncoder();
   let size = MIME_OVERHEAD_BYTES;
-  size += encoder.encode(input.subject).byteLength;
-  size += encoder.encode(input.text ?? "").byteLength;
-  size += encoder.encode(input.html ?? "").byteLength;
+  // Quoted-printable can expand an arbitrary UTF-8 byte to three bytes and
+  // also inserts soft line breaks. Four times the source byte length is a
+  // deliberately conservative ceiling for every provider-selected text/header
+  // transfer encoding, including CRLF normalization.
+  const encodedTextCeiling = (value: string) => encoder.encode(value).byteLength * 4;
+  size += encodedTextCeiling(input.subject);
+  size += encodedTextCeiling(input.text ?? "");
+  size += encodedTextCeiling(input.html ?? "");
   for (const [name, value] of Object.entries(input.headers ?? {})) {
-    size += encoder.encode(name).byteLength + encoder.encode(value).byteLength + 4;
+    size += encoder.encode(name).byteLength + encodedTextCeiling(value) + 4;
   }
   for (const attachment of input.attachments ?? []) {
     const bytes = attachment.content.byteLength;
-    size += Math.ceil(bytes / 3) * 4;
-    size += encoder.encode(attachment.filename).byteLength + encoder.encode(attachment.type).byteLength + 1024;
+    const base64Bytes = Math.ceil(bytes / 3) * 4;
+    const base64LineBreaks = Math.ceil(base64Bytes / 76) * 2;
+    size += base64Bytes + base64LineBreaks;
+    size += encodedTextCeiling(attachment.filename);
+    size += encodedTextCeiling(attachment.type);
+    size += encodedTextCeiling(attachment.contentId ?? "");
+    size += 1024;
   }
   return size;
 }
