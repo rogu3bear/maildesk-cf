@@ -44,6 +44,12 @@ if (!shim.includes("isAccessProtectedPath(url.pathname, this.env.MAILDESK_UI_ACC
   throw new Error("UI Worker shim does not enforce the selected whole-host Access scope");
 }
 
+const healthConfig = readFileSync(join(root, "deploy/routing-health/wrangler.toml"), "utf8");
+const assetsBlock = /^\[assets\]$[\s\S]*?(?=^\[|(?![\s\S]))/m.exec(healthConfig)?.[0] ?? "";
+if (!/^run_worker_first\s*=\s*true\s*$/m.test(assetsBlock)) {
+  throw new Error("routing-health assets must invoke the Access-verifying Worker before every response");
+}
+
 const accessAdapter = readFileSync(join(root, "workers/ui/access.ts"), "utf8");
 if (!accessAdapter.includes("jwtVerify(token, jwks") || !accessAdapter.includes('algorithms: ["RS256"]')) {
   throw new Error("UI Worker adapter does not cryptographically validate Cloudflare Access JWTs");

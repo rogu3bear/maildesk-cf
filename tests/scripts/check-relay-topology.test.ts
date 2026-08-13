@@ -99,4 +99,31 @@ describe("relay deployment topology", () => {
       rmSync(resolve(root, desiredPath), { force: true });
     }
   });
+
+  test("rejects static assets that can bypass the Access-verifying Worker", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    for (const [name, mutate] of [
+      ["missing", (config: string) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, "")],
+      ["false", (config: string) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, "run_worker_first = false")],
+    ] as const) {
+      const desired = structuredClone(original);
+      const configPath = `deploy/routing-health/wrangler.review-${process.pid}-assets-${name}.toml`;
+      const desiredPath = `config/desired-state.review-${process.pid}-assets-${name}.local.json`;
+      try {
+        writeFileSync(resolve(root, configPath), mutate(readFileSync(resolve(root, desired.workers.routing_health.config), "utf8")));
+        desired.workers.routing_health.config = configPath;
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/check-relay-topology.ts", desiredPath], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain("[assets] must set run_worker_first = true");
+      } finally {
+        rmSync(resolve(root, configPath), { force: true });
+        rmSync(resolve(root, desiredPath), { force: true });
+      }
+    }
+  });
 });

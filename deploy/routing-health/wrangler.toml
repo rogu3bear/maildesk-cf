@@ -10,6 +10,7 @@ command = "bash scripts/build-ui-edge.sh"
 [assets]
 directory = "../../target/site"
 binding = "ASSETS"
+run_worker_first = true
 
 [vars]
 MAILDESK_UI_AUTH_MODE = "access"

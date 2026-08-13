@@ -103,6 +103,7 @@ function checkRoutingHealth(desired: DesiredState): void {
   requireBinding(config, path, "d1_databases", "DB");
   requireValue(config, path, "database_name", desired.storage.d1_database);
   if (!/^\[assets\]$/m.test(config)) failures.push(`${path} must bind static assets`);
+  requireSectionBoolean(config, path, "assets", "run_worker_first", true);
   forbid(config, path, /\[\[r2_buckets\]\]/, "R2 binding");
   forbid(config, path, /\[\[queues\./, "Queue binding");
   forbid(config, path, /^send_email\s*=/m, "Email binding");
@@ -135,6 +136,18 @@ function requireWorkersDevOff(config: string, path: string): void {
   if (!/^workers_dev\s*=\s*false\s*$/m.test(config)) {
     failures.push(`${path} must set workers_dev = false`);
   }
+}
+
+function requireSectionBoolean(
+  config: string,
+  path: string,
+  section: string,
+  key: string,
+  value: boolean,
+): void {
+  const block = new RegExp(`^\\[${escapeRegex(section)}\\]$[\\s\\S]*?(?=^\\[|(?![\\s\\S]))`, "m").exec(config)?.[0] ?? "";
+  const pattern = new RegExp(`^${escapeRegex(key)}\\s*=\\s*${value}\\s*$`, "m");
+  if (!pattern.test(block)) failures.push(`${path} [${section}] must set ${key} = ${value}`);
 }
 
 function requireAssignment(config: string, path: string, key: string, value: string): void {

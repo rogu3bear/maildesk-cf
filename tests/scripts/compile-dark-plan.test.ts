@@ -140,6 +140,18 @@ describe("dark deployment blueprint", () => {
         (config) => config.replace('MAILDESK_UI_AUTH_MODE = "access"', 'MAILDESK_UI_AUTH_MODE = "preview"'),
         "must require Cloudflare Access for all_routes",
       ],
+      [
+        "missing asset worker first",
+        "routing_health",
+        (config) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, ""),
+        "[assets] must set run_worker_first = true",
+      ],
+      [
+        "false asset worker first",
+        "routing_health",
+        (config) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, "run_worker_first = false"),
+        "[assets] must set run_worker_first = true",
+      ],
     ];
     const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-config-"));
 

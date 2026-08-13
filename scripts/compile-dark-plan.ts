@@ -222,6 +222,10 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireWorkersDevOff(health, healthPath);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
   requireConfigValue(health, healthPath, "main", "../../build/_worker.js");
+  const healthAssets = record(health.assets, `${healthPath} [assets]`);
+  if (healthAssets.run_worker_first !== true) {
+    throw new Error(`${healthPath} [assets] must set run_worker_first = true so Access runs before every asset response`);
+  }
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   requireExactArrayLength(health, healthPath, "d1_databases", 1);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
