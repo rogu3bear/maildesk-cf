@@ -53,18 +53,23 @@ describe("cfctl provisioning contract check", () => {
     expect(receipt.cfctl_commands).toContain(
       "cfctl maildesk-cf verify --file config/desired-state.example.json",
     );
-    expect(receipt.resources.workers).toEqual(["maildesk-cf", "maildesk-cf-router", "maildesk-cf-ui"]);
+    expect(receipt.resources.workers).toEqual([
+      "maildesk-cf-relay-outbound",
+      "maildesk-cf-router",
+      "maildesk-cf-routing-health",
+    ]);
     expect(receipt.resources.worker_configs).toEqual([
+      "deploy/mail-outbound/wrangler.toml",
       "deploy/mail-router/wrangler.toml",
-      "deploy/ui/wrangler.toml",
-      "wrangler.toml",
+      "deploy/routing-health/wrangler.toml",
     ]);
     expect(receipt.resources.storage).toEqual([
-      "d1:maildesk-cf-db",
+      "d1:maildesk-cf-relay-db",
       "d1-preview:maildesk-cf-preview-db",
-      "r2:maildesk-cf-raw-mail",
-      "r2-preview:maildesk-cf-raw-mail-preview",
-      "queue:maildesk-cf-jobs",
+      "r2-policy:maildesk-cf-policy",
+      "r2-spool:maildesk-cf-relay-spool",
+      "queue:maildesk-cf-relay-jobs",
+      "queue-dlq:maildesk-cf-relay-dlq",
     ]);
     expect(receipt.resources.email_routing_aliases).toContain("founders@example.com");
     expect(receipt.outside_checkout_blockers).toEqual([
@@ -81,8 +86,8 @@ describe("cfctl provisioning contract check", () => {
     const desiredPath = join(dir, "desired-state.json");
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
-    ) as { workers: { mail_router: { config: string } } };
-    desired.workers.mail_router.config = "wrangler.mail-router.toml";
+    ) as { workers: { relay_router: { config: string } } };
+    desired.workers.relay_router.config = "wrangler.mail-router.toml";
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -100,7 +105,7 @@ describe("cfctl provisioning contract check", () => {
     rmSync(dir, { force: true, recursive: true });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("workers.mail_router.config must use the canonical wrangler.toml");
+    expect(result.stderr).toContain("workers.relay_router.config must use the canonical wrangler.toml");
   });
 
   test("rejects nested Wrangler build commands that assume the config directory is cwd", () => {
@@ -175,8 +180,8 @@ describe("cfctl provisioning contract check", () => {
     const desiredPath = join(dir, "desired-state.json");
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
-    ) as { workers: { mail_router: { config: string } } };
-    desired.workers.mail_router.config = "../outside/wrangler.toml";
+    ) as { workers: { relay_router: { config: string } } };
+    desired.workers.relay_router.config = "../outside/wrangler.toml";
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -207,8 +212,8 @@ describe("cfctl provisioning contract check", () => {
     const desiredPath = join(desiredDir, "desired-state.json");
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
-    ) as { workers: { mail_router: { config: string } } };
-    desired.workers.mail_router.config = relative(root, configPath);
+    ) as { workers: { relay_router: { config: string } } };
+    desired.workers.relay_router.config = relative(root, configPath);
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -235,8 +240,8 @@ describe("cfctl provisioning contract check", () => {
     const desiredPath = join(desiredDir, "desired-state.json");
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
-    ) as { workers: { mail_router: { config: string } } };
-    desired.workers.mail_router.config = relative(root, configPath);
+    ) as { workers: { relay_router: { config: string } } };
+    desired.workers.relay_router.config = relative(root, configPath);
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -277,21 +282,24 @@ describe("cfctl provisioning contract check", () => {
             },
           ],
           workers: {
-            mail_api: { script_name: "maildesk-cf", config: "wrangler.toml" },
-            mail_router: {
+            relay_router: {
               script_name: "maildesk-cf-router",
               config: "deploy/mail-router/wrangler.toml",
             },
-            ui: {
-              script_name: "maildesk-cf-ui",
-              config: "deploy/ui/wrangler.toml",
+            relay_outbound: {
+              script_name: "maildesk-cf-relay-outbound",
+              config: "deploy/mail-outbound/wrangler.toml",
+            },
+            routing_health: {
+              script_name: "maildesk-cf-routing-health",
+              config: "deploy/routing-health/wrangler.toml",
             },
           },
           storage: {
             d1_database: "maildesk-cf-db",
             d1_preview_database: "maildesk-cf-preview-db",
-            r2_raw_mail_bucket: "maildesk-cf-raw-mail",
-            r2_raw_mail_preview_bucket: "maildesk-cf-raw-mail-preview",
+            r2_policy_bucket: "maildesk-cf-policy",
+            r2_spool_bucket: "maildesk-cf-relay-spool",
           },
           sender: {
             mode: "disabled",

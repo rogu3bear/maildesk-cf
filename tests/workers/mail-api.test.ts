@@ -44,6 +44,10 @@ describe("mail API outbound sender modes", () => {
         get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }),
         delete: async (key: string) => { deleted.push(key); },
       },
+      RELAY_SPOOL: {
+        get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }),
+        delete: async (key: string) => { deleted.push(key); },
+      },
       POLICY_STORE: policyStore(policyJson),
       MAIL_JOBS: {},
       EMAIL: email,
@@ -103,6 +107,7 @@ describe("mail API outbound sender modes", () => {
     await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
       DB: db,
       RAW_MAIL: { get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }) },
+      RELAY_SPOOL: { get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }) },
       POLICY_STORE: policyStore(policyJson),
       MAIL_JOBS: {},
       EMAIL: email,

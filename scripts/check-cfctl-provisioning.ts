@@ -17,16 +17,17 @@ interface DesiredState {
   };
   domains: DesiredDomain[];
   workers: {
-    mail_api: DesiredWorker;
-    mail_router: DesiredWorker;
-    ui: DesiredWorker;
+    relay_router: DesiredWorker;
+    relay_outbound: DesiredWorker;
+    routing_health: DesiredWorker;
   };
   storage: {
     d1_database: string;
     d1_preview_database: string;
-    r2_raw_mail_bucket: string;
-    r2_raw_mail_preview_bucket: string;
+    r2_policy_bucket: string;
+    r2_spool_bucket: string;
     queue: string;
+    dead_letter_queue: string;
   };
   operator_delivery: OperatorDeliveryConfig;
   sender: {
@@ -189,18 +190,19 @@ function validateDesiredState(value: DesiredState) {
 
   const workers = requireObject(rootObject, "workers");
   if (workers) {
-    validateWorker(requireObject(workers, "workers.mail_api"), "workers.mail_api");
-    validateWorker(requireObject(workers, "workers.mail_router"), "workers.mail_router");
-    validateWorker(requireObject(workers, "workers.ui"), "workers.ui");
+    validateWorker(requireObject(workers, "workers.relay_router"), "workers.relay_router");
+    validateWorker(requireObject(workers, "workers.relay_outbound"), "workers.relay_outbound");
+    validateWorker(requireObject(workers, "workers.routing_health"), "workers.routing_health");
   }
 
   const storage = requireObject(rootObject, "storage");
   if (storage) {
     requireString(storage, "storage.d1_database");
     requireString(storage, "storage.d1_preview_database");
-    requireString(storage, "storage.r2_raw_mail_bucket");
-    requireString(storage, "storage.r2_raw_mail_preview_bucket");
+    requireString(storage, "storage.r2_policy_bucket");
+    requireString(storage, "storage.r2_spool_bucket");
     requireString(storage, "storage.queue");
+    requireString(storage, "storage.dead_letter_queue");
   }
 
   const operatorDelivery = requireObject(rootObject, "operator_delivery");
@@ -326,21 +328,22 @@ function resourceSummary(desired: DesiredState) {
   return {
     domains: desired.domains.map((domain) => domain.name).sort(),
     workers: [
-      desired.workers.mail_api.script_name,
-      desired.workers.mail_router.script_name,
-      desired.workers.ui.script_name,
+      desired.workers.relay_router.script_name,
+      desired.workers.relay_outbound.script_name,
+      desired.workers.routing_health.script_name,
     ].sort(),
     worker_configs: [
-      desired.workers.mail_api.config,
-      desired.workers.mail_router.config,
-      desired.workers.ui.config,
+      desired.workers.relay_router.config,
+      desired.workers.relay_outbound.config,
+      desired.workers.routing_health.config,
     ].sort(),
     storage: [
       `d1:${desired.storage.d1_database}`,
       `d1-preview:${desired.storage.d1_preview_database}`,
-      `r2:${desired.storage.r2_raw_mail_bucket}`,
-      `r2-preview:${desired.storage.r2_raw_mail_preview_bucket}`,
+      `r2-policy:${desired.storage.r2_policy_bucket}`,
+      `r2-spool:${desired.storage.r2_spool_bucket}`,
       `queue:${desired.storage.queue}`,
+      `queue-dlq:${desired.storage.dead_letter_queue}`,
     ],
     operator_delivery: desired.operator_delivery,
     email_routing_aliases: emailRoutingAliases(desired),

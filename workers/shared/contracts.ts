@@ -2,6 +2,7 @@ export interface MaildeskEnv {
   DB: D1Database;
   RAW_MAIL: R2Bucket;
   POLICY_STORE?: R2Bucket;
+  RELAY_SPOOL?: R2Bucket;
   MAIL_JOBS: Queue<MailJob>;
   EMAIL?: SendEmail;
   RESEND_API_KEY?: string;
@@ -264,6 +265,16 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     detail: delivery.mode,
   });
   if (delivery.mode === "inbox_relay") {
+    checks.push({
+      name: "policy_store_binding",
+      ok: Boolean(env.POLICY_STORE),
+      detail: "immutable_policy_revisions",
+    });
+    checks.push({
+      name: "relay_spool_binding",
+      ok: Boolean(env.RELAY_SPOOL),
+      detail: "temporary_mime_only",
+    });
     checks.push({
       name: "inbound_relay_mode",
       ok: delivery.inboundProcessingMode !== "invalid",

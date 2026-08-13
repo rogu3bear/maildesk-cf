@@ -28,11 +28,11 @@
     "workers": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mail_api", "mail_router", "ui"],
+      "required": ["relay_router", "relay_outbound", "routing_health"],
       "properties": {
-        "mail_api": { "$ref": "#/$defs/worker" },
-        "mail_router": { "$ref": "#/$defs/worker" },
-        "ui": { "$ref": "#/$defs/worker" }
+        "relay_router": { "$ref": "#/$defs/worker" },
+        "relay_outbound": { "$ref": "#/$defs/worker" },
+        "routing_health": { "$ref": "#/$defs/worker" }
       }
     },
     "storage": {
@@ -41,16 +41,18 @@
       "required": [
         "d1_database",
         "d1_preview_database",
-        "r2_raw_mail_bucket",
-        "r2_raw_mail_preview_bucket",
-        "queue"
+        "r2_policy_bucket",
+        "r2_spool_bucket",
+        "queue",
+        "dead_letter_queue"
       ],
       "properties": {
         "d1_database": { "$ref": "#/$defs/non_empty_string" },
         "d1_preview_database": { "$ref": "#/$defs/non_empty_string" },
-        "r2_raw_mail_bucket": { "$ref": "#/$defs/non_empty_string" },
-        "r2_raw_mail_preview_bucket": { "$ref": "#/$defs/non_empty_string" },
-        "queue": { "$ref": "#/$defs/non_empty_string" }
+        "r2_policy_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "r2_spool_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "queue": { "$ref": "#/$defs/non_empty_string" },
+        "dead_letter_queue": { "$ref": "#/$defs/non_empty_string" }
       }
     },
     "operator_delivery": {

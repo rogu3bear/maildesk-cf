@@ -52,6 +52,11 @@ export default {
   },
 
   async queue(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
+    await processQueueBatch(batch, env);
+  },
+};
+
+export async function processQueueBatch(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       const disposition = await recordQueueEvent(message.body, env, Math.max(1, message.attempts));
       if (disposition.kind === "retry") {
@@ -60,8 +65,7 @@ export default {
         message.ack();
       }
     }
-  },
-};
+}
 
 async function queueReply(request: Request, env: Env): Promise<Response> {
   if (!isAuthorizedRequest(request, env)) {
@@ -142,6 +146,10 @@ async function processInboxReply(
   env: Env,
   attempt: number,
 ): Promise<QueueDisposition> {
+  if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
+    await recoverRelayAttempt(job, env, "relay_storage_unavailable");
+    return ACK;
+  }
   const relay = await env.DB.prepare(
     "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE rr.id = ?1 AND ar.enabled = 1 LIMIT 1",
   )
@@ -171,7 +179,7 @@ async function processInboxReply(
     return ACK;
   }
 
-  const object = await env.RAW_MAIL.get(job.rawR2Key);
+  const object = await env.RELAY_SPOOL.get(job.rawR2Key);
   if (!object) {
     await recoverRelayAttempt(job, env, "relay_spool_missing");
     return ACK;
@@ -442,7 +450,8 @@ async function recordTerminalSendEvent(
       .bind(status, result.error ? status : null, job.relayAttemptId)
       .run();
     if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
-      await env.RAW_MAIL.delete(job.relaySpoolKey);
+      if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+      await env.RELAY_SPOOL.delete(job.relaySpoolKey);
       await env.DB.prepare(
         "UPDATE relay_attempts SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
       )

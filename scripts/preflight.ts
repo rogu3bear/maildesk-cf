@@ -56,6 +56,8 @@ checkCommand(process.env.CFCTL_BIN ?? "cfctl", ["--help"], mode === "production"
 checkFile("Cargo.toml");
 checkFile("wrangler.toml");
 checkFile("deploy/mail-router/wrangler.toml");
+checkFile("deploy/mail-outbound/wrangler.toml");
+checkFile("deploy/routing-health/wrangler.toml");
 checkFile("config/policy.example.json");
 checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
@@ -68,6 +70,7 @@ const desiredStatePath =
 const desiredState = checkJson<DesiredState>(desiredStatePath);
 checkDesiredSenderMode(desiredState);
 checkDesiredOperatorDelivery(desiredState);
+checkRelayTopology(desiredStatePath);
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -144,6 +147,16 @@ function checkPolicy(path: string) {
   failures.push(
     `policy validation failed for ${path}: ${result.stderr.trim() || result.stdout.trim()}`,
   );
+}
+
+function checkRelayTopology(desiredStatePath: string) {
+  const result = spawnSync("bun", ["run", "scripts/check-relay-topology.ts", desiredStatePath], {
+    cwd: root,
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (result.status === 0) return;
+  failures.push(`relay topology validation failed: ${result.stderr.trim() || result.stdout.trim()}`);
 }
 
 function checkJson<T>(path: string): T | null {
@@ -283,6 +296,7 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   checkRuntimeInteger("MAILDESK_SPOOL_RETENTION_DAYS", delivery.spool_retention_days);
   checkRuntimeInteger("MAILDESK_MAX_ENCODED_MESSAGE_BYTES", delivery.max_encoded_message_bytes);
   checkSendEmailBinding("deploy/mail-router/wrangler.toml");
+  checkSendEmailBinding("deploy/mail-outbound/wrangler.toml");
 }
 
 function checkRuntimeInteger(name: string, desired: unknown) {
@@ -391,7 +405,11 @@ function checkAccessValidationEnv() {
 }
 
 function checkWranglerPlaceholders() {
-  for (const file of ["wrangler.toml", "deploy/mail-router/wrangler.toml", "deploy/ui/wrangler.toml"]) {
+  for (const file of [
+    "deploy/mail-router/wrangler.toml",
+    "deploy/mail-outbound/wrangler.toml",
+    "deploy/routing-health/wrangler.toml",
+  ]) {
     const wrangler = readFileSync(resolve(root, file), "utf8");
     if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
       failures.push(`${file} still contains placeholder Cloudflare resource IDs`);

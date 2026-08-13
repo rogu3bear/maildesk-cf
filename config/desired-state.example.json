@@ -13,25 +13,26 @@
     }
   ],
   "workers": {
-    "mail_api": {
-      "script_name": "maildesk-cf",
-      "config": "wrangler.toml"
-    },
-    "mail_router": {
+    "relay_router": {
       "script_name": "maildesk-cf-router",
       "config": "deploy/mail-router/wrangler.toml"
     },
-    "ui": {
-      "script_name": "maildesk-cf-ui",
-      "config": "deploy/ui/wrangler.toml"
+    "relay_outbound": {
+      "script_name": "maildesk-cf-relay-outbound",
+      "config": "deploy/mail-outbound/wrangler.toml"
+    },
+    "routing_health": {
+      "script_name": "maildesk-cf-routing-health",
+      "config": "deploy/routing-health/wrangler.toml"
     }
   },
   "storage": {
-    "d1_database": "maildesk-cf-db",
+    "d1_database": "maildesk-cf-relay-db",
     "d1_preview_database": "maildesk-cf-preview-db",
-    "r2_raw_mail_bucket": "maildesk-cf-raw-mail",
-    "r2_raw_mail_preview_bucket": "maildesk-cf-raw-mail-preview",
-    "queue": "maildesk-cf-jobs"
+    "r2_policy_bucket": "maildesk-cf-policy",
+    "r2_spool_bucket": "maildesk-cf-relay-spool",
+    "queue": "maildesk-cf-relay-jobs",
+    "dead_letter_queue": "maildesk-cf-relay-dlq"
   },
   "operator_delivery": {
     "mode": "inbox_relay",

@@ -344,13 +344,15 @@ function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: R
   const policyJson = JSON.stringify(policyValue);
   const policySha256 = createHash("sha256").update(policyJson).digest("hex");
   db.activePolicy = { sha256: policySha256, json: policyJson };
+  const relaySpool = {
+    put: async () => undefined,
+    get: async () => null,
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
   return {
     DB: db as unknown as D1Database,
-    RAW_MAIL: {
-      put: async () => undefined,
-      get: async () => null,
-      delete: async () => undefined,
-    } as unknown as R2Bucket,
+    RAW_MAIL: relaySpool,
+    RELAY_SPOOL: relaySpool,
     POLICY_STORE: {
       get: async (key: string) => key === `config/policy/${policySha256}.json`
         ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer }

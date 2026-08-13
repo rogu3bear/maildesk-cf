@@ -83,6 +83,10 @@ async function acceptInboxRelay(
     message.setReject("maildesk inbox relay is not configured");
     return;
   }
+  if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
+    message.setReject("maildesk inbox relay storage is not configured");
+    return;
+  }
   if (route.routeKind === "sink") {
     await persistSinkRoute(message, route, env);
     return;
@@ -173,7 +177,7 @@ async function acceptInboxRelay(
   if (accepted !== results.length) {
     spoolKey = relaySpoolKey(deliveryId, receivedAt);
     try {
-      await env.RAW_MAIL.put(spoolKey, rawBytes, {
+      await env.RELAY_SPOOL.put(spoolKey, rawBytes, {
         httpMetadata: { contentType: MIME_CONTENT_TYPE },
         customMetadata: { retentionClass: "relay-spool", deliveryId },
       });
@@ -195,6 +199,10 @@ async function acceptOperatorReply(
   const config = operatorDeliveryConfig(env);
   if (config.mode !== "inbox_relay" || config.replyProcessingMode !== "enabled" || !config.replyDomain) {
     message.setReject("maildesk reply relay is disabled");
+    return;
+  }
+  if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
+    message.setReject("maildesk reply relay storage is not configured");
     return;
   }
   if (message.rawSize > config.maxEncodedMessageBytes) {
@@ -269,7 +277,7 @@ async function acceptOperatorReply(
   const receivedAt = new Date().toISOString();
   const rawR2Key = relaySpoolKey(attemptId, receivedAt);
   try {
-    await env.RAW_MAIL.put(rawR2Key, rawBytes, {
+    await env.RELAY_SPOOL.put(rawR2Key, rawBytes, {
       httpMetadata: { contentType: MIME_CONTENT_TYPE },
       customMetadata: { retentionClass: "relay-spool", relayId: relay.id },
     });
@@ -308,7 +316,7 @@ async function acceptOperatorReply(
       },
     );
   } catch {
-    await env.RAW_MAIL.delete(rawR2Key).catch(() => undefined);
+    await env.RELAY_SPOOL.delete(rawR2Key).catch(() => undefined);
     await env.DB.prepare("DELETE FROM relay_attempts WHERE id = ?1 AND status = 'receiving'")
       .bind(attemptId)
       .run()
