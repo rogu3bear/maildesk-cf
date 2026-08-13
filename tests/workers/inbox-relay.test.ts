@@ -380,6 +380,50 @@ test("an obsolete invocation cannot claim a replacement spool generation", async
   expect(db.inboundDelivery?.status).toBe("recovery_required");
 });
 
+test("policy supersession between pre-send read and recipient claim reroutes only to current operators", async () => {
+  const supersedingPolicy = {
+    default_reply_mode: "role_first",
+    domains: {
+      "example.com": {
+        role_aliases: {
+          security: {
+            operators: ["operator-a@example.com"],
+            reply_identity: "security@example.com",
+            allowed_reply_identities: ["security@example.com"],
+          },
+        },
+        personal_aliases: {},
+      },
+    },
+  } as RouterPolicy;
+  const db = new RelayD1(undefined, false, undefined, undefined, supersedingPolicy);
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); },
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<claim-policy-race@example.net>" });
+
+  const staleAttempt = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(staleAttempt, env, {} as ExecutionContext);
+
+  expect(staleAttempt.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(0);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "pending")).toBe(true);
+
+  const currentAttempt = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(currentAttempt, env, {} as ExecutionContext);
+
+  expect(currentAttempt.rejected).toBeUndefined();
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-a@example.com"]);
+  expect(spoolPuts).toHaveLength(2);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[1]);
+  expect(db.recipientDeliveries).toHaveLength(1);
+  expect(db.recipientDeliveries[0]?.status).toBe("provider_accepted");
+});
+
 test("a policy revision change during persistence rejects without rewriting route authority", async () => {
   const db = new RelayD1(undefined, true);
   const deliveries: EmailMessageBuilder[] = [];
@@ -701,6 +745,7 @@ class RelayD1 {
     private readonly rejectPolicyBoundPersistence = false,
     private readonly supersedingPolicy?: RouterPolicy,
     private readonly replacementSpoolKey?: string,
+    private claimSupersedingPolicy?: RouterPolicy,
   ) {}
 
   prepare(sql: string): D1PreparedStatement {
@@ -714,10 +759,16 @@ class RelayD1 {
           throw new Error(`forced D1 failure for ${this.failOnceSql}`);
         }
         if (sql.includes("UPDATE inbound_recipient_deliveries SET status = 'sending'")) {
+          if (this.claimSupersedingPolicy) {
+            const json = JSON.stringify(this.claimSupersedingPolicy);
+            this.activePolicy = { sha256: createHash("sha256").update(json).digest("hex"), json };
+            this.claimSupersedingPolicy = undefined;
+          }
           const recipient = this.recipientDeliveries.find((row) =>
             row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending" &&
             this.inboundDelivery?.policy_sha256 === call.bindings[2] &&
-            this.inboundDelivery.raw_r2_key === call.bindings[3]
+            this.inboundDelivery.raw_r2_key === call.bindings[3] &&
+            this.activePolicy?.sha256 === this.inboundDelivery.policy_sha256
           );
           if (!recipient) return { success: true, meta: { changes: 0 } };
           recipient.status = "sending";

@@ -32,6 +32,9 @@ const MIME_CONTENT_TYPE = "message/rfc822";
 export const DISCARD_SUPERSEDED_UNSENT_RELAY_SQL =
   "DELETE FROM reply_relays WHERE id = ?1 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id AND d.id = ?3 AND d.policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'pending'))";
 
+export const CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL =
+  "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM inbound_deliveries d JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = d.policy_sha256 JOIN alias_routes ar ON ar.id = d.route_id AND ar.enabled = 1 AND ar.policy_sha256 = d.policy_sha256 WHERE d.id = inbound_recipient_deliveries.delivery_id AND d.policy_sha256 = ?3 AND d.raw_r2_key = ?4)";
+
 export default {
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     await acceptEmail(message, env);
@@ -783,7 +786,7 @@ async function claimInboundRecipient(
   env: Env,
 ): Promise<boolean> {
   const claimed = await env.DB.prepare(
-    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.id = inbound_recipient_deliveries.delivery_id AND d.policy_sha256 = ?3 AND d.raw_r2_key = ?4)",
+    CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL,
   ).bind(deliveryId, operatorRef, policySha256, spoolKey).run();
   return Number(claimed.meta?.changes ?? 0) === 1;
 }

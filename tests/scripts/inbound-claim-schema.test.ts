@@ -3,7 +3,10 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { DISCARD_SUPERSEDED_UNSENT_RELAY_SQL } from "../../workers/mail-router/src/index";
+import {
+  CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL,
+  DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
+} from "../../workers/mail-router/src/index";
 
 const root = resolve(import.meta.dir, "../..");
 const OLD_POLICY = "a".repeat(64);
@@ -117,6 +120,39 @@ test("stale relay retirement refuses any claim that crossed the provider boundar
     expect(database.query("SELECT count(*) AS count FROM reply_relays").get()).toEqual({ count: 1 });
     expect(database.query("SELECT count(*) AS count FROM inbound_deliveries").get()).toEqual({ count: 1 });
     expect(database.query("SELECT count(*) AS count FROM inbound_recipient_deliveries").get()).toEqual({ count: 2 });
+  } finally {
+    database.close();
+  }
+});
+
+test("recipient claim atomically rejects a superseded runtime policy", () => {
+  const database = migratedDatabase();
+  try {
+    seedSupersededClaim(database);
+    const stale = database.query(CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL).run(
+      "inbound:message",
+      "e".repeat(64),
+      OLD_POLICY,
+      "relay-spool/message.eml",
+    );
+    expect(stale.changes).toBe(0);
+    expect(database.query(
+      "SELECT status FROM inbound_recipient_deliveries WHERE delivery_id = ?1 AND operator_ref = ?2",
+    ).get("inbound:message", "e".repeat(64))).toEqual({ status: "pending" });
+
+    database.query(
+      "UPDATE runtime_state SET active_policy_sha256 = ?1, active_policy_r2_key = ?2 WHERE singleton = 1",
+    ).run(OLD_POLICY, `config/policy/${OLD_POLICY}.json`);
+    const active = database.query(CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL).run(
+      "inbound:message",
+      "e".repeat(64),
+      OLD_POLICY,
+      "relay-spool/message.eml",
+    );
+    expect(active.changes).toBe(1);
+    expect(database.query(
+      "SELECT status FROM inbound_recipient_deliveries WHERE delivery_id = ?1 AND operator_ref = ?2",
+    ).get("inbound:message", "e".repeat(64))).toEqual({ status: "sending" });
   } finally {
     database.close();
   }
