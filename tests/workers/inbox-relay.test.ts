@@ -61,7 +61,9 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(relayInsert).toBeDefined();
   expect(relayInsert?.bindings[1]).toMatch(/^[a-f0-9]{64}$/);
   expect(relayInsert?.bindings.join(" ")).not.toContain("r+");
-  expect(db.calls.some((call) => call.sql.includes("raw_r2_key") && call.bindings.includes(null))).toBe(true);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO messages"))).toBe(false);
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.sql).toContain("subject, status) VALUES (?1, ?2, ?3, ?4, NULL");
   const recipientAudits = db.calls.filter(
     (call) => call.sql.includes("INSERT INTO audit_events") &&
       String(call.bindings[4]).startsWith("operator_delivery_recipient_"),

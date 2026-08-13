@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isRepositoryRelativePath } from "./wrangler-config";
 
@@ -15,6 +15,7 @@ interface DesiredState {
     dead_letter_queue: string;
   };
   operator_delivery: {
+    processing_mode?: string;
     inbound_processing_mode?: string;
     reply_processing_mode?: string;
     reply_domain: string;
@@ -23,7 +24,7 @@ interface DesiredState {
 }
 
 const root = resolve(import.meta.dir, "..");
-const desiredPath = arg("--desired-state") ?? "config/desired-state.example.json";
+const desiredPath = assertDesiredStatePath(arg("--desired-state") ?? "config/desired-state.example.json");
 const outputPath = arg("--out");
 const desired = json<DesiredState>(desiredPath);
 assertDarkActivation(desired.operator_delivery);
@@ -144,6 +145,11 @@ function json<T>(path: string): T {
 }
 
 function assertDarkActivation(operatorDelivery: DesiredState["operator_delivery"] | undefined): void {
+  if (operatorDelivery && "processing_mode" in operatorDelivery) {
+    throw new Error(
+      "dark deployment desired state must not combine the legacy operator_delivery.processing_mode field with split activation fields",
+    );
+  }
   if (
     operatorDelivery?.inbound_processing_mode !== "disabled" ||
     operatorDelivery.reply_processing_mode !== "disabled"
@@ -155,6 +161,12 @@ function assertDarkActivation(operatorDelivery: DesiredState["operator_delivery"
 }
 
 function assertDarkWorkerConfigs(desired: DesiredState): void {
+  const expectedRoles = ["relay_outbound", "relay_router", "routing_health"];
+  const observedRoles = Object.keys(desired.workers).sort();
+  if (observedRoles.length !== expectedRoles.length ||
+      expectedRoles.some((role, index) => observedRoles[index] !== role)) {
+    throw new Error(`workers must contain exactly the canonical roles: ${expectedRoles.join(", ")}`);
+  }
   const routerPath = assertWorkerConfigPath("relay_router", desired.workers.relay_router.config, "mail-router");
   const healthPath = assertWorkerConfigPath("routing_health", desired.workers.routing_health.config, "routing-health");
   assertWorkerConfigPath("relay_outbound", desired.workers.relay_outbound.config, "mail-outbound");
@@ -176,6 +188,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireConfigValue(routerVars, routerPath, "MAILDESK_REPLY_DOMAIN", desired.operator_delivery.reply_domain);
   assertStorageBindings(router, routerPath, desired);
   requireArrayValue(router, routerPath, "queues.producers", "queue", desired.storage.queue);
+  requireExactArrayLength(router, routerPath, "queues.producers", 1);
 
   const outboundPath = desired.workers.relay_outbound.config;
   const outbound = wranglerConfig(outboundPath);
@@ -183,6 +196,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   assertStorageBindings(outbound, outboundPath, desired);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "queue", desired.storage.queue);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "dead_letter_queue", desired.storage.dead_letter_queue);
+  requireExactArrayLength(outbound, outboundPath, "queues.consumers", 1);
   if (desired.sender?.mode !== undefined) {
     requireConfigValue(record(outbound.vars, `${outboundPath} [vars]`), outboundPath, "MAILDESK_OUTBOUND_MODE", desired.sender.mode);
   }
@@ -190,10 +204,20 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   const health = wranglerConfig(healthPath);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
+  requireExactArrayLength(health, healthPath, "d1_databases", 1);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
   if (healthVars.MAILDESK_UI_AUTH_MODE !== "access" || healthVars.MAILDESK_UI_ACCESS_SCOPE !== "all_routes") {
     throw new Error(`${healthPath} must require Cloudflare Access for all_routes`);
   }
+}
+
+function assertDesiredStatePath(path: string): string {
+  const absolute = resolve(root, path);
+  const repositoryPath = relative(root, absolute);
+  if (!isRepositoryRelativePath(repositoryPath) || !repositoryPath.startsWith("config/") || !repositoryPath.endsWith(".json")) {
+    throw new Error("desired state must be a repository-relative config/*.json path contained in the source checkout");
+  }
+  return repositoryPath;
 }
 
 function assertConfigName(config: Record<string, unknown>, path: string, expected: string): void {
@@ -201,9 +225,47 @@ function assertConfigName(config: Record<string, unknown>, path: string, expecte
 }
 
 function assertStorageBindings(config: Record<string, unknown>, path: string, desired: DesiredState): void {
-  requireArrayValue(config, path, "d1_databases", "database_name", desired.storage.d1_database);
-  requireArrayValue(config, path, "r2_buckets", "bucket_name", desired.storage.r2_policy_bucket);
-  requireArrayValue(config, path, "r2_buckets", "bucket_name", desired.storage.r2_spool_bucket);
+  requireArrayBindingValue(config, path, "d1_databases", "binding", "DB", "database_name", desired.storage.d1_database);
+  requireArrayBindingValue(config, path, "r2_buckets", "binding", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
+  requireArrayBindingValue(config, path, "r2_buckets", "binding", "RELAY_SPOOL", "bucket_name", desired.storage.r2_spool_bucket);
+  requireExactArrayLength(config, path, "d1_databases", 1);
+  requireExactArrayLength(config, path, "r2_buckets", 2);
+}
+
+function requireExactArrayLength(
+  config: Record<string, unknown>,
+  path: string,
+  section: string,
+  expected: number,
+): void {
+  const value = section.split(".").reduce<unknown>((current, part) =>
+    current !== null && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[part]
+      : undefined, config);
+  if (!Array.isArray(value) || value.length !== expected) {
+    throw new Error(`${path} ${section} must contain exactly ${expected} entries`);
+  }
+}
+
+function requireArrayBindingValue(
+  config: Record<string, unknown>,
+  path: string,
+  section: string,
+  bindingKey: string,
+  binding: string,
+  valueKey: string,
+  expected: string,
+): void {
+  const value = section.split(".").reduce<unknown>((current, part) =>
+    current !== null && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[part]
+      : undefined, config);
+  if (!Array.isArray(value) || !value.some((entry) =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry) &&
+    (entry as Record<string, unknown>)[bindingKey] === binding &&
+    (entry as Record<string, unknown>)[valueKey] === expected)) {
+    throw new Error(`${path} ${section} must bind ${binding} to desired ${valueKey} ${expected}`);
+  }
 }
 
 function requireConfigValue(config: Record<string, unknown>, path: string, key: string, expected: string): void {

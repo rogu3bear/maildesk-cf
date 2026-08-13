@@ -44,15 +44,14 @@ function checkRouter(desired: DesiredState): void {
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_router.script_name);
   requireWorkersDevOff(config, path);
-  requireBinding(config, path, "d1_databases", "DB");
-  requireBinding(config, path, "r2_buckets", "POLICY_STORE");
-  requireBinding(config, path, "r2_buckets", "RELAY_SPOOL");
-  requireBinding(config, path, "queues.producers", "MAIL_JOBS");
+  requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
+  requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
+  requireBindingTarget(config, path, "r2_buckets", "RELAY_SPOOL", "bucket_name", desired.storage.r2_spool_bucket);
+  requireBindingTarget(config, path, "queues.producers", "MAIL_JOBS", "queue", desired.storage.queue);
+  requireSectionCount(config, path, "d1_databases", 1);
+  requireSectionCount(config, path, "r2_buckets", 2);
+  requireSectionCount(config, path, "queues.producers", 1);
   requireBinding(config, path, "send_email", "EMAIL");
-  requireValue(config, path, "database_name", desired.storage.d1_database);
-  requireValue(config, path, "bucket_name", desired.storage.r2_policy_bucket);
-  requireValue(config, path, "bucket_name", desired.storage.r2_spool_bucket);
-  requireValue(config, path, "queue", desired.storage.queue);
   forbid(config, path, /\[\[queues\.consumers\]\]/, "Queue consumer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
   forbid(config, path, /^MAILDESK_RELAY_PROCESSING_MODE\s*=/m, "legacy relay processing switch");
@@ -66,13 +65,13 @@ function checkOutbound(desired: DesiredState): void {
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_outbound.script_name);
   requireWorkersDevOff(config, path);
-  requireBinding(config, path, "d1_databases", "DB");
-  requireBinding(config, path, "r2_buckets", "POLICY_STORE");
-  requireBinding(config, path, "r2_buckets", "RELAY_SPOOL");
+  requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
+  requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
+  requireBindingTarget(config, path, "r2_buckets", "RELAY_SPOOL", "bucket_name", desired.storage.r2_spool_bucket);
+  requireSectionCount(config, path, "d1_databases", 1);
+  requireSectionCount(config, path, "r2_buckets", 2);
+  requireSectionCount(config, path, "queues.consumers", 1);
   requireBinding(config, path, "send_email", "EMAIL");
-  requireValue(config, path, "database_name", desired.storage.d1_database);
-  requireValue(config, path, "bucket_name", desired.storage.r2_policy_bucket);
-  requireValue(config, path, "bucket_name", desired.storage.r2_spool_bucket);
   requireValue(config, path, "queue", desired.storage.queue);
   requireValue(config, path, "dead_letter_queue", desired.storage.dead_letter_queue);
   requireNumericValue(config, path, "max_batch_size", 1);
@@ -134,6 +133,29 @@ function requireBinding(config: string, path: string, section: string, binding: 
   const block = [...config.matchAll(sectionPattern)].map((match) => match[0]).join("\n");
   const bindingPattern = new RegExp(`\\b(?:binding|name)\\s*=\\s*"${escapeRegex(binding)}"`);
   if (!bindingPattern.test(block)) failures.push(`${path} must bind ${binding} in ${section}`);
+}
+
+function requireBindingTarget(
+  config: string,
+  path: string,
+  section: string,
+  binding: string,
+  targetKey: string,
+  target: string,
+): void {
+  const sectionPattern = new RegExp(`\\[\\[${escapeRegex(section)}\\]\\][\\s\\S]*?(?=\\n\\[|$)`, "g");
+  const blocks = [...config.matchAll(sectionPattern)].map((match) => match[0]);
+  const bindingPattern = new RegExp(`^binding\\s*=\\s*"${escapeRegex(binding)}"\\s*$`, "m");
+  const targetPattern = new RegExp(`^${escapeRegex(targetKey)}\\s*=\\s*"${escapeRegex(target)}"\\s*$`, "m");
+  if (!blocks.some((block) => bindingPattern.test(block) && targetPattern.test(block))) {
+    failures.push(`${path} must bind ${binding} to ${targetKey} = ${target} in ${section}`);
+  }
+}
+
+function requireSectionCount(config: string, path: string, section: string, expected: number): void {
+  const pattern = new RegExp(`^\\[\\[${escapeRegex(section)}\\]\\]$`, "gm");
+  const observed = [...config.matchAll(pattern)].length;
+  if (observed !== expected) failures.push(`${path} must contain exactly ${expected} ${section} entries`);
 }
 
 function requireValue(config: string, path: string, key: string, value: string): void {

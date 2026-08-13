@@ -187,6 +187,39 @@ describe("mail API outbound sender modes", () => {
     expect(result.result?.error).toBe("outbound content contains a private operator identity");
   });
 
+  test("inbox relay rejects Unicode compatibility forms of a private operator identity", async () => {
+    const policyJson = inboxRelayPolicyJson();
+    const db = new D1Recorder(undefined, policyJson);
+    const email = new SendEmailRecorder("must-not-send");
+    const batch = new MessageBatchRecorder([{
+      kind: "outbound_reply_requested",
+      messageId: "compatibility-leak",
+      threadId: "thread-compatibility-leak",
+      operator: "operator@tenant.example.com",
+      envelopeTo: "security@tenant.example.com",
+      fromIdentity: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      subject: "Reply",
+      text: "Contact ｏｐｅｒａｔｏｒ＠ｔｅｎａｎｔ．ｅｘａｍｐｌｅ．ｃｏｍ",
+      queuedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      POLICY_STORE: policyStore(policyJson),
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+    expect(result.result?.error).toBe("outbound content contains a private operator identity");
+  });
+
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder([

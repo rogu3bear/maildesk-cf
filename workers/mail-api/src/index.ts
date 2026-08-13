@@ -805,7 +805,10 @@ function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPo
     htmlVisibleText(job.html ?? ""),
     ...Object.entries(outwardHeaders).flat(),
   ].map(normalizedVisibleValue);
-  return [...operators].some((operator) => operator && visible.some((value) => value.includes(operator)))
+  return [...operators].some((operator) => {
+    const protectedIdentity = normalizedVisibleValue(operator);
+    return protectedIdentity && visible.some((value) => value.includes(protectedIdentity));
+  })
     ? "outbound content contains a private operator identity"
     : null;
 }
@@ -820,11 +823,12 @@ function htmlVisibleText(html: string): string {
 
 function normalizedVisibleValue(value: string): string {
   return value
-    .toLowerCase()
     .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
     .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
+    .normalize("NFKC")
+    .toLowerCase()
     .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
 }
 

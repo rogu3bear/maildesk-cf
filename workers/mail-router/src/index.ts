@@ -284,16 +284,32 @@ async function acceptOperatorReply(
 
   const attemptDigest = await sha256Hex(`${relay.id}\0${parsed.messageId.toLowerCase()}`);
   const attemptId = `relay-attempt:${attemptDigest}`;
-  const claimed = await claimRelayAttempt(attemptId, relay, operator, parsed.messageId, env);
-  if (!claimed) return;
-
   const receivedAt = new Date().toISOString();
   const rawR2Key = relaySpoolKey(attemptId, receivedAt);
+
+  const existingAttempt = await loadRelayAttempt(attemptId, env);
+  if (existingAttempt && existingAttempt.status !== "receiving") return;
+
   try {
     await env.RELAY_SPOOL.put(rawR2Key, rawBytes, {
       httpMetadata: { contentType: MIME_CONTENT_TYPE },
       customMetadata: { retentionClass: "relay-spool", relayId: relay.id },
     });
+  } catch {
+    message.setReject("maildesk could not durably spool this reply");
+    return;
+  }
+
+  const claimed = existingAttempt
+    ? existingAttempt
+    : await claimRelayAttempt(attemptId, relay, operator, parsed.messageId, rawR2Key, env);
+  if (!claimed) {
+    message.setReject("maildesk could not durably claim this reply");
+    return;
+  }
+  if (claimed.status !== "receiving") return;
+
+  try {
     await env.MAIL_JOBS.send({
       kind: "inbox_reply_received",
       attemptId,
@@ -303,6 +319,14 @@ async function acceptOperatorReply(
       rawR2Key,
       receivedAt,
     });
+  } catch {
+    // Preserve both the receiving claim and deterministic spool. A provider
+    // redelivery can safely resume the Queue send for this same attempt ID.
+    message.setReject("maildesk could not durably queue this reply");
+    return;
+  }
+
+  try {
     await env.DB.prepare(
       "UPDATE relay_attempts SET status = 'queued', raw_r2_key = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
     )
@@ -329,12 +353,10 @@ async function acceptOperatorReply(
       },
     );
   } catch {
-    await env.RELAY_SPOOL.delete(rawR2Key).catch(() => undefined);
-    await env.DB.prepare("DELETE FROM relay_attempts WHERE id = ?1 AND status = 'receiving'")
-      .bind(attemptId)
-      .run()
-      .catch(() => undefined);
-    message.setReject("maildesk could not durably queue this reply");
+    // Queue acceptance is already durable. Never delete its spool or claim.
+    // A duplicate Queue delivery is idempotent at the outbound audit boundary,
+    // and a provider redelivery may safely enqueue this attempt again.
+    structuredError("reply_queue_state_update_failed", { attemptId });
   }
 }
 
@@ -414,7 +436,6 @@ async function persistInboxRelay(
     parsed.inReplyTo ?? null,
     parsed.references.join(" ") || null,
   );
-  const messageRowId = stableId("message", relay.deliveryId);
   const storageKind = route.routeKind === "personal_alias" ? "personal" : "role";
 
   await env.DB.batch([
@@ -437,11 +458,8 @@ async function persistInboxRelay(
   }
   await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO threads (id, domain_id, route_id, external_sender, subject, status) VALUES (?1, ?2, ?3, ?4, ?5, 'open') ON CONFLICT(id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
-    ).bind(threadId, domainId, routeId, externalSender, parsed.subject),
-    env.DB.prepare(
-      "INSERT INTO messages (id, thread_id, direction, envelope_from, envelope_to, header_message_id, in_reply_to, raw_r2_key, delivery_status, retention_class) VALUES (?1, ?2, 'inbound', ?3, ?4, ?5, ?6, NULL, 'received', 'none') ON CONFLICT(id) DO NOTHING",
-    ).bind(messageRowId, threadId, normalizeMailbox(message.from), normalizeMailbox(message.to), relay.messageId, parsed.inReplyTo ?? null),
+      "INSERT INTO threads (id, domain_id, route_id, external_sender, subject, status) VALUES (?1, ?2, ?3, ?4, NULL, 'open') ON CONFLICT(id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+    ).bind(threadId, domainId, routeId, externalSender),
     env.DB.prepare(
       "INSERT INTO reply_relays (id, token_sha256, thread_id, route_id, external_recipient, reply_identity, original_message_id, references_json, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     ).bind(
@@ -570,14 +588,26 @@ async function claimRelayAttempt(
   relay: ReplyRelayRow,
   operator: string,
   operatorMessageId: string,
+  rawR2Key: string,
   env: Env,
-): Promise<boolean> {
+): Promise<RelayAttemptRow | null> {
   const result = await env.DB.prepare(
-    "INSERT OR IGNORE INTO relay_attempts (id, relay_id, operator, operator_message_id, status) VALUES (?1, ?2, ?3, ?4, 'receiving')",
+    "INSERT OR IGNORE INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, status) VALUES (?1, ?2, ?3, ?4, ?5, 'receiving')",
   )
-    .bind(attemptId, relay.id, operator, operatorMessageId)
+    .bind(attemptId, relay.id, operator, operatorMessageId, rawR2Key)
     .run();
-  return Number(result.meta.changes ?? 0) > 0;
+  if (Number(result.meta.changes ?? 0) > 0) {
+    return { status: "receiving", raw_r2_key: rawR2Key };
+  }
+  return loadRelayAttempt(attemptId, env);
+}
+
+async function loadRelayAttempt(attemptId: string, env: Env): Promise<RelayAttemptRow | null> {
+  return env.DB.prepare(
+    "SELECT status, raw_r2_key FROM relay_attempts WHERE id = ?1 LIMIT 1",
+  )
+    .bind(attemptId)
+    .first<RelayAttemptRow>();
 }
 
 async function routeMessage(
@@ -766,4 +796,9 @@ interface ReplyRelayRow {
   references_json: string;
   expires_at: string;
   revoked_at: string | null;
+}
+
+interface RelayAttemptRow {
+  status: "receiving" | "queued" | "authorized" | "provider_accepted" | "failed" | "recovery_required";
+  raw_r2_key: string | null;
 }

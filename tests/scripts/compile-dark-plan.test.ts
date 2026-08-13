@@ -53,14 +53,12 @@ describe("dark deployment blueprint", () => {
       ["invalid inbound", (desired) => (desired.operator_delivery.inbound_processing_mode = "preview")],
       ["invalid reply", (desired) => (desired.operator_delivery.reply_processing_mode = "preview")],
     ];
-    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-plan-"));
-
     try {
       for (const [name, mutate] of fixtures) {
         const desired = structuredClone(original);
         mutate(desired);
-        const path = join(directory, `${name.replaceAll(" ", "-")}.json`);
-        writeFileSync(path, JSON.stringify(desired));
+        const path = desiredFixturePath(name);
+        writeFileSync(resolve(root, path), JSON.stringify(desired));
 
         const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
           cwd: root,
@@ -70,9 +68,10 @@ describe("dark deployment blueprint", () => {
         expect(result.status, name).not.toBe(0);
         expect(result.stdout, name).toBe("");
         expect(result.stderr, name).toContain("both equal disabled");
+        rmSync(resolve(root, path), { force: true });
       }
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      cleanupDesiredFixtures();
     }
   });
 
@@ -115,8 +114,8 @@ describe("dark deployment blueprint", () => {
         const absolutePath = resolve(root, relativePath);
         writeFileSync(absolutePath, mutate(readFileSync(sourcePath, "utf8")));
         desired.workers[role].config = relativePath;
-        const desiredPath = join(directory, `${name.replaceAll(" ", "-")}.json`);
-        writeFileSync(desiredPath, JSON.stringify(desired));
+        const desiredPath = desiredFixturePath(name);
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
 
         const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
           cwd: root,
@@ -127,12 +126,13 @@ describe("dark deployment blueprint", () => {
         expect(result.stdout, name).toBe("");
         expect(result.stderr, name).toContain(expected);
         rmSync(absolutePath);
+        rmSync(resolve(root, desiredPath), { force: true });
       }
 
       const desired = structuredClone(original);
       desired.workers.relay_router.config = "config/desired-state.example.json";
-      const desiredPath = join(directory, "arbitrary-path.json");
-      writeFileSync(desiredPath, JSON.stringify(desired));
+      const desiredPath = desiredFixturePath("arbitrary-path");
+      writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
       const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
         cwd: root,
         encoding: "utf8",
@@ -142,6 +142,7 @@ describe("dark deployment blueprint", () => {
       expect(result.stderr).toContain("repository-relative canonical deploy/mail-router/wrangler*.toml path");
     } finally {
       rmSync(directory, { recursive: true, force: true });
+      cleanupDesiredFixtures();
       for (const directoryName of ["mail-router", "routing-health"]) {
         const directoryPath = resolve(root, "deploy", directoryName);
         for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
@@ -165,14 +166,12 @@ describe("dark deployment blueprint", () => {
       ["reply domain", (desired) => (desired.operator_delivery.reply_domain = "different.example.com")],
       ["sender mode", (desired) => (desired.sender.mode = "cloudflare_email_service")],
     ];
-    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-identifiers-"));
-
     try {
       for (const [name, mutate] of cases) {
         const desired = structuredClone(original);
         mutate(desired);
-        const path = join(directory, `${name.toLowerCase().replaceAll(" ", "-")}.json`);
-        writeFileSync(path, JSON.stringify(desired));
+        const path = desiredFixturePath(name);
+        writeFileSync(resolve(root, path), JSON.stringify(desired));
         const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
           cwd: root,
           encoding: "utf8",
@@ -180,9 +179,110 @@ describe("dark deployment blueprint", () => {
         expect(result.status, name).not.toBe(0);
         expect(result.stdout, name).toBe("");
         expect(result.stderr, name).toContain("desired");
+        rmSync(resolve(root, path), { force: true });
+      }
+    } finally {
+      cleanupDesiredFixtures();
+    }
+  });
+
+  test("rejects policy and spool resources attached to the wrong canonical bindings", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-binding-pairs-"));
+    try {
+      for (const role of ["relay_router", "relay_outbound"] as const) {
+        const desired = structuredClone(original);
+        const sourcePath = resolve(root, desired.workers[role].config);
+        const roleDirectory = role === "relay_router" ? "mail-router" : "mail-outbound";
+        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-swapped-bindings.toml`;
+        const config = readFileSync(sourcePath, "utf8")
+          .replace('binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-policy"', 'binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-relay-spool"')
+          .replace('binding = "RELAY_SPOOL"\nbucket_name = "maildesk-cf-relay-spool"', 'binding = "RELAY_SPOOL"\nbucket_name = "maildesk-cf-policy"');
+        writeFileSync(resolve(root, relativePath), config);
+        desired.workers[role].config = relativePath;
+        const desiredPath = desiredFixturePath(`${role}-swapped-bindings`);
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, role).not.toBe(0);
+        expect(result.stdout, role).toBe("");
+        expect(result.stderr, role).toContain("must bind POLICY_STORE to desired bucket_name");
+        rmSync(resolve(root, relativePath), { force: true });
+        rmSync(resolve(root, desiredPath), { force: true });
       }
     } finally {
       rmSync(directory, { recursive: true, force: true });
+      cleanupDesiredFixtures();
+      for (const directoryName of ["mail-router", "mail-outbound"]) {
+        const directoryPath = resolve(root, "deploy", directoryName);
+        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+          rmSync(resolve(directoryPath, name), { force: true });
+        }
+      }
+    }
+  });
+
+  test("rejects legacy desired activation, extra Worker roles, and desired state outside the checkout", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const fixtures: Array<[string, (desired: Record<string, any>) => void, string]> = [
+      [
+        "legacy activation",
+        (desired) => (desired.operator_delivery.processing_mode = "enabled"),
+        "must not combine the legacy operator_delivery.processing_mode",
+      ],
+      [
+        "extra worker",
+        (desired) => (desired.workers.unexpected_fourth_worker = {
+          script_name: "unexpected-worker",
+          config: "deploy/routing-health/wrangler.toml",
+        }),
+        "must contain exactly the canonical roles",
+      ],
+    ];
+
+    try {
+      for (const [name, mutate, expected] of fixtures) {
+        const desired = structuredClone(original);
+        mutate(desired);
+        const path = desiredFixturePath(name);
+        writeFileSync(resolve(root, path), JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain(expected);
+        rmSync(resolve(root, path), { force: true });
+      }
+
+      const directory = mkdtempSync(join(tmpdir(), "maildesk-external-desired-"));
+      const externalPath = join(directory, "desired.json");
+      writeFileSync(externalPath, JSON.stringify(original));
+      const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", externalPath], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("repository-relative config/*.json path");
+      rmSync(directory, { recursive: true, force: true });
+    } finally {
+      cleanupDesiredFixtures();
     }
   });
 });
+
+function desiredFixturePath(name: string): string {
+  return `config/desired-state.review-${process.pid}-${name.toLowerCase().replaceAll(" ", "-")}.local.json`;
+}
+
+function cleanupDesiredFixtures(): void {
+  const directoryPath = resolve(root, "config");
+  for (const name of Array.from(new Bun.Glob(`desired-state.review-${process.pid}-*.local.json`).scanSync(directoryPath))) {
+    rmSync(resolve(directoryPath, name), { force: true });
+  }
+}
