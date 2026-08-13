@@ -12,7 +12,10 @@ export interface MaildeskEnv {
   MAILDESK_POLICY_JSON?: string;
   MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
   MAILDESK_OPERATOR_DELIVERY_MODE?: "web_desk" | "inbox_relay";
+  /** @deprecated Compatibility input. Do not combine with either split switch. */
   MAILDESK_RELAY_PROCESSING_MODE?: "disabled" | "enabled";
+  MAILDESK_INBOUND_RELAY_MODE?: "disabled" | "enabled";
+  MAILDESK_REPLY_RELAY_MODE?: "disabled" | "enabled";
   MAILDESK_REPLY_DOMAIN?: string;
   MAILDESK_REPLY_TOKEN_TTL_DAYS?: string;
   MAILDESK_SPOOL_RETENTION_DAYS?: string;
@@ -29,7 +32,8 @@ export type OperatorDeliveryMode = "web_desk" | "inbox_relay" | "invalid";
 
 export interface OperatorDeliveryConfig {
   mode: OperatorDeliveryMode;
-  processingMode: "disabled" | "enabled" | "invalid";
+  inboundProcessingMode: "disabled" | "enabled" | "invalid";
+  replyProcessingMode: "disabled" | "enabled" | "invalid";
   replyDomain: string | null;
   replyTokenTtlDays: number;
   spoolRetentionDays: number;
@@ -67,6 +71,16 @@ export interface RouteHealthSummary {
   lastReplyProviderAcceptedAt?: string;
   lastReplyVerifiedAt?: string;
   lastErrorCode?: string;
+}
+
+export interface OperatorAuthenticationResult {
+  status: "verified" | "rejected" | "indeterminate";
+  method: "dkim";
+  signingDomain?: string;
+  selectorHash?: string;
+  alignedOperatorId?: string;
+  boundedErrorCode?: string;
+  verifiedAt: string;
 }
 
 export interface InboundEmailReceivedJob {
@@ -193,12 +207,15 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
       ? "inbox_relay"
       : "invalid";
   const replyDomain = normalizeDomain(env.MAILDESK_REPLY_DOMAIN);
-  const configuredProcessingMode = env.MAILDESK_RELAY_PROCESSING_MODE as string | undefined;
-  const processingMode = configuredProcessingMode === undefined || configuredProcessingMode === "disabled"
-    ? "disabled"
-    : configuredProcessingMode === "enabled"
-      ? "enabled"
-      : "invalid";
+  const legacyMode = env.MAILDESK_RELAY_PROCESSING_MODE as string | undefined;
+  const hasSplitMode = env.MAILDESK_INBOUND_RELAY_MODE !== undefined || env.MAILDESK_REPLY_RELAY_MODE !== undefined;
+  const mixedModes = legacyMode !== undefined && hasSplitMode;
+  const inboundProcessingMode = relayMode(
+    mixedModes ? "invalid" : env.MAILDESK_INBOUND_RELAY_MODE ?? legacyMode,
+  );
+  const replyProcessingMode = relayMode(
+    mixedModes ? "invalid" : env.MAILDESK_REPLY_RELAY_MODE ?? legacyMode,
+  );
   const replyTokenTtlDays = boundedPositiveInteger(env.MAILDESK_REPLY_TOKEN_TTL_DAYS, 90, 1, 365);
   const spoolRetentionDays = boundedPositiveInteger(env.MAILDESK_SPOOL_RETENTION_DAYS, 7, 1, 30);
   const maxEncodedMessageBytes = boundedPositiveInteger(
@@ -210,7 +227,8 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
 
   return {
     mode,
-    processingMode,
+    inboundProcessingMode,
+    replyProcessingMode,
     replyDomain,
     replyTokenTtlDays,
     spoolRetentionDays,
@@ -247,9 +265,14 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
   });
   if (delivery.mode === "inbox_relay") {
     checks.push({
-      name: "relay_processing_mode",
-      ok: delivery.processingMode !== "invalid",
-      detail: delivery.processingMode,
+      name: "inbound_relay_mode",
+      ok: delivery.inboundProcessingMode !== "invalid",
+      detail: delivery.inboundProcessingMode,
+    });
+    checks.push({
+      name: "reply_relay_mode",
+      ok: delivery.replyProcessingMode !== "invalid",
+      detail: delivery.replyProcessingMode,
     });
     checks.push({
       name: "reply_domain",
@@ -303,6 +326,11 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     ok: checks.every((check) => check.ok || check.name === "policy_config"),
     checks,
   };
+}
+
+function relayMode(value: string | undefined): "disabled" | "enabled" | "invalid" {
+  if (value === undefined || value === "disabled") return "disabled";
+  return value === "enabled" ? "enabled" : "invalid";
 }
 
 export function errorDetail(error: unknown): string {

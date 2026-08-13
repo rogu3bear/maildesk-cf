@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import mailApiWorker from "../../workers/mail-api/src/index";
 
 describe("mail API outbound sender modes", () => {
   test("an authorized inbox reply derives its external target from D1 and deletes the terminal spool", async () => {
+    const policyJson = inboxRelayPolicyJson();
     const db = new D1Recorder({
       id: "relay-1",
       thread_id: "thread-relay",
@@ -14,7 +16,7 @@ describe("mail API outbound sender modes", () => {
       expires_at: "2099-01-01T00:00:00.000Z",
       revoked_at: null,
       route_address: "security@tenant.example.com",
-    });
+    }, policyJson);
     const email = new SendEmailRecorder("provider-relay");
     const raw = new TextEncoder().encode([
       "From: Operator <operator@tenant.example.com>",
@@ -42,23 +44,9 @@ describe("mail API outbound sender modes", () => {
         get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }),
         delete: async (key: string) => { deleted.push(key); },
       },
+      POLICY_STORE: policyStore(policyJson),
       MAIL_JOBS: {},
       EMAIL: email,
-      MAILDESK_POLICY_JSON: JSON.stringify({
-        default_reply_mode: "role_first",
-        domains: {
-          "tenant.example.com": {
-            role_aliases: {
-              security: {
-                operators: ["operator@tenant.example.com"],
-                reply_identity: "security@tenant.example.com",
-                allowed_reply_identities: ["security@tenant.example.com"],
-              },
-            },
-            personal_aliases: {},
-          },
-        },
-      }),
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
@@ -77,6 +65,57 @@ describe("mail API outbound sender modes", () => {
     expect(deleted).toEqual(["relay-spool/reply-1.eml"]);
     const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET reply_status"));
     expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
+  });
+
+  test("inbox relay rejects visible private operator identity leakage before provider send", async () => {
+    const policyJson = inboxRelayPolicyJson();
+    const db = new D1Recorder({
+      id: "relay-leak",
+      thread_id: "thread-leak",
+      external_recipient: "correspondent@example.net",
+      reply_identity: "security@tenant.example.com",
+      original_message_id: "<original@example.net>",
+      references_json: "[]",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      revoked_at: null,
+      route_address: "security@tenant.example.com",
+    }, policyJson);
+    const email = new SendEmailRecorder("must-not-send");
+    const raw = new TextEncoder().encode([
+      "From: Operator <operator@tenant.example.com>",
+      "To: relay@example.net",
+      "Subject: Re: security question",
+      "Message-ID: <operator-leak@tenant.example.com>",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      "<p>Contact operator&#64;tenant.example.com</p>",
+    ].join("\r\n")).buffer;
+    const batch = new MessageBatchRecorder([{
+      kind: "inbox_reply_received",
+      attemptId: "relay-attempt:leak",
+      relayId: "relay-leak",
+      operator: "operator@tenant.example.com",
+      operatorMessageId: "<operator-leak@tenant.example.com>",
+      rawR2Key: "relay-spool/leak.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: { get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }) },
+      POLICY_STORE: policyStore(policyJson),
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+      MAILDESK_MAX_ENCODED_MESSAGE_BYTES: "5242880",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    expect(batch.ackCount).toBe(1);
+    const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+    expect(result.result?.error).toBe("outbound content contains a private operator identity");
   });
 
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
@@ -518,7 +557,12 @@ describe("mail API outbound sender modes", () => {
       checks: Array<{ name: string; ok: boolean; detail?: string }>;
     };
     expect(report.checks).toContainEqual({
-      name: "relay_processing_mode",
+      name: "inbound_relay_mode",
+      ok: false,
+      detail: "invalid",
+    });
+    expect(report.checks).toContainEqual({
+      name: "reply_relay_mode",
       ok: false,
       detail: "invalid",
     });
@@ -759,7 +803,10 @@ class MessageBatchRecorder {
 class D1Recorder {
   readonly statements: RecordedStatement[] = [];
 
-  constructor(private readonly relayRow?: Record<string, unknown>) {}
+  constructor(
+    private readonly relayRow?: Record<string, unknown>,
+    private readonly activePolicyJson?: string,
+  ) {}
 
   seedAudit(dedupeKey: string, action: string, detail: unknown = {}): void {
     this.statements.push({
@@ -791,6 +838,19 @@ class D1Recorder {
       },
       async first() {
         statements.push(record);
+        if (record.sql.includes("SELECT rs.active_policy_sha256") && activePolicyJson) {
+          const digest = createHash("sha256").update(activePolicyJson).digest("hex");
+          return {
+            active_policy_sha256: digest,
+            active_policy_r2_key: `config/policy/${digest}.json`,
+            revision_sha256: digest,
+            revision_r2_key: `config/policy/${digest}.json`,
+            expected_domain_count: 1,
+            expected_route_count: 1,
+            projected_route_count: 1,
+            projected_domain_count: 1,
+          };
+        }
         if (record.sql.includes("FROM reply_relays rr")) {
           return thisRelayRow;
         }
@@ -816,6 +876,7 @@ class D1Recorder {
       },
     };
     const thisRelayRow = this.relayRow ?? null;
+    const activePolicyJson = this.activePolicyJson;
     return prepared as unknown as D1PreparedStatement;
   }
 
@@ -840,6 +901,33 @@ class D1Recorder {
   hasAuditAction(action: string): boolean {
     return this.statements.some((entry) => entry.binds[4] === action);
   }
+}
+
+function policyStore(policyJson: string): R2Bucket {
+  const digest = createHash("sha256").update(policyJson).digest("hex");
+  return {
+    get: async (key: string) => key === `config/policy/${digest}.json`
+      ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer }
+      : null,
+  } as unknown as R2Bucket;
+}
+
+function inboxRelayPolicyJson(): string {
+  return JSON.stringify({
+    default_reply_mode: "role_first",
+    domains: {
+      "tenant.example.com": {
+        role_aliases: {
+          security: {
+            operators: ["operator@tenant.example.com"],
+            reply_identity: "security@tenant.example.com",
+            allowed_reply_identities: ["security@tenant.example.com"],
+          },
+        },
+        personal_aliases: {},
+      },
+    },
+  });
 }
 
 class SendEmailRecorder {

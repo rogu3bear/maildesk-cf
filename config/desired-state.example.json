@@ -35,7 +35,8 @@
   },
   "operator_delivery": {
     "mode": "inbox_relay",
-    "processing_mode": "disabled",
+    "inbound_processing_mode": "disabled",
+    "reply_processing_mode": "disabled",
     "reply_domain": "reply.maildesk.example.com",
     "reply_token_ttl_days": 90,
     "spool_retention_days": 7,
@@ -44,7 +45,7 @@
   },
   "sender": {
     "mode": "disabled",
-    "authenticated_domains": []
+    "candidate_domains": []
   },
   "verification": {
     "allow_broad_live_sends": false,

@@ -295,7 +295,7 @@ describe("cfctl provisioning contract check", () => {
           },
           sender: {
             mode: "disabled",
-            authenticated_domains: [],
+            candidate_domains: [],
           },
         },
         null,
@@ -332,11 +332,11 @@ describe("cfctl provisioning contract check", () => {
     ) as {
       domains: Array<{ name: string }>;
       operator_delivery: { reply_domain: string };
-      sender: { authenticated_domains: string[] };
+      sender: { candidate_domains: string[] };
     };
     desired.domains[0]!.name = "-invalid.example.com";
     desired.operator_delivery.reply_domain = "reply..maildesk.example.com";
-    desired.sender.authenticated_domains = ["-invalid.example.com"];
+    desired.sender.candidate_domains = ["-invalid.example.com"];
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -355,6 +355,6 @@ describe("cfctl provisioning contract check", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("domains[].name is not a valid domain");
     expect(result.stderr).toContain("operator_delivery.reply_domain must be a valid domain");
-    expect(result.stderr).toContain("sender.authenticated_domains entries must be valid domains");
+    expect(result.stderr).toContain("sender.candidate_domains entries must be valid domains");
   });
 });

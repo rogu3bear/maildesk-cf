@@ -31,7 +31,7 @@ interface DesiredState {
   operator_delivery: OperatorDeliveryConfig;
   sender: {
     mode: SenderMode;
-    authenticated_domains: string[];
+    candidate_domains: string[];
   };
   verification: {
     allow_broad_live_sends: boolean;
@@ -49,7 +49,9 @@ interface DesiredDomain {
 
 interface OperatorDeliveryConfig {
   mode: "inbox_relay" | "web_desk";
-  processing_mode: "disabled" | "enabled";
+  processing_mode?: "disabled" | "enabled";
+  inbound_processing_mode?: "disabled" | "enabled";
+  reply_processing_mode?: "disabled" | "enabled";
   reply_domain: string;
   reply_token_ttl_days: number;
   spool_retention_days: number;
@@ -204,7 +206,7 @@ function validateDesiredState(value: DesiredState) {
   const operatorDelivery = requireObject(rootObject, "operator_delivery");
   if (operatorDelivery) {
     const mode = requireEnum(operatorDelivery, "operator_delivery.mode", ["inbox_relay", "web_desk"]);
-    requireEnum(operatorDelivery, "operator_delivery.processing_mode", ["disabled", "enabled"]);
+    validateProcessingModes(operatorDelivery);
     const replyDomain = requireString(operatorDelivery, "operator_delivery.reply_domain");
     if (replyDomain && !validDomain(replyDomain)) {
       failures.push("operator_delivery.reply_domain must be a valid domain");
@@ -225,19 +227,19 @@ function validateDesiredState(value: DesiredState) {
       "cloudflare_email_service",
       "resend",
     ]);
-    const authenticatedDomains = requireStringArray(sender, "sender.authenticated_domains");
-    if (mode === "disabled" && authenticatedDomains.length > 0) {
-      failures.push("sender.authenticated_domains must be empty when sender.mode is disabled");
+    const candidateDomains = requireStringArray(sender, "sender.candidate_domains");
+    if (mode === "disabled" && candidateDomains.length > 0) {
+      failures.push("sender.candidate_domains must be empty when sender.mode is disabled");
     }
-    if (mode && mode !== "disabled" && authenticatedDomains.length === 0) {
-      failures.push("sender.authenticated_domains is required when sender.mode sends mail");
+    if (mode && mode !== "disabled" && candidateDomains.length === 0) {
+      failures.push("sender.candidate_domains is required when sender.mode sends mail");
     }
-    for (const domain of authenticatedDomains) {
+    for (const domain of candidateDomains) {
       if (!validDomain(domain)) {
-        failures.push("sender.authenticated_domains entries must be valid domains");
+        failures.push("sender.candidate_domains entries must be valid domains");
       }
       if (!domainNames.includes(domain)) {
-        failures.push("sender.authenticated_domains entries must also appear in domains[].name");
+        failures.push("sender.candidate_domains entries must also appear in domains[].name");
       }
     }
   }
@@ -250,6 +252,23 @@ function validateDesiredState(value: DesiredState) {
       failures.push("verification.allow_broad_live_sends must remain false in template-safe desired state");
     }
   }
+}
+
+function validateProcessingModes(operatorDelivery: Record<string, unknown>): void {
+  const legacy = operatorDelivery["processing_mode"];
+  const inbound = operatorDelivery["inbound_processing_mode"];
+  const reply = operatorDelivery["reply_processing_mode"];
+  const hasSplit = inbound !== undefined || reply !== undefined;
+  if (legacy !== undefined && hasSplit) {
+    failures.push("operator_delivery must not combine processing_mode with split processing modes");
+    return;
+  }
+  if (legacy !== undefined) {
+    requireEnum(operatorDelivery, "operator_delivery.processing_mode", ["disabled", "enabled"]);
+    return;
+  }
+  requireEnum(operatorDelivery, "operator_delivery.inbound_processing_mode", ["disabled", "enabled"]);
+  requireEnum(operatorDelivery, "operator_delivery.reply_processing_mode", ["disabled", "enabled"]);
 }
 
 function validateWorker(worker: Record<string, unknown> | null, prefix: string) {
@@ -327,7 +346,7 @@ function resourceSummary(desired: DesiredState) {
     email_routing_aliases: emailRoutingAliases(desired),
     sender: {
       mode: senderModeOrDefault(desired.sender.mode),
-      authenticated_domains: [...desired.sender.authenticated_domains].sort(),
+      candidate_domains: [...desired.sender.candidate_domains].sort(),
     },
     verification: {
       allow_broad_live_sends: desired.verification.allow_broad_live_sends,

@@ -9,7 +9,6 @@ import {
   buildOperatorDelivery,
   generateRelayToken,
   normalizeMailbox,
-  operatorAuthenticationPassed,
   outboundReplyPayload,
   parseRelayEmail,
   relayAddress,
@@ -18,6 +17,7 @@ import {
   sha256Hex,
   tokenExpiresAt,
 } from "../../shared/inbox-relay";
+import { verifyOperatorDkim } from "../../shared/dkim";
 import {
   authorizeReplyWithPolicy,
   routeInbound,
@@ -40,17 +40,20 @@ async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<
     message.setReject("maildesk operator delivery mode is invalid");
     return;
   }
-  if (config.mode === "inbox_relay" && config.processingMode !== "enabled") {
-    message.setReject(
-      config.processingMode === "invalid"
-        ? "maildesk relay processing mode is invalid"
-        : "maildesk relay processing is disabled",
-    );
-    return;
-  }
   const token = config.replyDomain
     ? relayTokenFromRecipient(message.to, config.replyDomain)
     : null;
+  const selectedMode = token ? config.replyProcessingMode : config.inboundProcessingMode;
+  if (config.mode === "inbox_relay" && selectedMode !== "enabled") {
+    message.setReject(
+      selectedMode === "invalid"
+        ? "maildesk relay processing mode is invalid"
+        : token
+          ? "maildesk reply relay is disabled"
+          : "maildesk inbound relay is disabled",
+    );
+    return;
+  }
   if (token) {
     await acceptOperatorReply(message, token, env);
     return;
@@ -190,7 +193,7 @@ async function acceptOperatorReply(
   env: Env,
 ): Promise<void> {
   const config = operatorDeliveryConfig(env);
-  if (config.mode !== "inbox_relay" || config.processingMode !== "enabled" || !config.replyDomain) {
+  if (config.mode !== "inbox_relay" || config.replyProcessingMode !== "enabled" || !config.replyDomain) {
     message.setReject("maildesk reply relay is disabled");
     return;
   }
@@ -214,7 +217,12 @@ async function acceptOperatorReply(
     message.setReject("maildesk reply sender identity does not match the authenticated envelope");
     return;
   }
-  if (!operatorAuthenticationPassed(message.headers, operator)) {
+  const authentication = await verifyOperatorDkim(rawBytes, operator);
+  if (authentication.status !== "verified") {
+    structuredError("reply_authentication_rejected", {
+      status: authentication.status,
+      errorCode: authentication.boundedErrorCode ?? "dkim_rejected",
+    });
     message.setReject("maildesk reply sender did not pass aligned email authentication");
     return;
   }
@@ -283,9 +291,21 @@ async function acceptOperatorReply(
       env,
       `${attemptId}:inbox_reply_received`,
       relay.thread_id,
-      operator,
+      `operator:${await sha256Hex(operator)}`,
       "inbox_reply_received",
-      { attemptId, relayId: relay.id, operatorMessageId: parsed.messageId },
+      {
+        attemptId,
+        relayId: relay.id,
+        operatorMessageId: parsed.messageId,
+        authentication: {
+          status: authentication.status,
+          method: authentication.method,
+          signingDomain: authentication.signingDomain,
+          selectorHash: authentication.selectorHash,
+          alignedOperatorId: authentication.alignedOperatorId,
+          verifiedAt: authentication.verifiedAt,
+        },
+      },
     );
   } catch {
     await env.RAW_MAIL.delete(rawR2Key).catch(() => undefined);

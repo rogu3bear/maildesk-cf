@@ -38,7 +38,7 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "cloudflare_email_service",
-        authenticated_domains: ["example.com"],
+        candidate_domains: ["example.com"],
       },
     });
     writeJson(evidencePath, {
@@ -151,7 +151,7 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "disabled",
-        authenticated_domains: [],
+        candidate_domains: [],
       },
     });
     writeJson(evidencePath, {
@@ -262,7 +262,7 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "resend",
-        authenticated_domains: ["tenant.example.com"],
+        candidate_domains: ["tenant.example.com"],
       },
     });
     writeJson(evidencePath, {

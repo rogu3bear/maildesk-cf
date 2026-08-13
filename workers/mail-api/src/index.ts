@@ -15,6 +15,7 @@ import {
   outboundReplyPayload,
   parseRelayEmail,
   relayRecordIsActive,
+  sha256Hex,
 } from "../../shared/inbox-relay";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
 import { loadActivePolicy } from "../../shared/policy-store";
@@ -142,7 +143,7 @@ async function processInboxReply(
   attempt: number,
 ): Promise<QueueDisposition> {
   const relay = await env.DB.prepare(
-    "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id WHERE rr.id = ?1 LIMIT 1",
+    "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE rr.id = ?1 AND ar.enabled = 1 LIMIT 1",
   )
     .bind(job.relayId)
     .first<ReplyRelayJobRow>();
@@ -217,7 +218,7 @@ async function processInboxReply(
     .run();
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "inbox_reply_authorized",
     { attemptId: job.attemptId, relayId: job.relayId, fromIdentity: relay.reply_identity },
     `${job.attemptId}:inbox_reply_authorized`,
@@ -298,7 +299,7 @@ async function recordQueueEvent(
     env,
     "system",
     job.kind,
-    auditDetailForJob(job, env),
+    await auditDetailForJob(job, env),
     base ? `${base}:${job.kind}` : undefined,
     jobThreadId(job),
   );
@@ -339,7 +340,7 @@ async function recordQueueEvent(
 
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "outbound_reply_authorized",
     {
       messageId: job.messageId,
@@ -353,7 +354,7 @@ async function recordQueueEvent(
 
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "outbound_reply_send_attempted",
     {
       messageId: job.messageId,
@@ -382,7 +383,7 @@ async function recordQueueEvent(
     const delaySeconds = retryDelaySeconds(attempt);
     await recordAuditEvent(
       env,
-      job.operator,
+      await auditOperator(env, job.operator),
       "outbound_reply_retry_scheduled",
       {
         messageId: job.messageId,
@@ -412,7 +413,7 @@ async function recordTerminalSendEvent(
 ): Promise<void> {
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     action,
     {
       messageId: job.messageId,
@@ -498,13 +499,16 @@ function jobThreadId(job: MailJob): string | undefined {
   return undefined;
 }
 
-function auditDetailForJob(job: MailJob, env: Env): unknown {
+async function auditDetailForJob(job: MailJob, env: Env): Promise<unknown> {
+  const operator = "operator" in job
+    ? await auditOperator(env, job.operator)
+    : undefined;
   if (job.kind === "inbox_reply_received") {
     return {
       kind: job.kind,
       attemptId: job.attemptId,
       relayId: job.relayId,
-      operator: job.operator,
+      operator,
       operatorMessageId: job.operatorMessageId,
       receivedAt: job.receivedAt,
     };
@@ -515,7 +519,7 @@ function auditDetailForJob(job: MailJob, env: Env): unknown {
     kind: job.kind,
     messageId: job.messageId,
     threadId: job.threadId,
-    operator: job.operator,
+    operator,
     envelopeTo: job.envelopeTo,
     fromIdentity: job.fromIdentity,
     to: job.to,
@@ -614,6 +618,16 @@ async function sendOutboundReply(
   const verifiedDomain = senderDomain(job.fromIdentity);
   if (!isVerifiedSenderDomain(verifiedDomain, env)) {
     return { ok: false, provider: mode, error: "sender domain is not verified" };
+  }
+
+  if (operatorDeliveryConfig(env).mode === "inbox_relay") {
+    const activePolicy = await loadActivePolicy(env);
+    if (!activePolicy) {
+      return { ok: false, provider: mode, error: "active policy is unavailable" };
+    }
+    if (outboundLeaksOperatorIdentity(job, activePolicy.policy)) {
+      return { ok: false, provider: mode, error: "outbound content contains a private operator identity" };
+    }
   }
 
   if (mode === "cloudflare_email_service") {
@@ -735,6 +749,47 @@ function isVerifiedSenderDomain(domain: string, env: Env): boolean {
 function senderDomain(address: string): string {
   const parsed = parseMailbox(address);
   return parsed?.domain ?? "";
+}
+
+function outboundLeaksOperatorIdentity(job: OutboundReplyRequestedJob, policy: RouterPolicy): boolean {
+  const operators = new Set<string>();
+  for (const domain of Object.values(policy.domains)) {
+    for (const route of Object.values(domain.role_aliases)) {
+      for (const operator of route.operators) operators.add(normalizeMailbox(operator));
+    }
+    for (const route of Object.values(domain.personal_aliases)) operators.add(normalizeMailbox(route.operator));
+    for (const operator of domain.catch_all?.operators ?? []) operators.add(normalizeMailbox(operator));
+  }
+  const outwardHeaders = canonicalConversationHeaders(job);
+  const visible = [
+    job.fromIdentity,
+    job.replyTo ?? job.fromIdentity,
+    ...job.to,
+    ...(job.cc ?? []),
+    ...(job.bcc ?? []),
+    job.subject,
+    job.text ?? "",
+    job.html ?? "",
+    ...Object.entries(outwardHeaders).flat(),
+    ...(job.attachments ?? []).flatMap((attachment) => [attachment.filename, attachment.contentId ?? ""]),
+  ].map(normalizedVisibleValue);
+  return [...operators].some((operator) => operator && visible.some((value) => value.includes(operator)));
+}
+
+function normalizedVisibleValue(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&commat;/gi, "@")
+    .replace(/&period;/gi, ".")
+    .replace(/[\u00ad\u200b-\u200d\ufeff]/g, "");
+}
+
+async function auditOperator(env: Env, operator: string): Promise<string> {
+  return operatorDeliveryConfig(env).mode === "inbox_relay"
+    ? `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`
+    : operator;
 }
 
 function parseMailbox(address: string): ParsedMailbox | null {

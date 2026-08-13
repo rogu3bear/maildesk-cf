@@ -20,11 +20,13 @@ interface DesiredState {
   };
   sender?: {
     mode?: unknown;
-    authenticated_domains?: unknown;
+    candidate_domains?: unknown;
   };
   operator_delivery?: {
     mode?: unknown;
     processing_mode?: unknown;
+    inbound_processing_mode?: unknown;
+    reply_processing_mode?: unknown;
     reply_domain?: unknown;
     reply_token_ttl_days?: unknown;
     spool_retention_days?: unknown;
@@ -206,9 +208,9 @@ function checkDesiredSenderMode(desiredState: DesiredState | null) {
   if (!isSenderMode(mode)) {
     failures.push(`desired-state sender.mode must be ${senderModeList()}`);
   }
-  const authenticatedDomains = desiredState?.sender?.authenticated_domains;
-  if (authenticatedDomains !== undefined && !isStringArray(authenticatedDomains)) {
-    failures.push("desired-state sender.authenticated_domains must be an array of domains");
+  const candidateDomains = desiredState?.sender?.candidate_domains;
+  if (candidateDomains !== undefined && !isStringArray(candidateDomains)) {
+    failures.push("desired-state sender.candidate_domains must be an array of domains");
   }
 }
 
@@ -225,8 +227,23 @@ function checkDesiredOperatorDelivery(desiredState: DesiredState | null) {
   if (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk") {
     failures.push("desired-state operator_delivery.mode must be inbox_relay or web_desk");
   }
-  if (delivery.processing_mode !== "disabled" && delivery.processing_mode !== "enabled") {
-    failures.push("desired-state operator_delivery.processing_mode must be disabled or enabled");
+  const legacy = delivery.processing_mode;
+  const hasSplit = delivery.inbound_processing_mode !== undefined || delivery.reply_processing_mode !== undefined;
+  if (legacy !== undefined && hasSplit) {
+    failures.push("desired-state operator_delivery must not combine processing_mode with split processing modes");
+  } else if (legacy !== undefined) {
+    if (legacy !== "disabled" && legacy !== "enabled") {
+      failures.push("desired-state operator_delivery.processing_mode must be disabled or enabled");
+    }
+  } else {
+    for (const [name, value] of [
+      ["inbound_processing_mode", delivery.inbound_processing_mode],
+      ["reply_processing_mode", delivery.reply_processing_mode],
+    ] as const) {
+      if (value !== "disabled" && value !== "enabled") {
+        failures.push(`desired-state operator_delivery.${name} must be disabled or enabled`);
+      }
+    }
   }
   if (!isUsableValue(delivery.reply_domain)) {
     failures.push("desired-state operator_delivery.reply_domain is required");
@@ -256,14 +273,7 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   }
   if (delivery.mode !== "inbox_relay") return;
 
-  const relayProcessingMode = process.env.MAILDESK_RELAY_PROCESSING_MODE?.trim() || "disabled";
-  if (relayProcessingMode !== "disabled" && relayProcessingMode !== "enabled") {
-    failures.push("MAILDESK_RELAY_PROCESSING_MODE must be disabled or enabled");
-  } else if (relayProcessingMode !== delivery.processing_mode) {
-    failures.push(
-      `MAILDESK_RELAY_PROCESSING_MODE (${relayProcessingMode}) must match desired-state operator_delivery.processing_mode (${delivery.processing_mode})`,
-    );
-  }
+  checkRelayActivationEnv(delivery);
 
   const replyDomain = process.env.MAILDESK_REPLY_DOMAIN?.trim();
   if (replyDomain !== delivery.reply_domain) {
@@ -279,6 +289,32 @@ function checkRuntimeInteger(name: string, desired: unknown) {
   const runtime = process.env[name]?.trim();
   if (typeof desired !== "number" || runtime !== String(desired)) {
     failures.push(`${name} must match desired-state operator delivery configuration`);
+  }
+}
+
+function checkRelayActivationEnv(delivery: NonNullable<DesiredState["operator_delivery"]>) {
+  const legacyRuntime = process.env.MAILDESK_RELAY_PROCESSING_MODE?.trim();
+  const inboundRuntime = process.env.MAILDESK_INBOUND_RELAY_MODE?.trim();
+  const replyRuntime = process.env.MAILDESK_REPLY_RELAY_MODE?.trim();
+  const hasSplitRuntime = inboundRuntime !== undefined || replyRuntime !== undefined;
+  if (legacyRuntime !== undefined && hasSplitRuntime) {
+    failures.push("runtime must not combine MAILDESK_RELAY_PROCESSING_MODE with split relay modes");
+    return;
+  }
+  const desiredLegacy = delivery.processing_mode;
+  const desiredInbound = delivery.inbound_processing_mode ?? desiredLegacy;
+  const desiredReply = delivery.reply_processing_mode ?? desiredLegacy;
+  const actualInbound = inboundRuntime ?? legacyRuntime ?? "disabled";
+  const actualReply = replyRuntime ?? legacyRuntime ?? "disabled";
+  for (const [name, actual, desired] of [
+    ["MAILDESK_INBOUND_RELAY_MODE", actualInbound, desiredInbound],
+    ["MAILDESK_REPLY_RELAY_MODE", actualReply, desiredReply],
+  ] as const) {
+    if (actual !== "disabled" && actual !== "enabled") {
+      failures.push(`${name} must be disabled or enabled`);
+    } else if (actual !== desired) {
+      failures.push(`${name} (${actual}) must match desired-state split operator delivery configuration (${desired})`);
+    }
   }
 }
 

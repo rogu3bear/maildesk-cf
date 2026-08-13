@@ -214,49 +214,6 @@ export function normalizeMailbox(value: string): string {
   return mailbox;
 }
 
-export function operatorAuthenticationPassed(headers: Headers, operator: string): boolean {
-  const mailbox = normalizeMailbox(operator);
-  const domain = mailbox.split("@")[1];
-  if (!domain) return false;
-  const results = headers.get("authentication-results")?.toLowerCase() ?? "";
-  // The Fetch Headers implementation combines duplicate fields with a comma.
-  // A sender-controlled Authentication-Results field must never be allowed to
-  // contribute a later pass result alongside Cloudflare's trusted field.
-  if (!results || results.includes(",")) return false;
-  const authservId = results.split(";", 1)[0]?.trim() ?? "";
-  if (authservId !== "mx.cloudflare.net") return false;
-
-  const sections = results.split(";").map(parseAuthenticationResultSection);
-  const spfPass = sections.some((section) => {
-    const resultPassed = section.get("spf")?.includes("pass") === true;
-    const senderAligned = section.get("smtp.mailfrom")
-      ?.some((value) => value === mailbox || value === domain) === true;
-    return resultPassed && senderAligned;
-  });
-  const dkimPass = sections.some((section) => {
-    const resultPassed = section.get("dkim")?.includes("pass") === true;
-    const signingDomainAligned = section.get("header.d")?.includes(domain) === true;
-    const identityAligned = section.get("header.i")
-      ?.some((value) => value === `@${domain}` || value === mailbox) === true;
-    return resultPassed && (signingDomainAligned || identityAligned);
-  });
-  return spfPass || dkimPass;
-}
-
-function parseAuthenticationResultSection(section: string): Map<string, string[]> {
-  const properties = new Map<string, string[]>();
-  const propertyPattern = /(?:^|\s)([a-z][a-z0-9._-]*)\s*=\s*(?:"([^"]*)"|([^\s;]+))/g;
-  for (const match of section.trim().matchAll(propertyPattern)) {
-    const name = match[1];
-    const value = match[2] ?? match[3];
-    if (!name || value === undefined) continue;
-    const values = properties.get(name) ?? [];
-    values.push(value);
-    properties.set(name, values);
-  }
-  return properties;
-}
-
 export function safeConversationHeaders(parsed: ParsedRelayEmail): Record<string, string> {
   const headers: Record<string, string> = {};
   if (parsed.inReplyTo) headers["In-Reply-To"] = parsed.inReplyTo;

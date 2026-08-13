@@ -48,7 +48,7 @@ storage:
   queue
 sender:
   mode
-  authenticated_domains
+  candidate_domains
 ```
 
 The exact serialization can evolve, but plan/apply/verify should preserve these

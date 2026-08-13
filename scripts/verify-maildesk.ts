@@ -31,7 +31,7 @@ interface DesiredState {
   domains: DesiredDomain[];
   sender?: {
     mode?: string;
-    authenticated_domains?: string[];
+    candidate_domains?: string[];
   };
 }
 
@@ -583,8 +583,8 @@ function checkSender(domainName: string, desired: DesiredState, live: LiveEviden
   if (mode === "invalid") return "drift";
   if (mode === "disabled") return "ok";
 
-  const desiredAuthenticated = desired.sender?.authenticated_domains?.includes(domainName) ?? false;
-  if (!desiredAuthenticated) return "missing";
+  const desiredCandidate = desired.sender?.candidate_domains?.includes(domainName) ?? false;
+  if (!desiredCandidate) return "missing";
 
   if (mode === "cloudflare_email_service") {
     const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
@@ -658,7 +658,7 @@ function domainRoutes(
 function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
   const mode = desiredSenderMode(desired);
   return {
-    authenticated: mode !== "disabled" && (desired.sender?.authenticated_domains?.includes(domainName) ?? false),
+    authenticated: mode !== "disabled" && checkSender(domainName, desired, live) === "ok",
     provider: mode,
     provider_status: senderProviderStatus(domainName, desired, live),
   };

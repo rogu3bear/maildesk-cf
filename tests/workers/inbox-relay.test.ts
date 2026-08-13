@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import mailRouterWorker from "../../workers/mail-router/src/index";
+import type { RouterPolicy } from "../../workers/shared/router";
 import {
   buildOperatorDelivery,
   encodedMessageUpperBound,
-  operatorAuthenticationPassed,
   parseRelayEmail,
   relayAddress,
   relayRecordIsActive,
@@ -100,9 +101,7 @@ test("route identifiers preserve distinct valid alias characters", async () => {
     "team+ops@example.com",
     mime({ from: "sender@example.net", messageId: "<plus-route@example.net>" }),
   );
-  const env = {
-    ...relayEnv(db, []),
-    MAILDESK_POLICY_JSON: JSON.stringify({
+  const env = relayEnv(db, [], {
       default_reply_mode: "role_first",
       domains: {
         "example.com": {
@@ -116,8 +115,7 @@ test("route identifiers preserve distinct valid alias characters", async () => {
           personal_aliases: {},
         },
       },
-    }),
-  };
+    });
 
   await mailRouterWorker.email(
     message,
@@ -138,9 +136,7 @@ test("catch-all delivery advances the declared wildcard route while showing the 
     "unlisted@example.com",
     mime({ from: "sender@example.net", messageId: "<catch-all@example.net>" }),
   );
-  const env = {
-    ...relayEnv(db, deliveries),
-    MAILDESK_POLICY_JSON: JSON.stringify({
+  const env = relayEnv(db, deliveries, {
       default_reply_mode: "role_first",
       domains: {
         "example.com": {
@@ -153,8 +149,7 @@ test("catch-all delivery advances the declared wildcard route while showing the 
           },
         },
       },
-    }),
-  };
+    });
 
   await mailRouterWorker.email(
     message,
@@ -207,6 +202,8 @@ test("inbox relay is fail-closed until relay processing is explicitly enabled", 
   );
   const env = relayEnv(db, deliveries);
   delete env.MAILDESK_RELAY_PROCESSING_MODE;
+  delete env.MAILDESK_INBOUND_RELAY_MODE;
+  delete env.MAILDESK_REPLY_RELAY_MODE;
 
   await mailRouterWorker.email(
     message,
@@ -214,7 +211,7 @@ test("inbox relay is fail-closed until relay processing is explicitly enabled", 
     {} as ExecutionContext,
   );
 
-  expect(message.rejected).toContain("relay processing is disabled");
+  expect(message.rejected).toContain("inbound relay is disabled");
   expect(deliveries).toHaveLength(0);
   expect(db.calls).toHaveLength(0);
   expect(message.forwarded).toHaveLength(0);
@@ -226,12 +223,12 @@ test("opaque reply relay is side-effect free while relay processing is disabled"
   const effects = { r2: 0, queue: 0 };
   const message = inboundMessage(
     "operator-a@example.com",
-    "r+opaque-token@reply.maildesk.example.com",
+    relayAddress("c".repeat(64), "reply.maildesk.example.com"),
     mime({ from: "operator-a@example.com", messageId: "<dark-reply@example.com>" }),
   );
   const env = {
     ...relayEnv(db, deliveries),
-    MAILDESK_RELAY_PROCESSING_MODE: "disabled" as const,
+    MAILDESK_REPLY_RELAY_MODE: "disabled" as const,
     RAW_MAIL: {
       put: async () => { effects.r2 += 1; },
       get: async () => { effects.r2 += 1; return null; },
@@ -248,7 +245,7 @@ test("opaque reply relay is side-effect free while relay processing is disabled"
     {} as ExecutionContext,
   );
 
-  expect(message.rejected).toContain("relay processing is disabled");
+  expect(message.rejected).toContain("reply relay is disabled");
   expect(db.calls).toHaveLength(0);
   expect(effects).toEqual({ r2: 0, queue: 0 });
   expect(deliveries).toHaveLength(0);
@@ -301,7 +298,7 @@ test("invalid delivery configuration and relay timestamps fail closed", async ()
   expect(relayRecordIsActive("2099-01-01T00:00:00.000Z", null, 0)).toBe(true);
 });
 
-test("reply relay requires aligned Cloudflare authentication before token lookup", async () => {
+test("reply relay requires cryptographic aligned DKIM before token lookup", async () => {
   const token = "a".repeat(64);
   const message = inboundMessage(
     "operator-a@example.com",
@@ -341,49 +338,23 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
   expect(delivery.headers["X-Maildesk-Original-To"]).toBe("unlisted@example.com");
   expect(delivery.headers["X-Maildesk-Reply-Identity"]).toBe("info@example.com");
   expect(encodedMessageUpperBound(delivery)).toBeGreaterThan(delivery.text.length);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "mx.cloudflare.net; dkim=pass header.d=example.com" }),
-    "operator-a@example.com",
-  )).toBe(true);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "mx.cloudflare.net; spf = pass smtp.mailfrom=\"operator-a@example.com\"" }),
-    "operator-a@example.com",
-  )).toBe(true);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "notcloudflare.example; dkim=pass header.d=example.com" }),
-    "operator-a@example.com",
-  )).toBe(false);
-  for (const lookalike of [
-    "mx.cloudflare.net; spf=passive smtp.mailfrom=operator-a@example.com",
-    "mx.cloudflare.net; spf=pass smtp.mailfrom=operator-a@example.com.attacker.invalid",
-    "mx.cloudflare.net; dkim=passive header.d=example.com",
-    "mx.cloudflare.net; dkim=pass header.d=example.com.attacker.invalid",
-    "mx.cloudflare.net; dkim=pass header.i=@example.com.attacker.invalid",
-  ]) {
-    expect(operatorAuthenticationPassed(
-      new Headers({ "Authentication-Results": lookalike }),
-      "operator-a@example.com",
-    )).toBe(false);
-  }
-  const duplicatedResults = new Headers();
-  duplicatedResults.append(
-    "Authentication-Results",
-    "mx.cloudflare.net; spf=fail smtp.mailfrom=operator-a@example.com",
-  );
-  duplicatedResults.append(
-    "Authentication-Results",
-    "attacker.example; dkim=pass header.d=example.com",
-  );
-  expect(operatorAuthenticationPassed(duplicatedResults, "operator-a@example.com")).toBe(false);
 });
 
-function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {
+function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: RouterPolicy = policy) {
+  const policyJson = JSON.stringify(policyValue);
+  const policySha256 = createHash("sha256").update(policyJson).digest("hex");
+  db.activePolicy = { sha256: policySha256, json: policyJson };
   return {
     DB: db as unknown as D1Database,
     RAW_MAIL: {
       put: async () => undefined,
       get: async () => null,
       delete: async () => undefined,
+    } as unknown as R2Bucket,
+    POLICY_STORE: {
+      get: async (key: string) => key === `config/policy/${policySha256}.json`
+        ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer }
+        : null,
     } as unknown as R2Bucket,
     MAIL_JOBS: { send: async () => undefined } as unknown as Queue,
     EMAIL: {
@@ -392,9 +363,9 @@ function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {
         return { messageId: `provider-${deliveries.length}` };
       },
     } as SendEmail,
-    MAILDESK_POLICY_JSON: JSON.stringify(policy),
     MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
-    MAILDESK_RELAY_PROCESSING_MODE: "enabled" as const,
+    MAILDESK_INBOUND_RELAY_MODE: "enabled" as const,
+    MAILDESK_REPLY_RELAY_MODE: "enabled" as const,
     MAILDESK_REPLY_DOMAIN: "reply.maildesk.example.com",
     MAILDESK_REPLY_TOKEN_TTL_DAYS: "90",
     MAILDESK_SPOOL_RETENTION_DAYS: "7",
@@ -435,6 +406,7 @@ function mime(input: { from: string; replyTo?: string; messageId: string }): str
 
 class RelayD1 {
   calls: Array<{ sql: string; bindings: unknown[] }> = [];
+  activePolicy?: { sha256: string; json: string };
 
   prepare(sql: string): D1PreparedStatement {
     const call = { sql, bindings: [] as unknown[] };
@@ -442,7 +414,18 @@ class RelayD1 {
     const statement = {
       bind: (...bindings: unknown[]) => { call.bindings = bindings; return statement; },
       run: async () => ({ success: true, meta: { changes: 1 } }),
-      first: async () => null,
+      first: async () => sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
+        ? {
+            active_policy_sha256: this.activePolicy.sha256,
+            active_policy_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
+            revision_sha256: this.activePolicy.sha256,
+            revision_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
+            expected_domain_count: 1,
+            expected_route_count: 1,
+            projected_route_count: 1,
+            projected_domain_count: 1,
+          }
+        : null,
       all: async () => ({ success: true, results: [], meta: {} }),
       raw: async () => [],
     };

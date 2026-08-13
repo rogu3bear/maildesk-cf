@@ -42,7 +42,7 @@ describe("maildesk receipt workflow", () => {
       ],
       sender: {
         mode: "cloudflare_email_service",
-        authenticated_domains: ["tenant.example.com"],
+        candidate_domains: ["tenant.example.com"],
       },
     });
     writeJson(evidencePath, {

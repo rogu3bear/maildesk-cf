@@ -58,16 +58,32 @@
       "additionalProperties": false,
       "required": [
         "mode",
-        "processing_mode",
         "reply_domain",
         "reply_token_ttl_days",
         "spool_retention_days",
         "max_encoded_message_bytes",
         "banner_mode"
       ],
+      "oneOf": [
+        {
+          "required": ["inbound_processing_mode", "reply_processing_mode"],
+          "not": { "required": ["processing_mode"] }
+        },
+        {
+          "required": ["processing_mode"],
+          "not": {
+            "anyOf": [
+              { "required": ["inbound_processing_mode"] },
+              { "required": ["reply_processing_mode"] }
+            ]
+          }
+        }
+      ],
       "properties": {
         "mode": { "type": "string", "enum": ["inbox_relay", "web_desk"] },
         "processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
+        "inbound_processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
+        "reply_processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
         "reply_domain": { "$ref": "#/$defs/domain_name" },
         "reply_token_ttl_days": { "type": "integer", "minimum": 1, "maximum": 365 },
         "spool_retention_days": { "type": "integer", "minimum": 1, "maximum": 30 },
@@ -78,13 +94,13 @@
     "sender": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "authenticated_domains"],
+      "required": ["mode", "candidate_domains"],
       "properties": {
         "mode": {
           "type": "string",
           "enum": ["disabled", "cloudflare_email_service", "resend"]
         },
-        "authenticated_domains": {
+        "candidate_domains": {
           "type": "array",
           "items": { "$ref": "#/$defs/domain_name" },
           "uniqueItems": true
