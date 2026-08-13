@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
@@ -13,6 +14,11 @@ interface PolicyFile {
 interface PolicyDomain {
   role_aliases: Record<string, RoleAlias>;
   personal_aliases: Record<string, PersonalAlias>;
+  catch_all?: {
+    operators: string[];
+    reply_identity: string;
+    sink?: boolean;
+  };
 }
 
 interface RoleAlias {
@@ -41,6 +47,7 @@ interface DesiredDomain {
   role_aliases: string[];
   personal_aliases: string[];
   inbound_mx_provider?: InboundMxProvider;
+  catch_all?: boolean;
 }
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external";
@@ -71,6 +78,16 @@ interface ActivePolicyEvidence {
   expected_route_count?: number;
   projected_domain_count?: number;
   projected_route_count?: number;
+  active_desired_state_sha256?: string;
+  active_projection_sha256?: string;
+  projection_policy_sha256?: string;
+}
+
+interface LocalProjectionEvidence {
+  domains: number;
+  routes: number;
+  desired_state_sha256: string;
+  projection_sha256: string;
 }
 
 interface D1Evidence {
@@ -218,9 +235,10 @@ const policyText = readFileSync(policyPath, "utf8");
 const policy = JSON.parse(policyText) as PolicyFile;
 const desiredState = readJson<DesiredState>(desiredStatePath);
 requireCanonicalDesiredTopology(desiredState);
+const localProjection = collectLocalProjection(policyPath, desiredStatePath);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
-const rows = buildRows(policy, desiredState, evidence, policySha256);
+const rows = buildRows(policy, desiredState, evidence, policySha256, localProjection);
 const gaps = buildGaps(rows);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
 const edgeFailures = rows.filter((row) =>
@@ -254,6 +272,7 @@ const receipt = {
   desired_state_path: relativePath(desiredStatePath),
   evidence_path: evidencePath ? relativePath(resolve(root, evidencePath)) : null,
   local_policy_sha256: policySha256,
+  local_projection: localProjection,
   status: {
     local_truth_ok: localFailures.length === 0,
     edge_ready: edgeFailures.length === 0 && hasLiveEvidence(evidence),
@@ -311,6 +330,7 @@ function buildRows(
   desired: DesiredState,
   live: LiveEvidence,
   localPolicySha256: string,
+  localProjection: LocalProjectionEvidence,
 ): DomainRow[] {
   const desiredByDomain = new Map(desired.domains.map((domain) => [domain.name, domain]));
   const domainNames = unique([
@@ -339,7 +359,7 @@ function buildRows(
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
       inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
-      r2_policy: checkR2Policy(live, localPolicySha256),
+      r2_policy: checkR2Policy(live, localPolicySha256, localProjection),
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
       inbound_proof: checkInboundProof(
@@ -420,7 +440,11 @@ function comparePolicyAndDesired(
   const desiredRoles = [...desiredDomain.role_aliases].sort();
   const policyPersonal = Object.keys(policyDomain.personal_aliases).sort();
   const desiredPersonal = [...desiredDomain.personal_aliases].sort();
-  return same(policyRoles, desiredRoles) && same(policyPersonal, desiredPersonal) ? "ok" : "drift";
+  return same(policyRoles, desiredRoles) &&
+      same(policyPersonal, desiredPersonal) &&
+      Boolean(policyDomain.catch_all) === Boolean(desiredDomain.catch_all)
+    ? "ok"
+    : "drift";
 }
 
 function checkIncludes(values: string[] | undefined, expected: string): Status {
@@ -468,7 +492,11 @@ function checkInboundMx(
   return actualProvider === expectedProvider ? "ok" : "drift";
 }
 
-function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
+function checkR2Policy(
+  live: LiveEvidence,
+  localPolicySha256: string,
+  localProjection: LocalProjectionEvidence,
+): Status {
   const proof = live.active_policy;
   if (!proof) return "not_checked";
   const canonicalKey = `config/policy/${localPolicySha256}.json`;
@@ -477,10 +505,36 @@ function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
       proof.revision_r2_key === canonicalKey &&
       proof.object_key === canonicalKey &&
       proof.object_sha256 === localPolicySha256 &&
+      proof.projection_policy_sha256 === localPolicySha256 &&
+      proof.expected_domain_count === localProjection.domains &&
+      proof.expected_route_count === localProjection.routes &&
       proof.expected_domain_count === proof.projected_domain_count &&
-      proof.expected_route_count === proof.projected_route_count
+      proof.expected_route_count === proof.projected_route_count &&
+      proof.active_desired_state_sha256 === localProjection.desired_state_sha256 &&
+      proof.active_projection_sha256 === localProjection.projection_sha256
     ? "ok"
     : "drift";
+}
+
+function collectLocalProjection(policyFile: string, desiredFile: string): LocalProjectionEvidence {
+  const result = spawnSync(
+    process.execPath,
+    [resolve(root, "scripts/sync-route-policy.ts"), "--policy", policyFile, "--desired-state", desiredFile],
+    { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+  );
+  if (result.status !== 0) {
+    throw new Error(`local policy projection failed: ${String(result.stderr || result.stdout).trim().slice(0, 240)}`);
+  }
+  const parsed = JSON.parse(result.stdout) as Partial<LocalProjectionEvidence>;
+  if (
+    typeof parsed.domains !== "number" ||
+    typeof parsed.routes !== "number" ||
+    typeof parsed.desired_state_sha256 !== "string" ||
+    typeof parsed.projection_sha256 !== "string"
+  ) {
+    throw new Error("local policy projection returned an invalid proof summary");
+  }
+  return parsed as LocalProjectionEvidence;
 }
 
 function cloudflareEmailRoutingMx(): string[] {

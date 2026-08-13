@@ -52,8 +52,20 @@ export async function loadActivePolicy(
   const bytes = await object.arrayBuffer();
   if ((await sha256Hex(bytes)) !== row.active_policy_sha256) return null;
   const policy = parsePolicy(new TextDecoder().decode(bytes));
-  if (!policy || Object.keys(policy.domains).length !== Number(row.expected_domain_count)) return null;
+  if (
+    !policy ||
+    Object.keys(policy.domains).length !== Number(row.expected_domain_count) ||
+    policyRouteCount(policy) !== Number(row.expected_route_count)
+  ) return null;
   return { policy, sha256: row.active_policy_sha256, r2ObjectKey: expectedKey };
+}
+
+function policyRouteCount(policy: RouterPolicy): number {
+  return Object.values(policy.domains).reduce(
+    (count, domain) =>
+      count + Object.keys(domain.role_aliases).length + Object.keys(domain.personal_aliases).length + Number(Boolean(domain.catch_all)),
+    0,
+  );
 }
 
 function parsePolicy(value: string): RouterPolicy | null {

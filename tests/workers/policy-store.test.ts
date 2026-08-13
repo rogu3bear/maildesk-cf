@@ -6,7 +6,12 @@ const policyJson = JSON.stringify({
   default_reply_mode: "role_first",
   domains: {
     "example.com": {
-      role_aliases: {},
+      role_aliases: {
+        founders: {
+          operators: ["operator@example.com"],
+          reply_identity: "founders@example.com",
+        },
+      },
       personal_aliases: {},
     },
   },
@@ -30,6 +35,7 @@ test("inbox relay fails closed on D1, projection, key, or R2 digest drift", asyn
   const cases = [
     policyEnv({ digest, key: "config/policy/wrong.json", policyJson, projectedRoutes: 1, expectedRoutes: 1 }),
     policyEnv({ digest, key, policyJson, projectedRoutes: 0, expectedRoutes: 1 }),
+    policyEnv({ digest, key, policyJson, projectedRoutes: 2, expectedRoutes: 2 }),
     policyEnv({ digest, key, policyJson: `${policyJson} `, projectedRoutes: 1, expectedRoutes: 1 }),
   ];
 

@@ -925,8 +925,8 @@ class RelayD1 {
             revision_sha256: this.activePolicy.sha256,
             revision_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
             expected_domain_count: 1,
-            expected_route_count: 1,
-            projected_route_count: 1,
+            expected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
+            projected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
             projected_domain_count: 1,
           }
           : null;
@@ -994,4 +994,12 @@ class RelayD1 {
       results: [],
     }));
   }
+}
+
+function policyRouteCount(policy: RouterPolicy): number {
+  return Object.values(policy.domains).reduce(
+    (count, domain) =>
+      count + Object.keys(domain.role_aliases).length + Object.keys(domain.personal_aliases).length + Number(Boolean(domain.catch_all)),
+    0,
+  );
 }

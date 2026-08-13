@@ -39,6 +39,9 @@ interface ActivePolicyEvidence {
   expected_route_count: number;
   projected_domain_count: number;
   projected_route_count: number;
+  active_desired_state_sha256: string;
+  active_projection_sha256: string;
+  projection_policy_sha256: string;
 }
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
@@ -177,7 +180,7 @@ function collectActivePolicyEvidence(
 ): ActivePolicyEvidence | null {
   const [row] = wranglerD1Results(
     databaseName,
-    "SELECT rs.active_policy_sha256, rs.active_policy_r2_key, pr.r2_object_key AS revision_r2_key, pr.expected_domain_count, pr.expected_route_count, (SELECT COUNT(*) FROM domains d WHERE EXISTS (SELECT 1 FROM alias_routes ar WHERE ar.domain_id = d.id AND ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256)) AS projected_domain_count, (SELECT COUNT(*) FROM alias_routes ar WHERE ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256) AS projected_route_count FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1;",
+    "SELECT rs.active_policy_sha256, rs.active_policy_r2_key, pr.r2_object_key AS revision_r2_key, pr.expected_domain_count, pr.expected_route_count, (SELECT COUNT(*) FROM domains d WHERE EXISTS (SELECT 1 FROM alias_routes ar WHERE ar.domain_id = d.id AND ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256)) AS projected_domain_count, (SELECT COUNT(*) FROM alias_routes ar WHERE ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256) AS projected_route_count, (SELECT value FROM policy_projection_state WHERE key = 'active_policy_sha256') AS projection_policy_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_desired_state_sha256') AS active_desired_state_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_projection_sha256') AS active_projection_sha256 FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1;",
   );
   if (
     typeof row?.active_policy_sha256 !== "string" ||
@@ -186,7 +189,10 @@ function collectActivePolicyEvidence(
     typeof row.expected_domain_count !== "number" ||
     typeof row.expected_route_count !== "number" ||
     typeof row.projected_domain_count !== "number" ||
-    typeof row.projected_route_count !== "number"
+    typeof row.projected_route_count !== "number" ||
+    typeof row.projection_policy_sha256 !== "string" ||
+    typeof row.active_desired_state_sha256 !== "string" ||
+    typeof row.active_projection_sha256 !== "string"
   ) return null;
 
   const object = spawnSync(
@@ -206,6 +212,9 @@ function collectActivePolicyEvidence(
     expected_route_count: row.expected_route_count,
     projected_domain_count: row.projected_domain_count,
     projected_route_count: row.projected_route_count,
+    projection_policy_sha256: row.projection_policy_sha256,
+    active_desired_state_sha256: row.active_desired_state_sha256,
+    active_projection_sha256: row.active_projection_sha256,
   };
 }
 

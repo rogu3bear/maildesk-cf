@@ -49,7 +49,7 @@ describe("maildesk receipt workflow", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
-      active_policy: activePolicyEvidence(policyPath),
+      active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -197,19 +197,38 @@ function fileSha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function activePolicyEvidence(path: string) {
-  const digest = fileSha256(path);
+function activePolicyEvidence(policyPath: string, desiredPath: string) {
+  const digest = fileSha256(policyPath);
   const key = `config/policy/${digest}.json`;
+  const projection = projectionSummary(policyPath, desiredPath);
   return {
     active_policy_sha256: digest,
     active_policy_r2_key: key,
     revision_r2_key: key,
     object_key: key,
     object_sha256: digest,
-    expected_domain_count: 1,
-    expected_route_count: 1,
-    projected_domain_count: 1,
-    projected_route_count: 1,
+    projection_policy_sha256: digest,
+    expected_domain_count: projection.domains,
+    expected_route_count: projection.routes,
+    projected_domain_count: projection.domains,
+    projected_route_count: projection.routes,
+    active_desired_state_sha256: projection.desired_state_sha256,
+    active_projection_sha256: projection.projection_sha256,
+  };
+}
+
+function projectionSummary(policyPath: string, desiredPath: string) {
+  const result = spawnSync(
+    "bun",
+    ["run", "scripts/sync-route-policy.ts", "--", "--policy", policyPath, "--desired-state", desiredPath],
+    { cwd: root, encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  return JSON.parse(result.stdout) as {
+    domains: number;
+    routes: number;
+    desired_state_sha256: string;
+    projection_sha256: string;
   };
 }
 
