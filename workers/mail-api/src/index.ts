@@ -483,6 +483,9 @@ async function projectInboundDeliveryResult(
     );
     if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
     await env.RELAY_SPOOL.delete(job.relaySpoolKey);
+    await env.DB.prepare(
+      "UPDATE inbound_deliveries SET status = ?1, raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3",
+    ).bind(job.status, job.deliveryId, job.policySha256).run();
     return;
   }
   for (const [index, result] of job.results.entries()) {
@@ -520,6 +523,9 @@ async function projectInboundDeliveryResult(
     if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
     await env.RELAY_SPOOL.delete(job.relaySpoolKey);
   }
+  await env.DB.prepare(
+    "UPDATE inbound_deliveries SET status = ?1, raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL ELSE raw_r2_key END, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3",
+  ).bind(job.status, job.deliveryId, job.policySha256).run();
 }
 
 async function recordTerminalSendEvent(

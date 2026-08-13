@@ -37,6 +37,10 @@ sha256 = "sha256:8660249e395791774454d985727b7e33fb462dc8ec9c99ed30954105a2f46f2
 path = "migrations/0006_active_policy_revision.sql"
 sha256 = "sha256:ed4e860a93c8f1fe14b2fe44edfe76f9c6637f48dfb385ef16f778181bec4cfa"
 
+[[operation.migration]]
+path = "migrations/0007_inbound_delivery_claims.sql"
+sha256 = "sha256:6e636218d183ceb83336cb82b7d6d51cc4efbb55ea41d38c33cbaf006c8e35d5"
+
 [[operation.assertion]]
 kind = "table_exists"
 table = "policy_revisions"
@@ -68,6 +72,14 @@ table = "route_proofs"
 [[operation.assertion]]
 kind = "table_exists"
 table = "route_proof_coverage"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "inbound_deliveries"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "inbound_recipient_deliveries"
 
 [[operation.assertion]]
 kind = "foreign_key_check_empty"

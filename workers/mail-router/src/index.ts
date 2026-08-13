@@ -116,14 +116,35 @@ async function acceptInboxRelay(
     return;
   }
 
-  const deliveryId = crypto.randomUUID();
+  const rawSha256 = await sha256Hex(rawBytes);
+  const fingerprintSha256 = await sha256Hex([
+    normalizeMailbox(message.from),
+    normalizeMailbox(message.to),
+    rawSha256,
+  ].join("\0"));
+  let existingInbound: InboundDeliveryRow | null;
+  try {
+    existingInbound = await loadInboundDelivery(fingerprintSha256, env);
+  } catch {
+    message.setReject("maildesk could not verify inbound delivery idempotency");
+    return;
+  }
+  if (existingInbound) {
+    await recoverExistingInbound(existingInbound, env);
+    return;
+  }
+
+  const deliveryId = `inbound:${fingerprintSha256}`;
   const messageId = message.headers.get("message-id") ?? parsed.messageId ?? `<${deliveryId}@maildesk.invalid>`;
   const token = generateRelayToken();
   const tokenHash = await sha256Hex(token);
   const replyTo = relayAddress(token, config.replyDomain);
-  const relayId = `relay:${crypto.randomUUID()}`;
+  const relayId = `relay:${fingerprintSha256}`;
   const receivedAt = new Date().toISOString();
-  const deliveryMessageId = (index: number) => `<${deliveryId}.${index}@${config.replyDomain}>`;
+  const operatorRefs = await Promise.all(route.operators.map((operator) => sha256Hex(operator)));
+  const deliveryMessageIds = operatorRefs.map((operatorRef) =>
+    `<inbound.${fingerprintSha256}.${operatorRef.slice(0, 16)}@${config.replyDomain}>`
+  );
 
   const deliveries = route.operators.map((operator, index) =>
     buildOperatorDelivery(parsed, {
@@ -133,7 +154,7 @@ async function acceptInboxRelay(
       routeKind: route.routeKind,
       operatorCount: route.operators.length,
       relayAddress: replyTo,
-      deliveryMessageId: deliveryMessageId(index),
+      deliveryMessageId: deliveryMessageIds[index]!,
     }),
   );
   try {
@@ -167,13 +188,25 @@ async function acceptInboxRelay(
         tokenHash,
         expiresAt: tokenExpiresAt(new Date(receivedAt), config.replyTokenTtlDays),
         receivedAt,
+        fingerprintSha256,
+        spoolKey: candidateSpoolKey,
+        operatorRefs,
+        deliveryMessageIds,
       },
       policySha256,
       env,
     );
   } catch {
-    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
     structuredError("inbound_persistence_failed", { deliveryId });
+    const concurrent = await loadInboundDelivery(fingerprintSha256, env).catch(() => null);
+    if (concurrent) {
+      // A simultaneous provider delivery may have won the unique fingerprint
+      // claim after our initial read. Both invocations use the same immutable
+      // spool key and bytes, so the losing invocation must not delete it.
+      await recoverExistingInbound(concurrent, env);
+      return;
+    }
+    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
     message.setReject("maildesk could not create a durable route for this message");
     return;
   }
@@ -188,13 +221,47 @@ async function acceptInboxRelay(
     return;
   }
 
-  const settled = await Promise.allSettled(deliveries.map((delivery) => env.EMAIL!.send(delivery)));
-  const results = settled.map((result, index): OperatorDeliveryResult => ({
-    operator: route.operators[index] ?? "unknown",
-    ok: result.status === "fulfilled",
-    providerMessageId: result.status === "fulfilled" ? result.value?.messageId : undefined,
-    errorCode: result.status === "rejected" ? "provider_outcome_unknown" : undefined,
-  }));
+  const results: OperatorDeliveryResult[] = [];
+  for (const [index, delivery] of deliveries.entries()) {
+    const operator = route.operators[index] ?? "unknown";
+    const operatorRef = operatorRefs[index]!;
+    let claimed = false;
+    try {
+      claimed = await claimInboundRecipient(deliveryId, operatorRef, env);
+    } catch {
+      // No provider call occurred. The durable delivery remains visible for
+      // recovery rather than bypassing the recipient claim boundary.
+    }
+    if (!claimed) {
+      results.push({ operator, ok: false, errorCode: "recipient_claim_failed" });
+      continue;
+    }
+
+    try {
+      const providerResult = await env.EMAIL.send(delivery);
+      const result = {
+        operator,
+        ok: true,
+        providerMessageId: providerResult?.messageId,
+      } satisfies OperatorDeliveryResult;
+      results.push(result);
+      await projectInboundRecipientResult(deliveryId, operatorRef, result, env).catch(() => {
+        // The `sending` state is intentionally ambiguous and is never
+        // auto-replayed. Later reconciliation may attach provider evidence.
+        structuredError("inbound_recipient_projection_failed", { deliveryId });
+      });
+    } catch {
+      const result = {
+        operator,
+        ok: false,
+        errorCode: "provider_outcome_unknown",
+      } satisfies OperatorDeliveryResult;
+      results.push(result);
+      await projectInboundRecipientResult(deliveryId, operatorRef, result, env).catch(() => {
+        structuredError("inbound_recipient_projection_failed", { deliveryId });
+      });
+    }
+  }
   const accepted = results.filter((result) => result.ok).length;
   let status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed" = accepted === results.length
     ? "provider_accepted"
@@ -205,9 +272,14 @@ async function acceptInboxRelay(
   try {
     await recordDeliveryResults(persisted, results, status, candidateSpoolKey, env);
     if (status === "provider_accepted") {
-      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => {
+      try {
+        await env.RELAY_SPOOL.delete(candidateSpoolKey);
+        await env.DB.prepare(
+          "UPDATE inbound_deliveries SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND policy_sha256 = ?2",
+        ).bind(deliveryId, policySha256).run();
+      } catch {
         structuredError("inbound_terminal_spool_cleanup_failed", { deliveryId });
-      });
+      }
     }
   } catch {
     structuredError("inbound_delivery_audit_failed", { deliveryId });
@@ -443,6 +515,10 @@ async function persistInboxRelay(
     tokenHash: string;
     expiresAt: string;
     receivedAt: string;
+    fingerprintSha256: string;
+    spoolKey: string;
+    operatorRefs: string[];
+    deliveryMessageIds: string[];
   },
   policySha256: string,
   env: Env,
@@ -484,10 +560,25 @@ async function persistInboxRelay(
       policySha256,
     ),
     env.DB.prepare(
+      "INSERT INTO inbound_deliveries (id, fingerprint_sha256, relay_id, thread_id, route_id, policy_sha256, raw_r2_key, received_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')",
+    ).bind(
+      relay.deliveryId,
+      relay.fingerprintSha256,
+      relay.relayId,
+      threadId,
+      routeId,
+      policySha256,
+      relay.spoolKey,
+      relay.receivedAt,
+    ),
+    ...relay.operatorRefs.map((operatorRef, index) => env.DB.prepare(
+      "INSERT INTO inbound_recipient_deliveries (delivery_id, operator_ref, delivery_message_id, status) VALUES (?1, ?2, ?3, 'pending')",
+    ).bind(relay.deliveryId, operatorRef, relay.deliveryMessageIds[index])),
+    env.DB.prepare(
       "UPDATE route_health SET last_inbound_at = ?1, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?2 AND policy_sha256 = ?3 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?3)",
     ).bind(relay.receivedAt, routeId, policySha256),
   ]);
-  if (persisted.slice(0, 2).some((result) => Number(result.meta?.changes ?? 0) === 0)) {
+  if (persisted.slice(0, 3 + relay.operatorRefs.length).some((result) => Number(result.meta?.changes ?? 0) === 0)) {
     throw new Error("active policy revision changed during inbound persistence");
   }
   await recordAudit(
@@ -518,6 +609,12 @@ async function recordDeliveryResults(
   const providerMessageIds = results.flatMap((result) =>
     result.providerMessageId ? [result.providerMessageId] : []
   );
+  const deliveryProjected = await env.DB.prepare(
+    "UPDATE inbound_deliveries SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3",
+  ).bind(status, inbound.deliveryId, inbound.policySha256).run();
+  if (Number(deliveryProjected.meta?.changes ?? 0) === 0) {
+    throw new Error("inbound delivery result has no durable claim");
+  }
   const projected = await env.DB.prepare(
     "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5 AND policy_sha256 = ?6 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?6)",
   )
@@ -564,6 +661,92 @@ async function recordDeliveryResults(
       recoverySpool: Boolean(spoolKey),
     },
   );
+}
+
+async function loadInboundDelivery(
+  fingerprintSha256: string,
+  env: Env,
+): Promise<InboundDeliveryRow | null> {
+  return env.DB.prepare(
+    "SELECT id, relay_id, thread_id, route_id, policy_sha256, raw_r2_key, received_at, status FROM inbound_deliveries WHERE fingerprint_sha256 = ?1 LIMIT 1",
+  ).bind(fingerprintSha256).first<InboundDeliveryRow>();
+}
+
+async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Promise<void> {
+  const recipients = await env.DB.prepare(
+    "SELECT operator_ref, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
+  ).bind(inbound.id).all<InboundRecipientDeliveryRow>();
+  const rows = recipients.results ?? [];
+  const results: InboundDeliveryResultJob["results"] = rows.map((row) => ({
+    operatorRef: row.operator_ref,
+    ok: row.status === "provider_accepted",
+    providerMessageId: row.provider_message_id ?? undefined,
+    errorCode: row.status === "provider_accepted"
+      ? undefined
+      : row.error_code ?? "provider_outcome_unknown",
+  }));
+  const accepted = results.filter((result) => result.ok).length;
+  const status: InboundDeliveryResultJob["status"] = accepted === results.length && results.length > 0
+    ? "provider_accepted"
+    : accepted > 0
+      ? "partial_delivery"
+      : "recovery_required";
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE inbound_deliveries SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+    ).bind(status, inbound.id),
+    env.DB.prepare(
+      "UPDATE route_health SET inbound_status = 'recovery_required', last_error_code = 'inbound_result_recovery_pending', updated_at = CURRENT_TIMESTAMP WHERE route_id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?2)",
+    ).bind(
+      inbound.route_id,
+      inbound.policy_sha256,
+    ),
+  ]).catch(() => undefined);
+  if (!inbound.raw_r2_key || results.length === 0) return;
+  await env.MAIL_JOBS.send({
+    kind: "inbound_delivery_result",
+    deliveryId: inbound.id,
+    relayId: inbound.relay_id,
+    threadId: inbound.thread_id,
+    routeId: inbound.route_id,
+    policySha256: inbound.policy_sha256,
+    status,
+    results,
+    relaySpoolKey: inbound.raw_r2_key,
+    receivedAt: inbound.received_at,
+  }).catch(() => undefined);
+}
+
+async function claimInboundRecipient(
+  deliveryId: string,
+  operatorRef: string,
+  env: Env,
+): Promise<boolean> {
+  const claimed = await env.DB.prepare(
+    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending'",
+  ).bind(deliveryId, operatorRef).run();
+  return Number(claimed.meta?.changes ?? 0) === 1;
+}
+
+async function projectInboundRecipientResult(
+  deliveryId: string,
+  operatorRef: string,
+  result: OperatorDeliveryResult,
+  env: Env,
+): Promise<void> {
+  const projected = await env.DB.prepare(
+    "UPDATE inbound_recipient_deliveries SET status = ?1, provider_message_id = ?2, error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?4 AND operator_ref = ?5 AND status = 'sending'",
+  ).bind(
+    result.ok ? "provider_accepted" : "recovery_required",
+    result.providerMessageId ?? null,
+    result.errorCode ?? null,
+    deliveryId,
+    operatorRef,
+  ).run();
+  if (Number(projected.meta?.changes ?? 0) !== 1) {
+    throw new Error("inbound recipient result has no sending claim");
+  }
 }
 
 async function inboundDeliveryResultJob(
@@ -813,6 +996,24 @@ interface PersistedInbound {
   routeId: string;
   threadId: string;
   policySha256: string;
+}
+
+interface InboundDeliveryRow {
+  id: string;
+  relay_id: string;
+  thread_id: string;
+  route_id: string;
+  policy_sha256: string;
+  raw_r2_key: string | null;
+  received_at: string;
+  status: "pending" | "sending" | "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
+}
+
+interface InboundRecipientDeliveryRow {
+  operator_ref: string;
+  status: "pending" | "sending" | "provider_accepted" | "recovery_required" | "failed";
+  provider_message_id: string | null;
+  error_code: string | null;
 }
 
 interface PolicyBoundRoute {

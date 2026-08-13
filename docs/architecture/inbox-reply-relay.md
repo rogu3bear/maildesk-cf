@@ -16,6 +16,16 @@ Cloudflare direct forwarding is deliberately unavailable for relay-enabled
 routes: its custom-header surface cannot safely replace `Reply-To` or prepend
 the operator banner.
 
+Before any operator send, the Worker claims a stable SHA-256 fingerprint over
+the normalized envelope and exact raw MIME, plus one hashed recipient row for
+each policy-selected operator. Each operator delivery uses a deterministic
+Message-ID. A repeated provider invocation reconstructs body-free results from
+those rows and never repeats a recipient already claimed as `sending` or
+`provider_accepted`. Because Cloudflare Email Service provides no idempotency
+key, an interrupted `sending` transition is explicitly `recovery_required` and
+requires provider reconciliation or manual recovery; token possession or a
+retained MIME spool never authorizes automatic replay.
+
 ## Reply invariant
 
 The reply-domain Worker accepts a message only when the relay is active, the

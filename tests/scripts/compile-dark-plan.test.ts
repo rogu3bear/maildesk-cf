@@ -38,7 +38,7 @@ describe("dark deployment blueprint", () => {
   test("binds every D1 migration to cfctl's prefixed content digest", () => {
     const pack = readFileSync(resolve(root, ".cfctl/operations/d1-migrations.toml"), "utf8");
     const migrations = [...pack.matchAll(/path = "([^"]+)"\nsha256 = "([^"]+)"/g)];
-    expect(migrations).toHaveLength(6);
+    expect(migrations).toHaveLength(7);
     for (const [, path, declared] of migrations) {
       const observed = `sha256:${createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex")}`;
       expect(declared).toBe(observed);

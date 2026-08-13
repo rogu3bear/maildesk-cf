@@ -242,6 +242,77 @@ test("accepted inbound deliveries retain a spool and enqueue body-free recovery 
   expect(JSON.stringify(queued[0])).not.toContain("operator-b@example.com");
 });
 
+test("identical inbound redelivery repairs durable results without repeating provider sends", async () => {
+  const db = new RelayD1("UPDATE route_health SET inbound_status");
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = {
+    send: async () => { throw new Error("queue unavailable"); },
+  } as unknown as Queue;
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); },
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<same-delivery@example.net>" });
+
+  const first = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(first, env, {} as ExecutionContext);
+  const firstMessageIds = deliveries.map((delivery) => delivery.headers?.["Message-ID"]);
+
+  const redelivery = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
+
+  expect(first.rejected).toBeUndefined();
+  expect(redelivery.rejected).toBeUndefined();
+  expect(spoolPuts).toHaveLength(1);
+  expect(deliveries.map((delivery) => delivery.to)).toEqual([
+    "operator-a@example.com",
+    "operator-b@example.com",
+  ]);
+  expect(firstMessageIds).toHaveLength(2);
+  expect(new Set(firstMessageIds).size).toBe(2);
+  expect(firstMessageIds.every((messageId) =>
+    /^<inbound\.[a-f0-9]{64}\.[a-f0-9]{16}@reply\.maildesk\.example\.com>$/.test(String(messageId))
+  )).toBe(true);
+  expect(db.inboundDelivery?.status).toBe("provider_accepted");
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "provider_accepted")).toBe(true);
+});
+
+test("ambiguous recipient projection is never replayed on identical inbound redelivery", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = ?1");
+  const deliveries: EmailMessageBuilder[] = [];
+  const queued: unknown[] = [];
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
+  const raw = mime({ from: "sender@example.net", messageId: "<ambiguous-recipient@example.net>" });
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries).toHaveLength(2);
+  expect(db.recipientDeliveries.map((recipient) => recipient.status).sort()).toEqual([
+    "provider_accepted",
+    "sending",
+  ]);
+  expect(queued.at(-1)).toMatchObject({
+    kind: "inbound_delivery_result",
+    status: "partial_delivery",
+    results: [
+      { ok: false, errorCode: "provider_outcome_unknown" },
+      { ok: true },
+    ],
+  });
+});
+
 test("a policy revision change during persistence rejects without rewriting route authority", async () => {
   const db = new RelayD1(undefined, true);
   const deliveries: EmailMessageBuilder[] = [];
@@ -537,6 +608,25 @@ function mime(input: { from: string; replyTo?: string; messageId: string }): str
 class RelayD1 {
   calls: Array<{ sql: string; bindings: unknown[] }> = [];
   activePolicy?: { sha256: string; json: string };
+  inboundDelivery?: {
+    id: string;
+    fingerprint_sha256: string;
+    relay_id: string;
+    thread_id: string;
+    route_id: string;
+    policy_sha256: string;
+    raw_r2_key: string;
+    received_at: string;
+    status: string;
+  };
+  recipientDeliveries: Array<{
+    delivery_id: string;
+    operator_ref: string;
+    delivery_message_id: string;
+    status: string;
+    provider_message_id: string | null;
+    error_code: string | null;
+  }> = [];
   private failedOnce = false;
 
   constructor(
@@ -554,10 +644,34 @@ class RelayD1 {
           this.failedOnce = true;
           throw new Error(`forced D1 failure for ${this.failOnceSql}`);
         }
+        if (sql.includes("UPDATE inbound_recipient_deliveries SET status = 'sending'")) {
+          const recipient = this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending"
+          );
+          if (!recipient) return { success: true, meta: { changes: 0 } };
+          recipient.status = "sending";
+        }
+        if (sql.includes("UPDATE inbound_recipient_deliveries SET status = ?1")) {
+          const recipient = this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[3] && row.operator_ref === call.bindings[4] && row.status === "sending"
+          );
+          if (!recipient) return { success: true, meta: { changes: 0 } };
+          recipient.status = String(call.bindings[0]);
+          recipient.provider_message_id = call.bindings[1] === null ? null : String(call.bindings[1]);
+          recipient.error_code = call.bindings[2] === null ? null : String(call.bindings[2]);
+        }
+        if (sql.includes("UPDATE inbound_deliveries SET status = ?1") && this.inboundDelivery) {
+          this.inboundDelivery.status = String(call.bindings[0]);
+        }
         return { success: true, meta: { changes: 1 } };
       },
-      first: async () => sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
-        ? {
+      first: async () => {
+        if (sql.includes("SELECT id, relay_id, thread_id") && this.inboundDelivery &&
+            this.inboundDelivery.fingerprint_sha256 === call.bindings[0]) {
+          return this.inboundDelivery;
+        }
+        return sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
+          ? {
             active_policy_sha256: this.activePolicy.sha256,
             active_policy_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
             revision_sha256: this.activePolicy.sha256,
@@ -567,14 +681,49 @@ class RelayD1 {
             projected_route_count: 1,
             projected_domain_count: 1,
           }
-        : null,
-      all: async () => ({ success: true, results: [], meta: {} }),
+          : null;
+      },
+      all: async () => ({
+        success: true,
+        results: sql.includes("FROM inbound_recipient_deliveries")
+          ? this.recipientDeliveries.filter((row) => row.delivery_id === call.bindings[0])
+          : [],
+        meta: {},
+      }),
       raw: async () => [],
+      __call: call,
     };
     return statement as unknown as D1PreparedStatement;
   }
 
   async batch(statements: D1PreparedStatement[]) {
+    for (const statement of this.rejectPolicyBoundPersistence ? [] : statements) {
+      const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
+      if (!call) continue;
+      if (call.sql.includes("INSERT INTO inbound_deliveries")) {
+        this.inboundDelivery = {
+          id: String(call.bindings[0]),
+          fingerprint_sha256: String(call.bindings[1]),
+          relay_id: String(call.bindings[2]),
+          thread_id: String(call.bindings[3]),
+          route_id: String(call.bindings[4]),
+          policy_sha256: String(call.bindings[5]),
+          raw_r2_key: String(call.bindings[6]),
+          received_at: String(call.bindings[7]),
+          status: "pending",
+        };
+      }
+      if (call.sql.includes("INSERT INTO inbound_recipient_deliveries")) {
+        this.recipientDeliveries.push({
+          delivery_id: String(call.bindings[0]),
+          operator_ref: String(call.bindings[1]),
+          delivery_message_id: String(call.bindings[2]),
+          status: "pending",
+          provider_message_id: null,
+          error_code: null,
+        });
+      }
+    }
     return statements.map((_, index) => ({
       success: true,
       meta: { changes: this.rejectPolicyBoundPersistence && index < 2 ? 0 : 1 },

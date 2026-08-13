@@ -159,3 +159,11 @@ legacy non-inbox development input.
   provider responses, or credentials into D1 audit JSON.
 
 Fail closed first. Add manual recovery paths after the invariant is clear.
+
+Inbound operator delivery has its own pre-provider idempotency boundary. The
+exact raw MIME plus normalized envelope produces one stable fingerprint, and
+D1 stores a unique recipient state for each hashed operator destination before
+Email Service is called. Redelivery may repair body-free result projection, but
+it must not resend a recipient in `sending`, `provider_accepted`, or
+`recovery_required`; Cloudflare Email Service does not expose a provider
+idempotency key for safely replaying that transition.

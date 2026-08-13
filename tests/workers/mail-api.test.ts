@@ -47,6 +47,13 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.sql).toContain("policy_sha256 = ?6");
     expect(healthUpdate?.sql).toContain("rs.active_policy_sha256 = ?6");
     expect(healthUpdate?.binds[5]).toBe("a".repeat(64));
+    const deliveryUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE inbound_deliveries SET status"));
+    expect(deliveryUpdate?.sql).toContain("raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL");
+    expect(deliveryUpdate?.binds).toEqual([
+      "provider_accepted",
+      "delivery-recovery",
+      "a".repeat(64),
+    ]);
   });
 
   test("a delayed inbound result cannot advance a superseding policy revision", async () => {
