@@ -77,9 +77,11 @@ const plan = {
           step(`deploy-${worker.script_name}`, "wrangler.deploy", worker.config, "redeploy the exact prior Worker version in a separate plan"),
         ),
         step("queue-consumer", "queues-create-consumer", `${desired.storage.queue} -> ${desired.workers.relay_outbound.script_name}`, "delete the exact new consumer in a separate plan"),
-        step("ui-access", "access-application-and-policy-readback", "entire routing-health hostname", "detach the custom domain; do not weaken the existing Access policy"),
+        readStep("ui-access-application", "access-applications-get-an-access-application", "existing whole-host Access application"),
+        readStep("ui-access-policies", "access-policies-list-access-app-policies", "existing approved operator policies"),
+        step("ui-custom-domain", "workers.domains.update", "entire routing-health hostname", "restore the exact prior Worker custom-domain attachment in a separate plan"),
         step("reply-routing", "email-routing-settings-enable-email-routing-dns", desired.operator_delivery.reply_domain, "remove only the reply-subdomain routing and restore its prior DNS snapshot"),
-        step("reply-catch-all", "email-routing-catch-all-worker-rule", desired.workers.relay_router.script_name, "restore the exact prior subdomain catch-all rule"),
+        step("reply-catch-all", "email-routing-routing-rules-update-catch-all-rule", desired.workers.relay_router.script_name, "restore the exact prior subdomain catch-all rule in a separate plan"),
       ],
     },
   ],
@@ -121,7 +123,11 @@ if (outputPath) {
 }
 
 function step(id: string, capability: string, target: string, rollback: string) {
-  return { id, capability, target, operation_id: null, plan_hash: null, rollback };
+  return { id, capability, target, effect: "mutation", operation_id: null, plan_hash: null, rollback };
+}
+
+function readStep(id: string, capability: string, target: string) {
+  return { id, capability, target, effect: "read_only", operation_id: null, plan_hash: null, rollback: "not applicable" };
 }
 
 function arg(name: string): string | undefined {

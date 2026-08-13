@@ -20,6 +20,12 @@ describe("dark deployment blueprint", () => {
     expect(JSON.stringify(plan)).toContain("maildesk-cf-relay-dlq");
     expect(JSON.stringify(plan)).toContain("r2-put-bucket-lifecycle-configuration");
     expect(JSON.stringify(plan)).toContain("email-routing-settings-enable-email-routing-dns");
+    expect(JSON.stringify(plan)).toContain("email-routing-routing-rules-update-catch-all-rule");
+    expect(JSON.stringify(plan)).toContain("access-applications-get-an-access-application");
+    expect(JSON.stringify(plan)).toContain("access-policies-list-access-app-policies");
+    expect(JSON.stringify(plan)).toContain("workers.domains.update");
+    expect(JSON.stringify(plan)).not.toContain("email-routing-catch-all-worker-rule");
+    expect(JSON.stringify(plan)).not.toContain("access-application-and-policy-readback");
     expect(JSON.stringify(plan)).not.toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/);
     expect(plan.explicit_exclusions).toContain("live inbound or outbound email probes");
   });
