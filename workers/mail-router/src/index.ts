@@ -24,6 +24,7 @@ import {
   RouteDecision,
   RouterPolicy,
 } from "../../shared/router";
+import { loadActivePolicy } from "../../shared/policy-store";
 
 const MIME_CONTENT_TYPE = "message/rfc822";
 
@@ -506,7 +507,7 @@ async function persistSinkRoute(
 
 async function loadActiveRelay(tokenHash: string, env: Env): Promise<ReplyRelayRow | null> {
   const relay = await env.DB.prepare(
-    "SELECT rr.id, rr.thread_id, rr.route_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id WHERE rr.token_sha256 = ?1 LIMIT 1",
+    "SELECT rr.id, rr.thread_id, rr.route_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE rr.token_sha256 = ?1 AND ar.enabled = 1 LIMIT 1",
   )
     .bind(tokenHash)
     .first<ReplyRelayRow>();
@@ -545,17 +546,7 @@ async function routeMessage(
 }
 
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
-  let policyJson = env.MAILDESK_POLICY_JSON;
-  if (!policyJson && env.MAILDESK_POLICY_R2_KEY) {
-    const object = await env.RAW_MAIL.get(env.MAILDESK_POLICY_R2_KEY);
-    policyJson = await object?.text();
-  }
-  if (!policyJson) return null;
-  try {
-    return JSON.parse(policyJson) as RouterPolicy;
-  } catch {
-    return null;
-  }
+  return (await loadActivePolicy(env))?.policy ?? null;
 }
 
 async function resolveThreadId(

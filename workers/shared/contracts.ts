@@ -1,6 +1,7 @@
 export interface MaildeskEnv {
   DB: D1Database;
   RAW_MAIL: R2Bucket;
+  POLICY_STORE?: R2Bucket;
   MAIL_JOBS: Queue<MailJob>;
   EMAIL?: SendEmail;
   RESEND_API_KEY?: string;
@@ -9,7 +10,6 @@ export interface MaildeskEnv {
   MAILDESK_REPLY_API_MODE?: "disabled" | "token";
   MAILDESK_OUTBOUND_MODE?: "disabled" | "cloudflare_email_service" | "resend";
   MAILDESK_POLICY_JSON?: string;
-  MAILDESK_POLICY_R2_KEY?: string;
   MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
   MAILDESK_OPERATOR_DELIVERY_MODE?: "web_desk" | "inbox_relay";
   MAILDESK_RELAY_PROCESSING_MODE?: "disabled" | "enabled";
@@ -57,6 +57,7 @@ export interface RouteHealthSummary {
   observedProvider?: string;
   operatorCount: number;
   replyIdentity: string;
+  policySha256?: string;
   inboundStatus: RouteProofStatus;
   replyStatus: RouteProofStatus;
   lastInboundAt?: string;
@@ -233,8 +234,8 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     },
     {
       name: "policy_config",
-      ok: Boolean(env.MAILDESK_POLICY_JSON || env.MAILDESK_POLICY_R2_KEY),
-      detail: "optional in template",
+      ok: Boolean(env.MAILDESK_POLICY_JSON || env.POLICY_STORE),
+      detail: env.POLICY_STORE ? "active_revision" : "optional inline development policy",
     },
   ];
 

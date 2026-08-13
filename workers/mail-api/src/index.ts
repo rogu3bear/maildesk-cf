@@ -17,6 +17,7 @@ import {
   relayRecordIsActive,
 } from "../../shared/inbox-relay";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
+import { loadActivePolicy } from "../../shared/policy-store";
 
 const RESEND_REQUEST_TIMEOUT_MS = 10_000;
 // wrangler.toml allows five retries after the initial Queue delivery.
@@ -593,21 +594,7 @@ function isAttachmentArray(value: unknown): boolean {
 }
 
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
-  const policyJson = env.MAILDESK_POLICY_JSON ?? (await loadPolicyFromR2(env));
-  if (!policyJson) return null;
-  // Malformed policy JSON must not 500; return null so callers emit a clean
-  // 503 policy_unavailable (mirrors the router's fail-closed handling).
-  try {
-    return JSON.parse(policyJson) as RouterPolicy;
-  } catch {
-    return null;
-  }
-}
-
-async function loadPolicyFromR2(env: Env): Promise<string | null> {
-  if (!env.MAILDESK_POLICY_R2_KEY) return null;
-  const policyObject = await env.RAW_MAIL.get(env.MAILDESK_POLICY_R2_KEY);
-  return policyObject?.text() ?? null;
+  return (await loadActivePolicy(env))?.policy ?? null;
 }
 
 async function sendOutboundReply(

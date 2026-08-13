@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -56,20 +56,30 @@ const desiredStatePath = resolve(
   argValue("--desired-state") ?? defaultPath("config/desired-state.local.json", "config/desired-state.example.json"),
 );
 const executeLocal = args.includes("--local");
-const maxLocalBatchBytes = 48 * 1024;
 
 if (args.includes("--remote")) {
   fail("remote policy sync is a protected action; use a reviewed cfctl plan instead");
 }
 
-const policy = readJson<RouterPolicy>(policyPath, "policy");
-const desired = readJson<DesiredState>(desiredStatePath, "desired state");
+const policyBytes = readFile(policyPath, "policy");
+const desiredStateBytes = readFile(desiredStatePath, "desired state");
+const policy = parseJson<RouterPolicy>(policyBytes, "policy");
+const desired = parseJson<DesiredState>(desiredStateBytes, "desired state");
 const routes = projectRoutes(policy, desired);
-const projection = projectionSql(routes, maxLocalBatchBytes);
-const digest = createHash("sha256").update(projection.canonical).digest("hex");
+const policySha256 = sha256(policyBytes);
+const desiredStateSha256 = sha256(desiredStateBytes);
+const policyR2Key = `config/policy/${policySha256}.json`;
+const projection = projectionSql(routes, policySha256, policyR2Key);
+const projectionSha256 = sha256(projection);
+
+const outputPath = argValue("--out");
+if (outputPath) {
+  writeFileSync(resolve(outputPath), projection, { encoding: "utf8", mode: 0o600 });
+  chmodSync(resolve(outputPath), 0o600);
+}
 
 if (executeLocal) {
-  executeLocalProjection(projection.batches, argValue("--database") ?? desired.storage.d1_database);
+  executeLocalProjection(projection, argValue("--database") ?? desired.storage.d1_database);
 }
 
 console.log(JSON.stringify({
@@ -81,8 +91,11 @@ console.log(JSON.stringify({
   personal_routes: routes.filter((route) => route.decisionKind === "personal_alias").length,
   catch_all_routes: routes.filter((route) => route.decisionKind === "catch_all").length,
   sink_routes: routes.filter((route) => route.decisionKind === "sink").length,
-  local_batches: projection.batches.length,
-  projection_sha256: digest,
+  policy_sha256: policySha256,
+  desired_state_sha256: desiredStateSha256,
+  policy_r2_key: policyR2Key,
+  projection_sha256: projectionSha256,
+  projection_bytes: Buffer.byteLength(projection, "utf8"),
 }, null, 2));
 
 function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRoute[] {
@@ -173,68 +186,59 @@ function projectedRoute(
   return { domain, localPart, decisionKind, storageKind, desiredProvider: provider, operators, replyIdentity, initialStatus };
 }
 
-function projectionSql(routes: ProjectedRoute[], maxBatchBytes: number): { canonical: string; batches: string[] } {
-  const routeGroups: string[][] = [];
+function projectionSql(routes: ProjectedRoute[], policySha256: string, policyR2Key: string): string {
+  const domainCount = new Set(routes.map((route) => route.domain)).size;
+  const statements: string[] = [
+    `INSERT INTO policy_revisions (policy_sha256, r2_object_key, expected_domain_count, expected_route_count) VALUES (${sql(policySha256)}, ${sql(policyR2Key)}, ${domainCount}, ${routes.length}) ON CONFLICT(policy_sha256) DO UPDATE SET r2_object_key = excluded.r2_object_key, expected_domain_count = excluded.expected_domain_count, expected_route_count = excluded.expected_route_count;`,
+    "UPDATE alias_routes SET enabled = 0;",
+  ];
   for (const route of routes) {
     const domainId = stableId("domain", route.domain);
     const identityId = stableId("identity", route.replyIdentity);
     const routeId = stableId("route", route.domain, route.localPart);
-    const statements = [
+    const routeStatements = [
       `INSERT OR IGNORE INTO domains (id, domain) VALUES (${sql(domainId)}, ${sql(route.domain)});`,
       `INSERT INTO identities (id, domain_id, address, kind) VALUES (${sql(identityId)}, ${sql(domainId)}, ${sql(route.replyIdentity)}, ${sql(route.storageKind)}) ON CONFLICT(id) DO UPDATE SET address = excluded.address, kind = excluded.kind;`,
-      `INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (${sql(routeId)}, ${sql(domainId)}, ${sql(route.localPart)}, ${sql(route.storageKind)}, ${sql(identityId)}, ${sql(route.decisionKind)}) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind;`,
+      `INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind, enabled, policy_sha256) VALUES (${sql(routeId)}, ${sql(domainId)}, ${sql(route.localPart)}, ${sql(route.storageKind)}, ${sql(identityId)}, ${sql(route.decisionKind)}, 1, ${sql(policySha256)}) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind, enabled = 1, policy_sha256 = excluded.policy_sha256;`,
       `DELETE FROM alias_route_operators WHERE route_id = ${sql(routeId)};`,
     ];
     for (const operator of route.operators) {
       const operatorId = stableId("operator", operator);
-      statements.push(
+      routeStatements.push(
         `INSERT INTO operators (id, email) VALUES (${sql(operatorId)}, ${sql(operator)}) ON CONFLICT(id) DO UPDATE SET email = excluded.email;`,
         `INSERT OR IGNORE INTO alias_route_operators (route_id, operator_id) VALUES (${sql(routeId)}, ${sql(operatorId)});`,
       );
     }
-    statements.push(
-      `INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, updated_at) VALUES (${sql(routeId)}, ${sql(`${route.localPart}@${route.domain}`)}, ${sql(route.decisionKind)}, ${sql(route.desiredProvider)}, ${route.operators.length}, ${sql(route.replyIdentity)}, ${sql(route.initialStatus)}, ${sql(route.initialStatus)}, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, desired_provider = excluded.desired_provider, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, inbound_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.inbound_status = 'intentionally_excluded' THEN excluded.inbound_status ELSE route_health.inbound_status END, reply_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.reply_status = 'intentionally_excluded' THEN excluded.reply_status ELSE route_health.reply_status END, updated_at = CURRENT_TIMESTAMP;`,
+    routeStatements.push(
+      `INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, policy_sha256, updated_at) VALUES (${sql(routeId)}, ${sql(`${route.localPart}@${route.domain}`)}, ${sql(route.decisionKind)}, ${sql(route.desiredProvider)}, ${route.operators.length}, ${sql(route.replyIdentity)}, ${sql(route.initialStatus)}, ${sql(route.initialStatus)}, ${sql(policySha256)}, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, desired_provider = excluded.desired_provider, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, policy_sha256 = excluded.policy_sha256, inbound_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.inbound_status = 'intentionally_excluded' THEN excluded.inbound_status ELSE route_health.inbound_status END, reply_status = CASE WHEN route_health.desired_provider <> excluded.desired_provider OR excluded.reply_status = 'intentionally_excluded' THEN excluded.reply_status ELSE route_health.reply_status END, updated_at = CURRENT_TIMESTAMP;`,
     );
-    routeGroups.push(statements);
+    statements.push(...routeStatements);
   }
-  const canonical = transaction(routeGroups.flat());
-  const batches: string[] = [];
-  let current: string[] = [];
-  for (const group of routeGroups) {
-    const candidate = transaction([...current, ...group]);
-    if (Buffer.byteLength(candidate, "utf8") > maxBatchBytes && current.length > 0) {
-      batches.push(transaction(current));
-      current = [...group];
-    } else {
-      current.push(...group);
-    }
-    if (Buffer.byteLength(transaction(current), "utf8") > maxBatchBytes) {
-      fail("one projected route exceeds the local D1 batch limit");
-    }
-  }
-  if (current.length > 0) batches.push(transaction(current));
-  return { canonical, batches };
+  statements.push(
+    `UPDATE policy_revisions SET superseded_at = CURRENT_TIMESTAMP WHERE activated_at IS NOT NULL AND policy_sha256 <> ${sql(policySha256)} AND superseded_at IS NULL;`,
+    `UPDATE policy_revisions SET activated_at = COALESCE(activated_at, CURRENT_TIMESTAMP), superseded_at = NULL WHERE policy_sha256 = ${sql(policySha256)};`,
+    `INSERT INTO runtime_state (singleton, active_policy_sha256, active_policy_r2_key, activated_at) VALUES (1, ${sql(policySha256)}, ${sql(policyR2Key)}, CURRENT_TIMESTAMP) ON CONFLICT(singleton) DO UPDATE SET active_policy_sha256 = excluded.active_policy_sha256, active_policy_r2_key = excluded.active_policy_r2_key, activated_at = excluded.activated_at;`,
+  );
+  return transaction(statements);
 }
 
 function transaction(statements: string[]): string {
   return ["PRAGMA foreign_keys = ON;", "BEGIN TRANSACTION;", ...statements, "COMMIT;", ""].join("\n");
 }
 
-function executeLocalProjection(sqlBatches: string[], database: string) {
+function executeLocalProjection(sqlText: string, database: string) {
   if (!/^[a-zA-Z0-9._-]+$/.test(database)) fail("D1 database name is invalid");
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-sync-"));
   try {
-    for (const [index, sqlText] of sqlBatches.entries()) {
-      const file = join(directory, `projection-${String(index + 1).padStart(3, "0")}.sql`);
-      writeFileSync(file, sqlText, { encoding: "utf8", mode: 0o600 });
-      const result = spawnSync(
-        "bunx",
-        ["wrangler", "d1", "execute", database, "--local", "--file", file],
-        { cwd: root, encoding: "utf8", env: process.env },
-      );
-      if (result.status !== 0) {
-        fail(`local D1 policy sync batch ${index + 1}/${sqlBatches.length} failed: ${boundedError(result.stderr || result.stdout)}`);
-      }
+    const file = join(directory, "projection.sql");
+    writeFileSync(file, sqlText, { encoding: "utf8", mode: 0o600 });
+    const result = spawnSync(
+      "bunx",
+      ["wrangler", "d1", "execute", database, "--local", "--file", file],
+      { cwd: root, encoding: "utf8", env: process.env },
+    );
+    if (result.status !== 0) {
+      fail(`local D1 policy sync failed: ${boundedError(result.stderr || result.stdout)}`);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -279,12 +283,24 @@ function sql(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-function readJson<T>(path: string, label: string): T {
+function readFile(path: string, label: string): Buffer {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as T;
+    return readFileSync(path);
   } catch {
-    fail(`${label} is missing or invalid JSON`);
+    fail(`${label} is missing`);
   }
+}
+
+function parseJson<T>(bytes: Buffer, label: string): T {
+  try {
+    return JSON.parse(bytes.toString("utf8")) as T;
+  } catch {
+    fail(`${label} is invalid JSON`);
+  }
+}
+
+function sha256(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function defaultPath(local: string, example: string): string {

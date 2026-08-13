@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
 
-test("private-scale policy projection is split into bounded local D1 batches", () => {
+test("private-scale policy projection activates one immutable revision atomically", () => {
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-batches-"));
   try {
     const aliases = Object.fromEntries([
@@ -29,8 +29,8 @@ test("private-scale policy projection is split into bounded local D1 batches", (
     const policyPath = join(directory, "policy.json");
     const desiredPath = join(directory, "desired.json");
     const binDirectory = join(directory, "bin");
-    const batchLog = join(directory, "batches.log");
     const sqlLog = join(directory, "projection.sql");
+    const outputSql = join(directory, "governed-projection.sql");
     writeFileSync(
       policyPath,
       JSON.stringify({
@@ -76,9 +76,6 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 [ -n "$file" ]
-bytes=$(wc -c < "$file" | tr -d ' ')
-[ "$bytes" -le 49152 ]
-printf '%s\n' "$bytes" >> "$MAILDESK_POLICY_BATCH_LOG"
 cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
 `,
       { mode: 0o700 },
@@ -94,6 +91,8 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
         "--desired-state",
         desiredPath,
         "--local",
+        "--out",
+        outputSql,
       ],
       {
         cwd: root,
@@ -101,20 +100,31 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
         env: {
           ...process.env,
           PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
-          MAILDESK_POLICY_BATCH_LOG: batchLog,
           MAILDESK_POLICY_SQL_LOG: sqlLog,
         },
       },
     );
 
     expect(result.status).toBe(0);
-    const summary = JSON.parse(result.stdout) as { routes: number; local_batches: number };
-    const batchSizes = readFileSync(batchLog, "utf8").trim().split("\n").map(Number);
+    const summary = JSON.parse(result.stdout) as {
+      routes: number;
+      policy_sha256: string;
+      desired_state_sha256: string;
+      policy_r2_key: string;
+      projection_sha256: string;
+    };
     expect(summary.routes).toBe(141);
-    expect(summary.local_batches).toBeGreaterThan(1);
-    expect(batchSizes).toHaveLength(summary.local_batches);
-    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(48 * 1024);
+    expect(summary.policy_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(summary.desired_state_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(summary.policy_r2_key).toBe(`config/policy/${summary.policy_sha256}.json`);
+    expect(summary.projection_sha256).toMatch(/^[a-f0-9]{64}$/);
     const sql = readFileSync(sqlLog, "utf8");
+    expect(readFileSync(outputSql, "utf8")).toBe(sql);
+    expect(sql.match(/BEGIN TRANSACTION;/g)).toHaveLength(1);
+    expect(sql.match(/COMMIT;/g)).toHaveLength(1);
+    expect(sql.indexOf("UPDATE alias_routes SET enabled = 0")).toBeLessThan(sql.indexOf("enabled, policy_sha256"));
+    expect(sql.lastIndexOf("INSERT INTO runtime_state")).toBeGreaterThan(sql.lastIndexOf("INSERT INTO route_health"));
+    expect(sql).toContain(summary.policy_r2_key);
     expect(sql).toContain("route:example.com:team%2Bops");
     expect(sql).toContain("route:example.com:team_ops");
     expect(sql).toContain("'excluded'");
