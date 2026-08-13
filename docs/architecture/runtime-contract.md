@@ -90,8 +90,10 @@ Generated WASM is rebuilt before each Worker bundle and is not committed.
 ### Storage
 
 D1 stores queryable route, relay, idempotency, health, and body-free audit state.
-R2 stores temporary relay/recovery MIME only in `inbox_relay`; successful
-processing deletes it early and lifecycle policy provides a seven-day ceiling.
+R2 stores temporary relay/recovery content only in `inbox_relay`: original MIME,
+generated per-recipient operator-delivery payloads, and operator-reply MIME.
+Successful processing deletes each object early and lifecycle policy provides a
+seven-day ceiling.
 Queues own async delivery and redelivery; provider retry policy must remain explicit.
 
 ## Required Bindings
@@ -100,7 +102,7 @@ Queues own async delivery and redelivery; provider retry policy must remain expl
 | --- | --- | --- |
 | `DB` | D1 | policy projection, relays, route health, proofs, and body-free audit events |
 | `POLICY_STORE` | R2 | immutable digest-addressed private policy revisions |
-| `RELAY_SPOOL` | R2 | bounded temporary inbound recovery and operator-reply MIME |
+| `RELAY_SPOOL` | R2 | bounded temporary inbound MIME, generated operator-delivery recovery payloads, and operator-reply MIME |
 | `MAIL_JOBS` | Queue | durable outbound relay jobs from router to outbound Worker |
 | `EMAIL` | Email Service | operator delivery and authenticated public-identity replies |
 
@@ -163,10 +165,13 @@ Fail closed first. Add manual recovery paths after the invariant is clear.
 Inbound operator delivery has its own pre-provider idempotency boundary. The
 exact raw MIME plus normalized envelope produces one stable fingerprint, and
 D1 stores a unique recipient state for each hashed operator destination before
-Email Service is called. Redelivery may repair body-free result projection, but
-it must not resend a recipient in `sending`, `provider_accepted`, or
-`recovery_required`; Cloudflare Email Service does not expose a provider
-idempotency key for safely replaying that transition.
+Email Service is called. Redelivery may repair body-free result projection and
+may resume a recipient that is still durably `pending`, because its provider
+claim never occurred. The resume must load the exact generated recovery payload
+and repeat the active policy, enabled route, immutable spool generation, and
+`pending -> sending` claim. It must not resend a recipient in `sending`,
+`provider_accepted`, or `recovery_required`; Cloudflare Email Service does not
+expose a provider idempotency key for safely replaying those transitions.
 
 Policy supersession is the one safe automatic retirement case: D1 may remove
 an old fingerprint and relay only when the active revision differs and every

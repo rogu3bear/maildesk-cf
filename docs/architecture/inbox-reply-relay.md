@@ -19,20 +19,24 @@ the operator banner.
 Before any operator send, the Worker claims a stable SHA-256 fingerprint over
 the normalized envelope and exact raw MIME, plus one hashed recipient row for
 each policy-selected operator. Each operator delivery uses a deterministic
-Message-ID. A repeated provider invocation reconstructs body-free results from
-those rows and never repeats a recipient already claimed as `sending` or
-`provider_accepted`. Because Cloudflare Email Service provides no idempotency
-key, an interrupted `sending` transition is explicitly `recovery_required` and
-requires provider reconciliation or manual recovery; token possession or a
-retained MIME spool never authorizes automatic replay.
+Message-ID. Before D1 activation, R2 receives one bounded, immutable delivery
+payload per hashed recipient. A repeated provider invocation may use that exact
+payload only after D1 atomically advances the same-policy recipient from
+`pending` to `sending`; it never repeats a recipient already claimed as
+`sending`, `provider_accepted`, or `recovery_required`. Because Cloudflare Email
+Service provides no idempotency key, an interrupted `sending` transition is
+explicitly `recovery_required` and requires provider reconciliation or manual
+recovery. Possessing a token or an R2 object never bypasses the D1 claim.
 
 An all-`pending` claim may be retired automatically only when its policy
 revision is no longer active and D1 atomically proves that no recipient crossed
 the provider-send boundary. Each attempt has a token-hash-qualified R2 key, so
 delayed cleanup of the retired attempt cannot delete a replacement spool. The
-replacement route is then evaluated under the current policy. Same-policy
-`pending` claims and every `sending` or terminal recipient remain preserved for
-explicit recovery rather than being reset speculatively.
+replacement route is then evaluated under the current policy. A same-policy
+`pending` recipient is provably unsent and may resume from its exact recovery
+payload under the active-policy, enabled-route, recipient-state, and spool-key
+guards. Every `sending` or terminal recipient remains preserved for explicit
+reconciliation rather than being reset speculatively.
 
 ## Reply invariant
 
@@ -50,9 +54,12 @@ the 90-day relay lifetime; v1 has no assignment or conversation lock.
 ## Content and evidence
 
 Encoded operator deliveries and outbound replies are capped at 5 MiB. MIME is
-parsed ephemerally. R2 is a temporary spool with a seven-day lifecycle ceiling,
-and terminal provider acceptance deletes the object early. D1 and the dashboard
-never store or show subjects, bodies, attachments, or thread history.
+parsed ephemerally. R2 temporarily holds the original inbound MIME plus one
+generated operator-delivery recovery payload per pending recipient, all under
+the same seven-day lifecycle ceiling. Recipient provider acceptance deletes its
+payload early; terminal aggregate processing deletes the original MIME. D1 and
+the dashboard never store or show subjects, bodies, attachments, or thread
+history.
 
 Inbound attachments are preserved in the separately addressed operator
 delivery. Operator-authored outbound attachments fail closed in this milestone:

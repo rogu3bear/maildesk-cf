@@ -226,8 +226,8 @@ test("accepted inbound deliveries retain a spool and enqueue body-free recovery 
 
   expect(message.rejected).toBeUndefined();
   expect(deliveries).toHaveLength(2);
-  expect(puts).toHaveLength(1);
-  expect(deletes).toHaveLength(0);
+  expect(puts).toHaveLength(3);
+  expect(deletes).toHaveLength(2);
   expect(queued).toHaveLength(1);
   expect(queued[0]).toMatchObject({
     kind: "inbound_delivery_result",
@@ -265,7 +265,7 @@ test("identical inbound redelivery repairs durable results without repeating pro
 
   expect(first.rejected).toBeUndefined();
   expect(redelivery.rejected).toBeUndefined();
-  expect(spoolPuts).toHaveLength(1);
+  expect(spoolPuts).toHaveLength(3);
   expect(deliveries.map((delivery) => delivery.to)).toEqual([
     "operator-a@example.com",
     "operator-b@example.com",
@@ -313,6 +313,70 @@ test("ambiguous recipient projection is never replayed on identical inbound rede
   });
 });
 
+test("identical redelivery sends a same-policy recipient whose provider claim never occurred", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
+  const deliveries: EmailMessageBuilder[] = [];
+  const objects = new Map<string, string | ArrayBuffer>();
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string, value: string | ArrayBuffer) => { objects.set(key, value); },
+    get: async (key: string) => {
+      const value = objects.get(key);
+      if (value === undefined) return null;
+      return {
+        text: async () => typeof value === "string" ? value : new TextDecoder().decode(value),
+      };
+    },
+    delete: async (key: string) => { objects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = [
+    "From: sender@example.net",
+    "To: security@example.com",
+    "Subject: Pending recipient recovery",
+    "Message-ID: <pending-recipient@example.net>",
+    'Content-Type: multipart/mixed; boundary="maildesk-boundary"',
+    "",
+    "--maildesk-boundary",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Recover the exact generated delivery.",
+    "--maildesk-boundary",
+    "Content-Type: text/plain; name=proof.txt",
+    "Content-Disposition: attachment; filename=proof.txt",
+    "Content-Transfer-Encoding: base64",
+    "",
+    "cmVjb3ZlcnktYnl0ZXM=",
+    "--maildesk-boundary--",
+    "",
+  ].join("\r\n");
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  expect(db.recipientDeliveries.map((recipient) => recipient.status)).toEqual([
+    "pending",
+    "provider_accepted",
+  ]);
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries.map((delivery) => delivery.to)).toEqual([
+    "operator-b@example.com",
+    "operator-a@example.com",
+  ]);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "provider_accepted")).toBe(true);
+  expect(deliveries[1]?.replyTo).toBe(deliveries[0]?.replyTo);
+  expect(deliveries[1]?.attachments?.[0]?.filename).toBe("proof.txt");
+  expect(new TextDecoder().decode(deliveries[1]?.attachments?.[0]?.content)).toBe("recovery-bytes");
+});
+
 test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
   const supersedingPolicy = {
     default_reply_mode: "role_first",
@@ -356,8 +420,8 @@ test("a superseded all-pending claim is retired before its MIME is rerouted", as
   await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
   expect(redelivery.rejected).toBeUndefined();
   expect(deliveries).toHaveLength(2);
-  expect(spoolPuts).toHaveLength(2);
-  expect(spoolPuts[0]).not.toBe(spoolPuts[1]);
+  expect(spoolPuts).toHaveLength(6);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[3]);
   expect(spoolObjects.size).toBe(0);
   expect(db.inboundDelivery?.status).toBe("provider_accepted");
 });
@@ -418,8 +482,8 @@ test("policy supersession between pre-send read and recipient claim reroutes onl
 
   expect(currentAttempt.rejected).toBeUndefined();
   expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-a@example.com"]);
-  expect(spoolPuts).toHaveLength(2);
-  expect(spoolPuts[0]).not.toBe(spoolPuts[1]);
+  expect(spoolPuts).toHaveLength(5);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[3]);
   expect(db.recipientDeliveries).toHaveLength(1);
   expect(db.recipientDeliveries[0]?.status).toBe("provider_accepted");
 });
@@ -799,6 +863,11 @@ class RelayD1 {
         return { success: true, meta: { changes: 1 } };
       },
       first: async () => {
+        if (sql.includes("FROM inbound_recipient_deliveries") && sql.includes("operator_ref = ?2")) {
+          return this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1]
+          ) ?? null;
+        }
         if (sql.includes("SELECT id, relay_id, thread_id") && this.inboundDelivery &&
             this.inboundDelivery.fingerprint_sha256 === call.bindings[0]) {
           return this.inboundDelivery;
