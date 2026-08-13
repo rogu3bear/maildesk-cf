@@ -172,6 +172,11 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   assertWorkerConfigPath("relay_outbound", desired.workers.relay_outbound.config, "mail-outbound");
 
   const router = wranglerConfig(routerPath);
+  assertExactTopLevelKeys(router, routerPath, [
+    "name", "main", "compatibility_date", "workers_dev", "send_email", "build", "vars",
+    "d1_databases", "r2_buckets", "queues",
+  ]);
+  requireExactEmailBinding(router, routerPath);
   assertConfigName(router, routerPath, desired.workers.relay_router.script_name);
   const routerVars = record(router.vars, `${routerPath} [vars]`);
   if ("MAILDESK_RELAY_PROCESSING_MODE" in routerVars) {
@@ -192,6 +197,11 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
 
   const outboundPath = desired.workers.relay_outbound.config;
   const outbound = wranglerConfig(outboundPath);
+  assertExactTopLevelKeys(outbound, outboundPath, [
+    "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "send_email",
+    "build", "vars", "d1_databases", "r2_buckets", "queues",
+  ]);
+  requireExactEmailBinding(outbound, outboundPath);
   assertConfigName(outbound, outboundPath, desired.workers.relay_outbound.script_name);
   assertStorageBindings(outbound, outboundPath, desired);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "queue", desired.storage.queue);
@@ -202,12 +212,32 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   }
 
   const health = wranglerConfig(healthPath);
+  assertExactTopLevelKeys(health, healthPath, [
+    "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "build", "assets", "vars", "d1_databases",
+  ]);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   requireExactArrayLength(health, healthPath, "d1_databases", 1);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
   if (healthVars.MAILDESK_UI_AUTH_MODE !== "access" || healthVars.MAILDESK_UI_ACCESS_SCOPE !== "all_routes") {
     throw new Error(`${healthPath} must require Cloudflare Access for all_routes`);
+  }
+}
+
+function assertExactTopLevelKeys(config: Record<string, unknown>, path: string, allowed: string[]): void {
+  const unexpected = Object.keys(config).filter((key) => !allowed.includes(key)).sort();
+  if (unexpected.length > 0) {
+    throw new Error(`${path} contains unexpected top-level authority: ${unexpected.join(", ")}`);
+  }
+}
+
+function requireExactEmailBinding(config: Record<string, unknown>, path: string): void {
+  const bindings = config.send_email;
+  if (!Array.isArray(bindings) || bindings.length !== 1 ||
+      bindings[0] === null || typeof bindings[0] !== "object" || Array.isArray(bindings[0]) ||
+      (bindings[0] as Record<string, unknown>).name !== "EMAIL" ||
+      Object.keys(bindings[0] as Record<string, unknown>).length !== 1) {
+    throw new Error(`${path} send_email must contain exactly the EMAIL binding`);
   }
 }
 

@@ -40,4 +40,26 @@ describe("relay deployment topology", () => {
       rmSync(resolve(root, desiredPath), { force: true });
     }
   });
+
+  test("rejects an additional Email binding", () => {
+    const desired = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const configPath = `deploy/mail-router/wrangler.review-${process.pid}-extra-email.toml`;
+    const desiredPath = `config/desired-state.review-${process.pid}-extra-email.local.json`;
+    const config = readFileSync(resolve(root, desired.workers.relay_router.config), "utf8")
+      .replace('{ name = "EMAIL" }', '{ name = "EMAIL" },\n  { name = "UNEXPECTED_EMAIL" }');
+    try {
+      writeFileSync(resolve(root, configPath), config);
+      desired.workers.relay_router.config = configPath;
+      writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+      const result = spawnSync("bun", ["run", "scripts/check-relay-topology.ts", desiredPath], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("send_email must contain exactly the EMAIL binding");
+    } finally {
+      rmSync(resolve(root, configPath), { force: true });
+      rmSync(resolve(root, desiredPath), { force: true });
+    }
+  });
 });

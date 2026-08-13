@@ -52,6 +52,11 @@ function checkRouter(desired: DesiredState): void {
   requireSectionCount(config, path, "r2_buckets", 2);
   requireSectionCount(config, path, "queues.producers", 1);
   requireBinding(config, path, "send_email", "EMAIL");
+  requireExactEmailBinding(config, path);
+  requireExactTopLevelKeys(config, path, [
+    "name", "main", "compatibility_date", "workers_dev", "send_email", "build", "vars",
+    "d1_databases", "r2_buckets", "queues",
+  ]);
   forbid(config, path, /\[\[queues\.consumers\]\]/, "Queue consumer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
   forbid(config, path, /^MAILDESK_RELAY_PROCESSING_MODE\s*=/m, "legacy relay processing switch");
@@ -72,6 +77,11 @@ function checkOutbound(desired: DesiredState): void {
   requireSectionCount(config, path, "r2_buckets", 2);
   requireSectionCount(config, path, "queues.consumers", 1);
   requireBinding(config, path, "send_email", "EMAIL");
+  requireExactEmailBinding(config, path);
+  requireExactTopLevelKeys(config, path, [
+    "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "send_email",
+    "build", "vars", "d1_databases", "r2_buckets", "queues",
+  ]);
   requireValue(config, path, "queue", desired.storage.queue);
   requireValue(config, path, "dead_letter_queue", desired.storage.dead_letter_queue);
   requireNumericValue(config, path, "max_batch_size", 1);
@@ -95,6 +105,9 @@ function checkRoutingHealth(desired: DesiredState): void {
   forbid(config, path, /^send_email\s*=/m, "Email binding");
   requireAssignment(config, path, "MAILDESK_UI_AUTH_MODE", "access");
   requireAssignment(config, path, "MAILDESK_UI_ACCESS_SCOPE", "all_routes");
+  requireExactTopLevelKeys(config, path, [
+    "name", "main", "compatibility_date", "workers_dev", "upload_source_maps", "build", "assets", "vars", "d1_databases",
+  ]);
 }
 
 function readJson<T>(path: string): T | null {
@@ -156,6 +169,33 @@ function requireSectionCount(config: string, path: string, section: string, expe
   const pattern = new RegExp(`^\\[\\[${escapeRegex(section)}\\]\\]$`, "gm");
   const observed = [...config.matchAll(pattern)].length;
   if (observed !== expected) failures.push(`${path} must contain exactly ${expected} ${section} entries`);
+}
+
+function requireExactEmailBinding(config: string, path: string): void {
+  try {
+    const parsed = Bun.TOML.parse(config) as Record<string, unknown>;
+    const bindings = parsed.send_email;
+    if (!Array.isArray(bindings) || bindings.length !== 1 ||
+        bindings[0] === null || typeof bindings[0] !== "object" || Array.isArray(bindings[0]) ||
+        (bindings[0] as Record<string, unknown>).name !== "EMAIL" ||
+        Object.keys(bindings[0] as Record<string, unknown>).length !== 1) {
+      failures.push(`${path} send_email must contain exactly the EMAIL binding`);
+    }
+  } catch (error) {
+    failures.push(`${path} must be valid TOML: ${detail(error)}`);
+  }
+}
+
+function requireExactTopLevelKeys(config: string, path: string, allowed: string[]): void {
+  try {
+    const parsed = Bun.TOML.parse(config) as Record<string, unknown>;
+    const unexpected = Object.keys(parsed).filter((key) => !allowed.includes(key)).sort();
+    if (unexpected.length > 0) {
+      failures.push(`${path} contains unexpected top-level authority: ${unexpected.join(", ")}`);
+    }
+  } catch (error) {
+    failures.push(`${path} must be valid TOML: ${detail(error)}`);
+  }
 }
 
 function requireValue(config: string, path: string, key: string, value: string): void {

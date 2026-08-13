@@ -225,6 +225,40 @@ describe("dark deployment blueprint", () => {
     }
   });
 
+  test("rejects additional Worker authority including extra Email bindings", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    try {
+      for (const role of ["relay_router", "relay_outbound"] as const) {
+        const desired = structuredClone(original);
+        const roleDirectory = role === "relay_router" ? "mail-router" : "mail-outbound";
+        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-extra-email.toml`;
+        const config = readFileSync(resolve(root, desired.workers[role].config), "utf8")
+          .replace('{ name = "EMAIL" }', '{ name = "EMAIL" },\n  { name = "UNEXPECTED_EMAIL" }');
+        writeFileSync(resolve(root, relativePath), config);
+        desired.workers[role].config = relativePath;
+        const desiredPath = desiredFixturePath(`${role}-extra-email`);
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, role).not.toBe(0);
+        expect(result.stdout, role).toBe("");
+        expect(result.stderr, role).toContain("send_email must contain exactly the EMAIL binding");
+        rmSync(resolve(root, relativePath), { force: true });
+        rmSync(resolve(root, desiredPath), { force: true });
+      }
+    } finally {
+      cleanupDesiredFixtures();
+      for (const directoryName of ["mail-router", "mail-outbound"]) {
+        const directoryPath = resolve(root, "deploy", directoryName);
+        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+          rmSync(resolve(directoryPath, name), { force: true });
+        }
+      }
+    }
+  });
+
   test("rejects legacy desired activation, extra Worker roles, and desired state outside the checkout", () => {
     const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
     const fixtures: Array<[string, (desired: Record<string, any>) => void, string]> = [
