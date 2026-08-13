@@ -649,8 +649,9 @@ async function sendOutboundReply(
     if (!activePolicy) {
       return { ok: false, provider: mode, error: "active policy is unavailable" };
     }
-    if (outboundLeaksOperatorIdentity(job, activePolicy.policy)) {
-      return { ok: false, provider: mode, error: "outbound content contains a private operator identity" };
+    const privacyFailure = outboundPrivacyFailure(job, activePolicy.policy);
+    if (privacyFailure) {
+      return { ok: false, provider: mode, error: privacyFailure };
     }
   }
 
@@ -775,7 +776,14 @@ function senderDomain(address: string): string {
   return parsed?.domain ?? "";
 }
 
-function outboundLeaksOperatorIdentity(job: OutboundReplyRequestedJob, policy: RouterPolicy): boolean {
+function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPolicy): string | null {
+  // Opaque outbound attachments cannot be proven free of operator identities:
+  // an address may be compressed, embedded in document structure, image metadata,
+  // or encoded in a format that a byte/text scan cannot interpret. Fail closed
+  // until a format-aware attachment policy exists.
+  if ((job.attachments?.length ?? 0) > 0) {
+    return "outbound attachments are disabled until format-aware privacy inspection is configured";
+  }
   const operators = new Set<string>();
   for (const domain of Object.values(policy.domains)) {
     for (const route of Object.values(domain.role_aliases)) {
@@ -796,9 +804,10 @@ function outboundLeaksOperatorIdentity(job: OutboundReplyRequestedJob, policy: R
     job.html ?? "",
     htmlVisibleText(job.html ?? ""),
     ...Object.entries(outwardHeaders).flat(),
-    ...(job.attachments ?? []).flatMap((attachment) => [attachment.filename, attachment.contentId ?? ""]),
   ].map(normalizedVisibleValue);
-  return [...operators].some((operator) => operator && visible.some((value) => value.includes(operator)));
+  return [...operators].some((operator) => operator && visible.some((value) => value.includes(operator)))
+    ? "outbound content contains a private operator identity"
+    : null;
 }
 
 function htmlVisibleText(html: string): string {

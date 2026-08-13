@@ -71,7 +71,7 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
   });
 
-  test("inbox relay rejects visible private operator identity leakage before provider send", async () => {
+  test("inbox relay rejects opaque outbound attachments before provider send", async () => {
     const policyJson = inboxRelayPolicyJson();
     const db = new D1Recorder({
       id: "relay-leak",
@@ -90,16 +90,18 @@ describe("mail API outbound sender modes", () => {
       "To: relay@example.net",
       "Subject: Re: security question",
       "Message-ID: <operator-leak@tenant.example.com>",
-      'Content-Type: multipart/alternative; boundary="reply-boundary"',
+      'Content-Type: multipart/mixed; boundary="reply-boundary"',
       "",
       "--reply-boundary",
       "Content-Type: text/plain; charset=utf-8",
       "",
-      "Contact operator\u2060@tenant.example.com",
+      "Safe reply body",
       "--reply-boundary",
-      "Content-Type: text/html; charset=utf-8",
+      'Content-Type: text/plain; name="notes.txt"',
+      'Content-Disposition: attachment; filename="notes.txt"',
+      "Content-Transfer-Encoding: base64",
       "",
-      '<p>Contact oper<span style="display:none">X</span>ator@tenant.example.com</p>',
+      "b3BlcmF0b3JAdGVuYW50LmV4YW1wbGUuY29t",
       "--reply-boundary--",
     ].join("\r\n")).buffer;
     const batch = new MessageBatchRecorder([{
@@ -109,6 +111,60 @@ describe("mail API outbound sender modes", () => {
       operator: "operator@tenant.example.com",
       operatorMessageId: "<operator-leak@tenant.example.com>",
       rawR2Key: "relay-spool/leak.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: { get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }) },
+      RELAY_SPOOL: { get: async () => ({ size: raw.byteLength, arrayBuffer: async () => raw }) },
+      POLICY_STORE: policyStore(policyJson),
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+      MAILDESK_MAX_ENCODED_MESSAGE_BYTES: "5242880",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    expect(batch.ackCount).toBe(1);
+    const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+    expect(result.result?.error).toBe(
+      "outbound attachments are disabled until format-aware privacy inspection is configured",
+    );
+  });
+
+  test("inbox relay rejects normalized private operator identity in visible content", async () => {
+    const policyJson = inboxRelayPolicyJson();
+    const db = new D1Recorder({
+      id: "relay-visible-leak",
+      thread_id: "thread-visible-leak",
+      external_recipient: "correspondent@example.net",
+      reply_identity: "security@tenant.example.com",
+      original_message_id: "<original@example.net>",
+      references_json: "[]",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      revoked_at: null,
+      route_address: "security@tenant.example.com",
+    }, policyJson);
+    const email = new SendEmailRecorder("must-not-send");
+    const raw = new TextEncoder().encode([
+      "From: Operator <operator@tenant.example.com>",
+      "To: relay@example.net",
+      "Subject: Re: security question",
+      "Message-ID: <operator-visible-leak@tenant.example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Contact operator\u2060@tenant.example.com",
+    ].join("\r\n")).buffer;
+    const batch = new MessageBatchRecorder([{
+      kind: "inbox_reply_received",
+      attemptId: "relay-attempt:visible-leak",
+      relayId: "relay-visible-leak",
+      operator: "operator@tenant.example.com",
+      operatorMessageId: "<operator-visible-leak@tenant.example.com>",
+      rawR2Key: "relay-spool/visible-leak.eml",
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
 

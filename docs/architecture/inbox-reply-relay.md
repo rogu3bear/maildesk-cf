@@ -19,10 +19,11 @@ the operator banner.
 ## Reply invariant
 
 The reply-domain Worker accepts a message only when the relay is active, the
-envelope and RFC 5322 sender resolve to the same current operator, Cloudflare's
-authentication results contain aligned SPF or DKIM, and Rust authorizes that
-operator for the stored route identity. The recipient and public sender come
-only from the relay row.
+envelope and RFC 5322 sender resolve to the same current operator, the raw reply
+has a cryptographically verified and aligned DKIM signature that signs `From`,
+and Rust authorizes that operator for the stored route identity. Sender-supplied
+authentication-result headers never authorize a reply. The recipient and public
+sender come only from the relay row.
 
 Duplicate operator messages use `(relay, normalized operator Message-ID)` as the
 idempotency boundary. Either current operator may make a distinct reply during
@@ -34,6 +35,12 @@ Encoded operator deliveries and outbound replies are capped at 5 MiB. MIME is
 parsed ephemerally. R2 is a temporary spool with a seven-day lifecycle ceiling,
 and terminal provider acceptance deletes the object early. D1 and the dashboard
 never store or show subjects, bodies, attachments, or thread history.
+
+Inbound attachments are preserved in the separately addressed operator
+delivery. Operator-authored outbound attachments fail closed in this milestone:
+opaque binary formats cannot be proven free of private operator identities by a
+byte scan. A later format-aware attachment policy may enable explicitly
+supported formats without weakening the privacy boundary.
 
 Evidence advances independently through `declared`, `local_policy_valid`,
 `edge_verified`, `provider_accepted`, `inbox_verified`, and `reply_verified`.
