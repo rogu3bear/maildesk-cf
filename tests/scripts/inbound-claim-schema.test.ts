@@ -7,7 +7,10 @@ import {
   CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL,
   DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
 } from "../../workers/mail-router/src/index";
-import { CLAIMED_REPLY_SPOOL_SQL } from "../../workers/mail-api/src/index";
+import {
+  CLAIMED_INBOUND_RESULT_SQL,
+  CLAIMED_REPLY_SPOOL_SQL,
+} from "../../workers/mail-api/src/index";
 
 const root = resolve(import.meta.dir, "../..");
 const OLD_POLICY = "a".repeat(64);
@@ -81,6 +84,102 @@ test("relay attempts persist the authenticated reply-spool digest", () => {
       "relay-spool/invalid.eml",
       "8".repeat(63),
     )).toThrow();
+  } finally {
+    database.close();
+  }
+});
+
+test("inbound Queue results must match the complete durable D1 claim", () => {
+  const database = migratedDatabase();
+  try {
+    seedSupersededClaim(database);
+    database.exec(`
+      UPDATE inbound_recipient_deliveries
+      SET status = 'provider_accepted', provider_message_id =
+        CASE operator_ref WHEN '${"e".repeat(64)}' THEN 'provider-a' ELSE 'provider-b' END;
+    `);
+    const results = [
+      {
+        operatorRef: "e".repeat(64),
+        deliveryPayloadR2Key: "relay-spool/message.a.json",
+        ok: true,
+        providerMessageId: "provider-a",
+      },
+      {
+        operatorRef: "f".repeat(64),
+        deliveryPayloadR2Key: "relay-spool/message.b.json",
+        ok: true,
+        providerMessageId: "provider-b",
+      },
+    ];
+    const query = database.query(CLAIMED_INBOUND_RESULT_SQL);
+    const binds = [
+      "inbound:message",
+      "relay:message",
+      "thread:message",
+      "route:security",
+      OLD_POLICY,
+      "relay-spool/message.eml",
+    ] as const;
+    const receivedAt = "2026-08-13T00:00:00.000Z";
+    const matched = query.get(
+      ...binds,
+      JSON.stringify(results),
+      receivedAt,
+      "provider_accepted",
+    ) as {
+      raw_r2_key: string;
+      accepted_payload_keys_json: string;
+    };
+    expect(matched.raw_r2_key).toBe("relay-spool/message.eml");
+    expect((JSON.parse(matched.accepted_payload_keys_json) as string[]).sort()).toEqual([
+      "relay-spool/message.a.json",
+      "relay-spool/message.b.json",
+    ]);
+    expect(query.get(
+      ...binds,
+      JSON.stringify(results.slice(0, 1)),
+      receivedAt,
+      "provider_accepted",
+    )).toBeNull();
+    expect(query.get(...binds, JSON.stringify([
+      ...results.slice(0, 1),
+      { ...results[1], deliveryPayloadR2Key: "relay-spool/unrelated.json" },
+    ]), receivedAt, "provider_accepted")).toBeNull();
+    expect(query.get(
+      ...binds.slice(0, 5),
+      "relay-spool/unrelated.eml",
+      JSON.stringify(results),
+      receivedAt,
+      "provider_accepted",
+    )).toBeNull();
+    expect(query.get(...binds, JSON.stringify([
+      ...results.slice(0, 1),
+      { ...results[1], providerMessageId: "counterfeit-provider" },
+    ]), receivedAt, "provider_accepted")).toBeNull();
+    expect(query.get(
+      ...binds,
+      JSON.stringify(results),
+      "2026-08-13T00:00:01.000Z",
+      "provider_accepted",
+    )).toBeNull();
+    expect(query.get(
+      ...binds,
+      JSON.stringify(results),
+      receivedAt,
+      "recovery_required",
+    )).toBeNull();
+    expect(query.get(
+      "inbound:missing",
+      "relay:missing",
+      "thread:missing",
+      "route:security",
+      OLD_POLICY,
+      "relay-spool/unrelated.eml",
+      JSON.stringify(results),
+      receivedAt,
+      "provider_accepted",
+    )).toBeNull();
   } finally {
     database.close();
   }

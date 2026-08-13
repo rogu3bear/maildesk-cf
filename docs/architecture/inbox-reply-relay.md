@@ -28,6 +28,13 @@ Service provides no idempotency key, an interrupted `sending` transition is
 explicitly `recovery_required` and requires provider reconciliation or manual
 recovery. Possessing a token or an R2 object never bypasses the D1 claim.
 
+An inbound-result Queue job is projection assistance, not provider authority.
+Before it can advance route health or delete recovery data, the consumer
+requires its delivery, relay, thread, route, policy, raw-spool key, complete
+recipient set, per-recipient payload keys, durable states, provider IDs, and
+bounded errors to match the D1 claim exactly. Cleanup keys are then derived from
+D1 and are deleted only after the durable delivery projection succeeds.
+
 An all-`pending` claim may be retired automatically only when its policy
 revision is no longer active and D1 atomically proves that no recipient crossed
 the provider-send boundary. Each attempt has a token-hash-qualified R2 key, so

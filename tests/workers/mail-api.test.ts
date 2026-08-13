@@ -60,6 +60,40 @@ describe("mail API outbound sender modes", () => {
     ]);
   });
 
+  test("a counterfeit inbound result cannot project health or delete Queue-selected spool keys", async () => {
+    const db = new D1Recorder(undefined, undefined, undefined, undefined, undefined, true);
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-missing",
+      relayId: "relay-missing",
+      threadId: "thread-missing",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "provider_accepted",
+      results: [{
+        operatorRef: "operator-ref-missing",
+        deliveryPayloadR2Key: "relay-spool/unrelated-recipient.json",
+        ok: true,
+        providerMessageId: "counterfeit-provider-id",
+      }],
+      relaySpoolKey: "relay-spool/unrelated-message.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await expect(mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      MAILDESK_OUTBOUND_MODE: "disabled",
+    } as unknown as Env)).rejects.toThrow("does not match its durable delivery claim");
+
+    expect(batch.ackCount).toBe(0);
+    expect(deleted).toEqual([]);
+    expect(db.statements.some((entry) => entry.sql.includes("UPDATE route_health SET inbound_status"))).toBe(false);
+  });
+
   test("a delayed inbound result cannot advance a superseding policy revision", async () => {
     const db = new D1Recorder(
       undefined,
@@ -1385,6 +1419,7 @@ class D1Recorder {
     private readonly failOnceSql?: string,
     private readonly zeroChangesSql?: string,
     private readonly runtimePolicySha256?: string,
+    private readonly rejectInboundResultClaim = false,
   ) {}
 
   seedAudit(dedupeKey: string, action: string, detail: unknown = {}): void {
@@ -1441,6 +1476,19 @@ class D1Recorder {
             expected_route_count: 1,
             projected_route_count: 1,
             projected_domain_count: 1,
+          };
+        }
+        if (record.sql.includes("SELECT d.raw_r2_key") && record.sql.includes("accepted_payload_keys_json")) {
+          if (recorder.rejectInboundResultClaim) return null;
+          const results = JSON.parse(String(record.binds[6])) as Array<{
+            deliveryPayloadR2Key: string;
+            ok: boolean;
+          }>;
+          return {
+            raw_r2_key: record.binds[5],
+            accepted_payload_keys_json: JSON.stringify(
+              results.filter((result) => result.ok).map((result) => result.deliveryPayloadR2Key),
+            ),
           };
         }
         if (record.sql.includes("FROM reply_relays rr")) {
