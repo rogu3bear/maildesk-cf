@@ -19,6 +19,7 @@ interface DesiredState {
     reply_processing_mode?: string;
     reply_domain: string;
   };
+  sender?: { mode?: string };
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -159,6 +160,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   assertWorkerConfigPath("relay_outbound", desired.workers.relay_outbound.config, "mail-outbound");
 
   const router = wranglerConfig(routerPath);
+  assertConfigName(router, routerPath, desired.workers.relay_router.script_name);
   const routerVars = record(router.vars, `${routerPath} [vars]`);
   if ("MAILDESK_RELAY_PROCESSING_MODE" in routerVars) {
     throw new Error(`${routerPath} must not combine the legacy relay processing switch with split activation switches`);
@@ -171,11 +173,58 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
       throw new Error(`${routerPath} ${key} must exist, equal disabled, and match desired state`);
     }
   }
+  requireConfigValue(routerVars, routerPath, "MAILDESK_REPLY_DOMAIN", desired.operator_delivery.reply_domain);
+  assertStorageBindings(router, routerPath, desired);
+  requireArrayValue(router, routerPath, "queues.producers", "queue", desired.storage.queue);
+
+  const outboundPath = desired.workers.relay_outbound.config;
+  const outbound = wranglerConfig(outboundPath);
+  assertConfigName(outbound, outboundPath, desired.workers.relay_outbound.script_name);
+  assertStorageBindings(outbound, outboundPath, desired);
+  requireArrayValue(outbound, outboundPath, "queues.consumers", "queue", desired.storage.queue);
+  requireArrayValue(outbound, outboundPath, "queues.consumers", "dead_letter_queue", desired.storage.dead_letter_queue);
+  if (desired.sender?.mode !== undefined) {
+    requireConfigValue(record(outbound.vars, `${outboundPath} [vars]`), outboundPath, "MAILDESK_OUTBOUND_MODE", desired.sender.mode);
+  }
 
   const health = wranglerConfig(healthPath);
+  assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
+  requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
   if (healthVars.MAILDESK_UI_AUTH_MODE !== "access" || healthVars.MAILDESK_UI_ACCESS_SCOPE !== "all_routes") {
     throw new Error(`${healthPath} must require Cloudflare Access for all_routes`);
+  }
+}
+
+function assertConfigName(config: Record<string, unknown>, path: string, expected: string): void {
+  requireConfigValue(config, path, "name", expected);
+}
+
+function assertStorageBindings(config: Record<string, unknown>, path: string, desired: DesiredState): void {
+  requireArrayValue(config, path, "d1_databases", "database_name", desired.storage.d1_database);
+  requireArrayValue(config, path, "r2_buckets", "bucket_name", desired.storage.r2_policy_bucket);
+  requireArrayValue(config, path, "r2_buckets", "bucket_name", desired.storage.r2_spool_bucket);
+}
+
+function requireConfigValue(config: Record<string, unknown>, path: string, key: string, expected: string): void {
+  if (config[key] !== expected) throw new Error(`${path} ${key} must equal desired value ${expected}`);
+}
+
+function requireArrayValue(
+  config: Record<string, unknown>,
+  path: string,
+  section: string,
+  key: string,
+  expected: string,
+): void {
+  const value = section.split(".").reduce<unknown>((current, part) =>
+    current !== null && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[part]
+      : undefined, config);
+  if (!Array.isArray(value) || !value.some((entry) =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry) &&
+    (entry as Record<string, unknown>)[key] === expected)) {
+    throw new Error(`${path} ${section}.${key} must include desired value ${expected}`);
   }
 }
 

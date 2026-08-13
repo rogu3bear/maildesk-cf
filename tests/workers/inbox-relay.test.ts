@@ -94,6 +94,30 @@ test("inbox relay binds the external destination to the visible sender, not an u
   expect(relayInsert?.bindings).not.toContain("redirect-target@example.org");
 });
 
+test("failed recovery spool rejects and never claims recoverable MIME exists", async () => {
+  const db = new RelayD1();
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<spool-failure@example.net>" }),
+  );
+  const env = relayEnv(db, []);
+  env.EMAIL = { send: async () => { throw new Error("provider unavailable"); } } as SendEmail;
+  env.RELAY_SPOOL = {
+    put: async () => { throw new Error("spool unavailable"); },
+  } as unknown as R2Bucket;
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toContain("could not preserve failed operator deliveries");
+  const healthUpdate = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
+  expect(healthUpdate?.bindings[0]).toBe("failed");
+  const resultAudit = db.calls.find((call) =>
+    call.sql.includes("INSERT INTO audit_events") && call.bindings[4] === "failed"
+  );
+  expect(JSON.parse(String(resultAudit?.bindings[5])).recoverySpool).toBe(false);
+});
+
 test("route identifiers preserve distinct valid alias characters", async () => {
   const db = new RelayD1();
   const message = inboundMessage(

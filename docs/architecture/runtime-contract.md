@@ -25,15 +25,18 @@ It should not own policy. If policy logic appears in TypeScript, move it back
 into `crates/maildesk-router`.
 
 The template deploy target for this Worker is `deploy/mail-router/wrangler.toml`.
-`MAILDESK_RELAY_PROCESSING_MODE` defaults to `disabled`; while disabled, the
-Worker fails closed before routing, D1/R2 writes, Queue work, operator delivery,
-or opaque-token reply processing. A dark candidate remains unattached to live
-Email Routing rules, and a separately reviewed canary changes this mode to
-`enabled` only when the intended route is attached.
+Dark deployment requires both `MAILDESK_INBOUND_RELAY_MODE=disabled` and
+`MAILDESK_REPLY_RELAY_MODE=disabled`. A separately reviewed receipt canary first
+enables inbound processing while replies remain disabled; reply processing is
+enabled only through a later exact Worker plan after inbox receipt is proven.
+The deprecated combined `MAILDESK_RELAY_PROCESSING_MODE` input exists only for
+compatibility when neither split switch is supplied and must not be used for a
+dark deployment or staged canary.
 
 The reserved reply-domain path runs before ordinary alias lookup. It requires a
-live, unexpired relay; matching envelope and visible operator identity; aligned
-Cloudflare SPF or DKIM results; and a fresh Rust `authorize_reply` decision.
+live, unexpired relay; matching envelope and visible operator identity; an
+aligned cryptographically verified DKIM signature whose signed headers include
+`From`; and a fresh Rust `authorize_reply` decision.
 The external destination is always loaded from D1, never from reply headers.
 
 ### Queue-only outbound Worker

@@ -150,4 +150,39 @@ describe("dark deployment blueprint", () => {
       }
     }
   });
+
+  test("rejects desired resource and Worker names that disagree with exact configs", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const cases: Array<[string, (desired: Record<string, any>) => void]> = [
+      ["router name", (desired) => (desired.workers.relay_router.script_name = "different-router")],
+      ["outbound name", (desired) => (desired.workers.relay_outbound.script_name = "different-outbound")],
+      ["health name", (desired) => (desired.workers.routing_health.script_name = "different-health")],
+      ["D1", (desired) => (desired.storage.d1_database = "different-db")],
+      ["policy R2", (desired) => (desired.storage.r2_policy_bucket = "different-policy")],
+      ["spool R2", (desired) => (desired.storage.r2_spool_bucket = "different-spool")],
+      ["Queue", (desired) => (desired.storage.queue = "different-queue")],
+      ["DLQ", (desired) => (desired.storage.dead_letter_queue = "different-dlq")],
+      ["reply domain", (desired) => (desired.operator_delivery.reply_domain = "different.example.com")],
+      ["sender mode", (desired) => (desired.sender.mode = "cloudflare_email_service")],
+    ];
+    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-identifiers-"));
+
+    try {
+      for (const [name, mutate] of cases) {
+        const desired = structuredClone(original);
+        mutate(desired);
+        const path = join(directory, `${name.toLowerCase().replaceAll(" ", "-")}.json`);
+        writeFileSync(path, JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain("desired");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

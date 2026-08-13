@@ -788,10 +788,19 @@ function outboundLeaksOperatorIdentity(job: OutboundReplyRequestedJob, policy: R
     job.subject,
     job.text ?? "",
     job.html ?? "",
+    htmlVisibleText(job.html ?? ""),
     ...Object.entries(outwardHeaders).flat(),
     ...(job.attachments ?? []).flatMap((attachment) => [attachment.filename, attachment.contentId ?? ""]),
   ].map(normalizedVisibleValue);
   return [...operators].some((operator) => operator && visible.some((value) => value.includes(operator)));
+}
+
+function htmlVisibleText(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
+    .replace(/<[^>]*>/g, "");
 }
 
 function normalizedVisibleValue(value: string): string {

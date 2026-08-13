@@ -167,21 +167,25 @@ async function acceptInboxRelay(
     errorCode: result.status === "rejected" ? "provider_outcome_unknown" : undefined,
   }));
   const accepted = results.filter((result) => result.ok).length;
-  const status = accepted === results.length
+  let status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed" = accepted === results.length
     ? "provider_accepted"
     : accepted > 0
       ? "partial_delivery"
       : "recovery_required";
 
   let spoolKey: string | null = null;
+  let spoolFailed = false;
   if (accepted !== results.length) {
-    spoolKey = relaySpoolKey(deliveryId, receivedAt);
+    const candidateSpoolKey = relaySpoolKey(deliveryId, receivedAt);
     try {
-      await env.RELAY_SPOOL.put(spoolKey, rawBytes, {
+      await env.RELAY_SPOOL.put(candidateSpoolKey, rawBytes, {
         httpMetadata: { contentType: MIME_CONTENT_TYPE },
         customMetadata: { retentionClass: "relay-spool", deliveryId },
       });
+      spoolKey = candidateSpoolKey;
     } catch {
+      spoolFailed = true;
+      status = "failed";
       structuredError("inbound_recovery_spool_failed", { deliveryId });
     }
   }
@@ -189,6 +193,9 @@ async function acceptInboxRelay(
   await recordDeliveryResults(persisted, results, status, spoolKey, env).catch(() => {
     structuredError("inbound_delivery_audit_failed", { deliveryId });
   });
+  if (spoolFailed) {
+    message.setReject("maildesk could not preserve failed operator deliveries for recovery");
+  }
 }
 
 async function acceptOperatorReply(
@@ -466,7 +473,7 @@ async function persistInboxRelay(
 async function recordDeliveryResults(
   inbound: PersistedInbound,
   results: OperatorDeliveryResult[],
-  status: "provider_accepted" | "partial_delivery" | "recovery_required",
+  status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed",
   spoolKey: string | null,
   env: Env,
 ): Promise<void> {

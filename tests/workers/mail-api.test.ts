@@ -92,7 +92,7 @@ describe("mail API outbound sender modes", () => {
       "Message-ID: <operator-leak@tenant.example.com>",
       "Content-Type: text/html; charset=utf-8",
       "",
-      "<p>Contact operator&#64;tenant.example.com</p>",
+      "<p>Contact <span>operator</span><span>@tenant.example.com</span></p>",
     ].join("\r\n")).buffer;
     const batch = new MessageBatchRecorder([{
       kind: "inbox_reply_received",
