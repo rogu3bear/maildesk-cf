@@ -17,8 +17,8 @@ describe("mail API outbound sender modes", () => {
       policySha256: "a".repeat(64),
       status: "provider_accepted",
       results: [
-        { operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" },
-        { operatorRef: "operator-ref-b", ok: true, providerMessageId: "provider-b" },
+        { operatorRef: "operator-ref-a", deliveryPayloadR2Key: "relay-spool/delivery-recovery.a.json", ok: true, providerMessageId: "provider-a" },
+        { operatorRef: "operator-ref-b", deliveryPayloadR2Key: "relay-spool/delivery-recovery.b.json", ok: true, providerMessageId: "provider-b" },
       ],
       relaySpoolKey: "relay-spool/delivery-recovery.eml",
       receivedAt: "2026-08-12T00:00:00.000Z",
@@ -36,7 +36,11 @@ describe("mail API outbound sender modes", () => {
 
     expect(batch.ackCount).toBe(1);
     expect(email.messages).toHaveLength(0);
-    expect(deleted).toEqual(["relay-spool/delivery-recovery.eml"]);
+    expect(deleted).toEqual([
+      "relay-spool/delivery-recovery.a.json",
+      "relay-spool/delivery-recovery.b.json",
+      "relay-spool/delivery-recovery.eml",
+    ]);
     expect(db.hasAuditAction("operator_delivery_provider_accepted")).toBe(true);
     const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET inbound_status"));
     expect(healthUpdate?.binds.slice(0, 3)).toEqual([
@@ -74,7 +78,7 @@ describe("mail API outbound sender modes", () => {
       routeId: "route:tenant.example.com:security",
       policySha256: "a".repeat(64),
       status: "provider_accepted",
-      results: [{ operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" }],
+      results: [{ operatorRef: "operator-ref-a", deliveryPayloadR2Key: "relay-spool/delivery-policy-a.a.json", ok: true, providerMessageId: "provider-a" }],
       relaySpoolKey: "relay-spool/delivery-policy-a.eml",
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
@@ -91,7 +95,10 @@ describe("mail API outbound sender modes", () => {
 
     expect(batch.ackCount).toBe(1);
     expect(email.messages).toHaveLength(0);
-    expect(deleted).toEqual(["relay-spool/delivery-policy-a.eml"]);
+    expect(deleted).toEqual([
+      "relay-spool/delivery-policy-a.a.json",
+      "relay-spool/delivery-policy-a.eml",
+    ]);
     expect(db.hasAuditAction("operator_delivery_result_superseded")).toBe(true);
     expect(db.hasAuditAction("operator_delivery_provider_accepted")).toBe(false);
     const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET inbound_status"));
@@ -115,7 +122,7 @@ describe("mail API outbound sender modes", () => {
       routeId: "route:tenant.example.com:security",
       policySha256: "a".repeat(64),
       status: "recovery_required",
-      results: [{ operatorRef: "operator-ref-a", ok: false, errorCode: "provider_outcome_unknown" }],
+      results: [{ operatorRef: "operator-ref-a", deliveryPayloadR2Key: "relay-spool/delivery-policy-a-ambiguous.a.json", ok: false, errorCode: "provider_outcome_unknown" }],
       relaySpoolKey: "relay-spool/delivery-policy-a-ambiguous.eml",
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
@@ -157,7 +164,7 @@ describe("mail API outbound sender modes", () => {
       routeId: "route:tenant.example.com:security",
       policySha256: "a".repeat(64),
       status: "provider_accepted",
-      results: [{ operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" }],
+      results: [{ operatorRef: "operator-ref-a", deliveryPayloadR2Key: "relay-spool/delivery-active-recovery.a.json", ok: true, providerMessageId: "provider-a" }],
       relaySpoolKey: "relay-spool/delivery-active-recovery.eml",
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);

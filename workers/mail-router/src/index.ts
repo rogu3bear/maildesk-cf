@@ -137,8 +137,9 @@ async function acceptInboxRelay(
     return;
   }
   if (existingInbound) {
-    const discarded = await discardSupersededUnsentInbound(existingInbound, env).catch(() => false);
+    const discarded = await discardSupersededUnsentInbound(existingInbound, env).catch((): null => null);
     if (discarded) {
+      await deleteOperatorDeliverySpools(discarded, env);
       if (existingInbound.raw_r2_key) {
         await env.RELAY_SPOOL.delete(existingInbound.raw_r2_key).catch(() => undefined);
       }
@@ -192,8 +193,9 @@ async function acceptInboxRelay(
     message.setReject("maildesk could not create a durable operator-delivery spool");
     return;
   }
+  let operatorDeliverySpools: OperatorDeliverySpool[];
   try {
-    await persistOperatorDeliverySpools(
+    operatorDeliverySpools = await persistOperatorDeliverySpools(
       candidateSpoolKey,
       deliveries,
       operatorRefs,
@@ -201,7 +203,6 @@ async function acceptInboxRelay(
       env,
     );
   } catch {
-    await deleteOperatorDeliverySpools(candidateSpoolKey, operatorRefs, env);
     await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
     message.setReject("maildesk could not create durable operator-delivery recovery payloads");
     return;
@@ -224,6 +225,8 @@ async function acceptInboxRelay(
         spoolKey: candidateSpoolKey,
         operatorRefs,
         deliveryMessageIds,
+        deliveryPayloadKeys: operatorDeliverySpools.map((spool) => spool.key),
+        deliveryPayloadSha256s: operatorDeliverySpools.map((spool) => spool.sha256),
       },
       policySha256,
       env,
@@ -235,12 +238,12 @@ async function acceptInboxRelay(
       // A simultaneous provider delivery may have won the unique fingerprint
       // claim after our initial read. Delete only this invocation's unique
       // spool below; the winning claim points at a different immutable key.
-      await deleteOperatorDeliverySpools(candidateSpoolKey, operatorRefs, env);
+      await deleteOperatorDeliverySpools(operatorDeliverySpools.map((spool) => spool.key), env);
       await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
       await recoverExistingInbound(concurrent, env);
       return;
     }
-    await deleteOperatorDeliverySpools(candidateSpoolKey, operatorRefs, env);
+    await deleteOperatorDeliverySpools(operatorDeliverySpools.map((spool) => spool.key), env);
     await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
     message.setReject("maildesk could not create a durable route for this message");
     return;
@@ -255,14 +258,16 @@ async function acceptInboxRelay(
       route_id: persisted.routeId,
       policy_sha256: policySha256,
       raw_r2_key: candidateSpoolKey,
+      reply_identity: route.defaultReplyIdentity,
+      token_sha256: tokenHash,
       received_at: receivedAt,
       status: "pending",
     };
     const discarded = currentPolicy
-      ? await discardSupersededUnsentInbound(inbound, env).catch(() => false)
-      : false;
+      ? await discardSupersededUnsentInbound(inbound, env).catch((): null => null)
+      : null;
     if (discarded) {
-      await deleteOperatorDeliverySpools(candidateSpoolKey, operatorRefs, env);
+      await deleteOperatorDeliverySpools(discarded, env);
       await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
       message.setReject("maildesk policy changed before operator delivery");
     } else {
@@ -277,6 +282,7 @@ async function acceptInboxRelay(
   for (const [index, delivery] of deliveries.entries()) {
     const operator = route.operators[index] ?? "unknown";
     const operatorRef = operatorRefs[index]!;
+    const deliveryPayloadR2Key = operatorDeliverySpools[index]!.key;
     let claimed = false;
     try {
       claimed = await claimInboundRecipient(
@@ -291,7 +297,7 @@ async function acceptInboxRelay(
       // recovery rather than bypassing the recipient claim boundary.
     }
     if (!claimed) {
-      results.push({ operator, ok: false, errorCode: "recipient_claim_failed" });
+      results.push({ operator, deliveryPayloadR2Key, ok: false, errorCode: "recipient_claim_failed" });
       continue;
     }
 
@@ -299,6 +305,7 @@ async function acceptInboxRelay(
       const providerResult = await env.EMAIL.send(delivery);
       const result = {
         operator,
+        deliveryPayloadR2Key,
         ok: true,
         providerMessageId: providerResult?.messageId,
       } satisfies OperatorDeliveryResult;
@@ -315,6 +322,7 @@ async function acceptInboxRelay(
     } catch {
       const result = {
         operator,
+        deliveryPayloadR2Key,
         ok: false,
         errorCode: "provider_outcome_unknown",
       } satisfies OperatorDeliveryResult;
@@ -581,6 +589,8 @@ async function persistInboxRelay(
     spoolKey: string;
     operatorRefs: string[];
     deliveryMessageIds: string[];
+    deliveryPayloadKeys: string[];
+    deliveryPayloadSha256s: string[];
   },
   policySha256: string,
   env: Env,
@@ -634,8 +644,14 @@ async function persistInboxRelay(
       relay.receivedAt,
     ),
     ...relay.operatorRefs.map((operatorRef, index) => env.DB.prepare(
-      "INSERT INTO inbound_recipient_deliveries (delivery_id, operator_ref, delivery_message_id, status) VALUES (?1, ?2, ?3, 'pending')",
-    ).bind(relay.deliveryId, operatorRef, relay.deliveryMessageIds[index])),
+      "INSERT INTO inbound_recipient_deliveries (delivery_id, operator_ref, delivery_message_id, delivery_payload_r2_key, delivery_payload_sha256, status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+    ).bind(
+      relay.deliveryId,
+      operatorRef,
+      relay.deliveryMessageIds[index],
+      relay.deliveryPayloadKeys[index],
+      relay.deliveryPayloadSha256s[index],
+    )),
     env.DB.prepare(
       "UPDATE route_health SET last_inbound_at = ?1, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?2 AND policy_sha256 = ?3 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?3)",
     ).bind(relay.receivedAt, routeId, policySha256),
@@ -730,16 +746,22 @@ async function loadInboundDelivery(
   env: Env,
 ): Promise<InboundDeliveryRow | null> {
   return env.DB.prepare(
-    "SELECT id, relay_id, thread_id, route_id, policy_sha256, raw_r2_key, received_at, status FROM inbound_deliveries WHERE fingerprint_sha256 = ?1 LIMIT 1",
+    "SELECT d.id, d.relay_id, d.thread_id, d.route_id, d.policy_sha256, d.raw_r2_key, d.received_at, d.status, rr.reply_identity, rr.token_sha256 FROM inbound_deliveries d JOIN reply_relays rr ON rr.id = d.relay_id WHERE d.fingerprint_sha256 = ?1 LIMIT 1",
   ).bind(fingerprintSha256).first<InboundDeliveryRow>();
 }
 
 async function discardSupersededUnsentInbound(
   inbound: InboundDeliveryRow,
   env: Env,
-): Promise<boolean> {
+): Promise<string[] | null> {
   const activePolicy = await loadActivePolicy(env);
-  if (!activePolicy || activePolicy.sha256 === inbound.policy_sha256) return false;
+  if (!activePolicy || activePolicy.sha256 === inbound.policy_sha256) return null;
+
+  const recipients = await env.DB.prepare(
+    "SELECT delivery_payload_r2_key FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
+  ).bind(inbound.id).all<{ delivery_payload_r2_key: string }>();
+  const payloadKeys = (recipients.results ?? []).map((row) => row.delivery_payload_r2_key);
+  if (payloadKeys.length === 0) return null;
 
   // Deleting the relay cascades through inbound_deliveries and its recipient
   // rows. One conditional statement therefore retires the entire token
@@ -751,19 +773,19 @@ async function discardSupersededUnsentInbound(
   // SQLite-compatible runtimes may report the root relay deletion together
   // with its foreign-key cascades. Any positive count means the guarded root
   // delete won; zero means a recipient crossed the provider boundary first.
-  return Number(discarded.meta?.changes ?? 0) > 0;
+  return Number(discarded.meta?.changes ?? 0) > 0 ? payloadKeys : null;
 }
 
 async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Promise<void> {
   const recipients = await env.DB.prepare(
-    "SELECT operator_ref, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
+    "SELECT operator_ref, delivery_message_id, delivery_payload_r2_key, delivery_payload_sha256, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
   ).bind(inbound.id).all<InboundRecipientDeliveryRow>();
   const rows = recipients.results ?? [];
   if (inbound.raw_r2_key) {
     for (const row of rows) {
       if (row.status === "provider_accepted") {
         await env.RELAY_SPOOL!.delete(
-          operatorDeliverySpoolKey(inbound.raw_r2_key, row.operator_ref),
+          row.delivery_payload_r2_key,
         ).catch(() => undefined);
         continue;
       }
@@ -771,7 +793,7 @@ async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Pr
 
       let delivery: OperatorDeliveryMessage;
       try {
-        delivery = await loadOperatorDeliverySpool(inbound.raw_r2_key, row.operator_ref, env);
+        delivery = await loadOperatorDeliverySpool(row, inbound, env);
       } catch {
         continue;
       }
@@ -788,16 +810,18 @@ async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Pr
         const providerResult = await env.EMAIL!.send(delivery);
         const result = {
           operator: delivery.to,
+          deliveryPayloadR2Key: row.delivery_payload_r2_key,
           ok: true,
           providerMessageId: providerResult?.messageId,
         } satisfies OperatorDeliveryResult;
         await projectInboundRecipientResult(inbound.id, row.operator_ref, result, env);
         await env.RELAY_SPOOL!.delete(
-          operatorDeliverySpoolKey(inbound.raw_r2_key, row.operator_ref),
+          row.delivery_payload_r2_key,
         ).catch(() => undefined);
       } catch {
         const result = {
           operator: delivery.to,
+          deliveryPayloadR2Key: row.delivery_payload_r2_key,
           ok: false,
           errorCode: "provider_outcome_unknown",
         } satisfies OperatorDeliveryResult;
@@ -806,11 +830,12 @@ async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Pr
     }
   }
   const refreshedRecipients = await env.DB.prepare(
-    "SELECT operator_ref, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
+    "SELECT operator_ref, delivery_message_id, delivery_payload_r2_key, delivery_payload_sha256, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
   ).bind(inbound.id).all<InboundRecipientDeliveryRow>();
   const refreshedRows = refreshedRecipients.results ?? rows;
   const results: InboundDeliveryResultJob["results"] = refreshedRows.map((row) => ({
     operatorRef: row.operator_ref,
+    deliveryPayloadR2Key: row.delivery_payload_r2_key,
     ok: row.status === "provider_accepted",
     providerMessageId: row.provider_message_id ?? undefined,
     errorCode: row.status === "provider_accepted"
@@ -870,38 +895,65 @@ async function persistOperatorDeliverySpools(
   operatorRefs: string[],
   deliveryId: string,
   env: Env,
-): Promise<void> {
-  for (const [index, delivery] of deliveries.entries()) {
+): Promise<OperatorDeliverySpool[]> {
+  const spools = await Promise.all(deliveries.map(async (delivery, index) => {
     const operatorRef = operatorRefs[index]!;
-    await env.RELAY_SPOOL!.put(
-      operatorDeliverySpoolKey(rawSpoolKey, operatorRef),
-      serializeOperatorDelivery(delivery),
-      {
+    const key = operatorDeliverySpoolKey(rawSpoolKey, operatorRef);
+    const value = serializeOperatorDelivery(delivery);
+    return { key, value, sha256: await sha256Hex(value), operatorRef };
+  }));
+  try {
+    for (const spool of spools) {
+      await env.RELAY_SPOOL!.put(spool.key, spool.value, {
         httpMetadata: { contentType: "application/json" },
-        customMetadata: { retentionClass: "relay-spool", deliveryId, operatorRef },
-      },
-    );
+        customMetadata: { retentionClass: "relay-spool", deliveryId, operatorRef: spool.operatorRef },
+      });
+    }
+  } catch (error) {
+    await deleteOperatorDeliverySpools(spools.map((spool) => spool.key), env);
+    throw error;
   }
+  return spools;
 }
 
 async function deleteOperatorDeliverySpools(
-  rawSpoolKey: string,
-  operatorRefs: string[],
+  keys: string[],
   env: Env,
 ): Promise<void> {
-  await Promise.all(operatorRefs.map((operatorRef) =>
-    env.RELAY_SPOOL!.delete(operatorDeliverySpoolKey(rawSpoolKey, operatorRef)).catch(() => undefined)
+  await Promise.all(keys.map((key) =>
+    env.RELAY_SPOOL!.delete(key).catch(() => undefined)
   ));
 }
 
 async function loadOperatorDeliverySpool(
-  rawSpoolKey: string,
-  operatorRef: string,
+  row: InboundRecipientDeliveryRow,
+  inbound: InboundDeliveryRow,
   env: Env,
 ): Promise<OperatorDeliveryMessage> {
-  const object = await env.RELAY_SPOOL!.get(operatorDeliverySpoolKey(rawSpoolKey, operatorRef));
+  if (!inbound.raw_r2_key) throw new Error("operator delivery recovery generation is missing");
+  const expectedKey = operatorDeliverySpoolKey(inbound.raw_r2_key, row.operator_ref);
+  if (row.delivery_payload_r2_key !== expectedKey) throw new Error("operator delivery recovery key drifted");
+  const object = await env.RELAY_SPOOL!.get(row.delivery_payload_r2_key);
   if (!object) throw new Error("operator delivery recovery payload is missing");
-  return deserializeOperatorDelivery(await object.text());
+  const serialized = await object.text();
+  if (await sha256Hex(serialized) !== row.delivery_payload_sha256) {
+    throw new Error("operator delivery recovery payload digest drifted");
+  }
+  const delivery = deserializeOperatorDelivery(serialized);
+  const config = operatorDeliveryConfig(env);
+  const token = config.replyDomain ? relayTokenFromRecipient(delivery.replyTo, config.replyDomain) : null;
+  if (
+    await sha256Hex(normalizeMailbox(delivery.to)) !== row.operator_ref ||
+    delivery.headers["Message-ID"] !== row.delivery_message_id ||
+    normalizeMailbox(delivery.from.email) !== normalizeMailbox(inbound.reply_identity) ||
+    delivery.headers["X-Maildesk-Reply-Identity"] !== inbound.reply_identity ||
+    !token ||
+    await sha256Hex(token) !== inbound.token_sha256
+  ) {
+    throw new Error("operator delivery recovery authorization drifted");
+  }
+  assertWithinRelayLimit(delivery, config);
+  return delivery;
 }
 
 function serializeOperatorDelivery(delivery: OperatorDeliveryMessage): string {
@@ -915,13 +967,34 @@ function serializeOperatorDelivery(delivery: OperatorDeliveryMessage): string {
 }
 
 function deserializeOperatorDelivery(value: string): OperatorDeliveryMessage {
-  const parsed = JSON.parse(value) as Omit<OperatorDeliveryMessage, "attachments"> & {
+  const parsed = JSON.parse(value) as Partial<Omit<OperatorDeliveryMessage, "attachments">> & {
     attachments?: Array<Omit<NonNullable<OperatorDeliveryMessage["attachments"]>[number], "content"> & {
       content: string;
     }>;
   };
+  if (
+    !parsed.from || typeof parsed.from.email !== "string" ||
+    typeof parsed.to !== "string" || typeof parsed.replyTo !== "string" ||
+    typeof parsed.subject !== "string" || typeof parsed.text !== "string" ||
+    typeof parsed.html !== "string" || !parsed.headers ||
+    Object.entries(parsed.headers).some(([name, header]) => !name || typeof header !== "string") ||
+    (parsed.attachments && parsed.attachments.some((attachment) =>
+      typeof attachment.filename !== "string" || typeof attachment.type !== "string" ||
+      typeof attachment.content !== "string" ||
+      (attachment.disposition !== "attachment" && attachment.disposition !== "inline") ||
+      (attachment.disposition === "inline" && typeof attachment.contentId !== "string")
+    ))
+  ) {
+    throw new Error("operator delivery recovery payload is malformed");
+  }
   return {
-    ...parsed,
+    from: parsed.from,
+    to: parsed.to,
+    replyTo: parsed.replyTo,
+    subject: parsed.subject,
+    text: parsed.text,
+    html: parsed.html,
+    headers: parsed.headers,
     attachments: parsed.attachments?.map((attachment) => ({
       ...attachment,
       content: base64ToArrayBuffer(attachment.content),
@@ -993,12 +1066,18 @@ async function inboundDeliveryResultJob(
     routeId: inbound.routeId,
     policySha256: inbound.policySha256,
     status,
-    results: await Promise.all(results.map(async (result) => ({
-      operatorRef: await sha256Hex(result.operator),
-      ok: result.ok,
-      providerMessageId: result.providerMessageId,
-      errorCode: result.errorCode,
-    }))),
+    results: await Promise.all(results.map(async (result) => {
+      if (!result.deliveryPayloadR2Key) {
+        throw new Error("inbox relay result is missing its recovery payload key");
+      }
+      return {
+        operatorRef: await sha256Hex(result.operator),
+        deliveryPayloadR2Key: result.deliveryPayloadR2Key,
+        ok: result.ok,
+        providerMessageId: result.providerMessageId,
+        errorCode: result.errorCode,
+      };
+    })),
     relaySpoolKey,
     receivedAt,
   };
@@ -1234,12 +1313,17 @@ interface InboundDeliveryRow {
   route_id: string;
   policy_sha256: string;
   raw_r2_key: string | null;
+  reply_identity: string;
+  token_sha256: string;
   received_at: string;
   status: "pending" | "sending" | "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
 }
 
 interface InboundRecipientDeliveryRow {
   operator_ref: string;
+  delivery_message_id: string;
+  delivery_payload_r2_key: string;
+  delivery_payload_sha256: string;
   status: "pending" | "sending" | "provider_accepted" | "recovery_required" | "failed";
   provider_message_id: string | null;
   error_code: string | null;
@@ -1252,9 +1336,17 @@ interface PolicyBoundRoute {
 
 interface OperatorDeliveryResult {
   operator: string;
+  deliveryPayloadR2Key?: string;
   ok: boolean;
   providerMessageId?: string;
   errorCode?: string;
+}
+
+interface OperatorDeliverySpool {
+  key: string;
+  value: string;
+  sha256: string;
+  operatorRef: string;
 }
 
 interface ReplyRelayRow {

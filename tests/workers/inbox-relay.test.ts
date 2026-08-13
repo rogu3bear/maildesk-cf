@@ -377,6 +377,48 @@ test("identical redelivery sends a same-policy recipient whose provider claim ne
   expect(new TextDecoder().decode(deliveries[1]?.attachments?.[0]?.content)).toBe("recovery-bytes");
 });
 
+test("tampering a pending recovery payload cannot redirect an operator delivery", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
+  const deliveries: EmailMessageBuilder[] = [];
+  const objects = new Map<string, string | ArrayBuffer>();
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string, value: string | ArrayBuffer) => { objects.set(key, value); },
+    get: async (key: string) => {
+      const value = objects.get(key);
+      if (value === undefined) return null;
+      return { text: async () => typeof value === "string" ? value : new TextDecoder().decode(value) };
+    },
+    delete: async (key: string) => { objects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<tampered-recovery@example.net>" });
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+
+  const pending = db.recipientDeliveries.find((recipient) => recipient.status === "pending");
+  expect(pending).toBeDefined();
+  const serialized = objects.get(pending!.delivery_payload_r2_key);
+  expect(typeof serialized).toBe("string");
+  const tampered = JSON.parse(serialized as string) as { to: string };
+  tampered.to = "attacker@example.net";
+  objects.set(pending!.delivery_payload_r2_key, JSON.stringify(tampered));
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  expect(db.recipientDeliveries.find((recipient) => recipient.operator_ref === pending!.operator_ref)?.status)
+    .toBe("pending");
+});
+
 test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
   const supersedingPolicy = {
     default_reply_mode: "role_first",
@@ -793,11 +835,15 @@ class RelayD1 {
     raw_r2_key: string;
     received_at: string;
     status: string;
+    reply_identity: string;
+    token_sha256: string;
   };
   recipientDeliveries: Array<{
     delivery_id: string;
     operator_ref: string;
     delivery_message_id: string;
+    delivery_payload_r2_key: string;
+    delivery_payload_sha256: string;
     status: string;
     provider_message_id: string | null;
     error_code: string | null;
@@ -868,7 +914,7 @@ class RelayD1 {
             row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1]
           ) ?? null;
         }
-        if (sql.includes("SELECT id, relay_id, thread_id") && this.inboundDelivery &&
+        if (sql.includes("FROM inbound_deliveries d") && this.inboundDelivery &&
             this.inboundDelivery.fingerprint_sha256 === call.bindings[0]) {
           return this.inboundDelivery;
         }
@@ -903,6 +949,7 @@ class RelayD1 {
       const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
       return call ? [call] : [];
     });
+    const relayCall = calls.find((call) => call.sql.includes("INSERT INTO reply_relays"));
     for (const statement of this.rejectPolicyBoundPersistence ? [] : statements) {
       const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
       if (!call) continue;
@@ -917,6 +964,8 @@ class RelayD1 {
           raw_r2_key: String(call.bindings[6]),
           received_at: String(call.bindings[7]),
           status: "pending",
+          reply_identity: String(relayCall?.bindings[5] ?? ""),
+          token_sha256: String(relayCall?.bindings[1] ?? ""),
         };
       }
       if (call.sql.includes("INSERT INTO inbound_recipient_deliveries")) {
@@ -924,6 +973,8 @@ class RelayD1 {
           delivery_id: String(call.bindings[0]),
           operator_ref: String(call.bindings[1]),
           delivery_message_id: String(call.bindings[2]),
+          delivery_payload_r2_key: String(call.bindings[3]),
+          delivery_payload_sha256: String(call.bindings[4]),
           status: "pending",
           provider_message_id: null,
           error_code: null,

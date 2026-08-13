@@ -126,6 +126,7 @@ export interface InboundDeliveryResultJob {
   status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
   results: Array<{
     operatorRef: string;
+    deliveryPayloadR2Key: string;
     ok: boolean;
     providerMessageId?: string;
     errorCode?: string;

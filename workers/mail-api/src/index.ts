@@ -481,6 +481,7 @@ async function projectInboundDeliveryResult(
       `${job.deliveryId}:operator_delivery_result_superseded`,
       job.threadId,
     );
+    await deleteAcceptedInboundPayloads(job, env);
     if (job.status === "provider_accepted") {
       if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
       await env.RELAY_SPOOL.delete(job.relaySpoolKey);
@@ -521,6 +522,7 @@ async function projectInboundDeliveryResult(
     `${job.deliveryId}:operator_delivery_result`,
     job.threadId,
   );
+  await deleteAcceptedInboundPayloads(job, env);
   if (job.status === "provider_accepted") {
     if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
     await env.RELAY_SPOOL.delete(job.relaySpoolKey);
@@ -528,6 +530,18 @@ async function projectInboundDeliveryResult(
   await env.DB.prepare(
     "UPDATE inbound_deliveries SET status = ?1, raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL ELSE raw_r2_key END, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3",
   ).bind(job.status, job.deliveryId, job.policySha256).run();
+}
+
+async function deleteAcceptedInboundPayloads(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const keys = job.results
+    .filter((result) => result.ok)
+    .map((result) => result.deliveryPayloadR2Key);
+  if (keys.length === 0) return;
+  if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+  for (const key of keys) await env.RELAY_SPOOL.delete(key);
 }
 
 async function recordTerminalSendEvent(

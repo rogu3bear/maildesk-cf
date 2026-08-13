@@ -61,10 +61,10 @@ function seedSupersededClaim(database: Database): void {
       'route:security', '${OLD_POLICY}', 'relay-spool/message.eml', '2026-08-13T00:00:00.000Z', 'pending'
     );
     INSERT INTO inbound_recipient_deliveries (
-      delivery_id, operator_ref, delivery_message_id, status
+      delivery_id, operator_ref, delivery_message_id, delivery_payload_r2_key, delivery_payload_sha256, status
     ) VALUES
-      ('inbound:message', '${"e".repeat(64)}', '<operator-a@example.com>', 'pending'),
-      ('inbound:message', '${"f".repeat(64)}', '<operator-b@example.com>', 'pending');
+      ('inbound:message', '${"e".repeat(64)}', '<operator-a@example.com>', 'relay-spool/message.a.json', '${"1".repeat(64)}', 'pending'),
+      ('inbound:message', '${"f".repeat(64)}', '<operator-b@example.com>', 'relay-spool/message.b.json', '${"2".repeat(64)}', 'pending');
   `);
 }
 

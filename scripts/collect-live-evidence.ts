@@ -50,8 +50,13 @@ interface InboundProof {
   status: "ok";
   envelope_to: string;
   route_kind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  forwarded_to: string[];
-  forward_errors: Array<{ recipient?: string; error?: string }>;
+  operator_count?: number;
+  policy_sha256?: string;
+  provider_message_ids?: string[];
+  provider_accepted_at?: string;
+  inbox_verified_at?: string;
+  forwarded_to?: string[];
+  forward_errors?: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
   raw_r2_key?: string;
   provider?: string;
@@ -73,6 +78,7 @@ const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDes
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const outputPath = resolve(root, argValue("--out") ?? "var/maildesk-live-evidence.json");
 const cfctlBin = process.env.CFCTL_BIN ?? argValue("--cfctl") ?? "cfctl";
+const wranglerBin = process.env.WRANGLER_BIN ?? argValue("--wrangler") ?? "wrangler";
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
 const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-policy-path");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
@@ -136,8 +142,6 @@ if (Object.keys(dnsMx).length > 0) {
 
 if (r2PolicyPath) {
   evidence.r2_policy_sha256 = sha256(readFileSync(resolve(root, r2PolicyPath), "utf8"));
-} else if (process.env.MAILDESK_ASSUME_LOCAL_POLICY_IN_R2 === "1") {
-  evidence.r2_policy_sha256 = sha256(readFileSync(policyPath, "utf8"));
 }
 
 if (readyzUrl) {
@@ -370,28 +374,38 @@ function collectD1Evidence(databaseName: string): Evidence["d1"] {
 function collectInboundProofs(databaseName: string): Record<string, InboundProof> {
   const rows = wranglerD1Results(
     databaseName,
-    "SELECT detail_json, created_at FROM audit_events WHERE action = 'inbound_email_received' ORDER BY created_at DESC LIMIT 200;",
+    "SELECT rh.route_address, rh.decision_kind AS route_kind, rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.last_inbound_provider_accepted_at, rh.last_inbound_provider_message_ids_json, rh.last_inbox_verified_at FROM route_health rh JOIN alias_routes ar ON ar.id = rh.route_id AND ar.enabled = 1 AND ar.policy_sha256 = rh.policy_sha256 JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = rh.policy_sha256 WHERE rh.inbound_status IN ('inbox_verified', 'reply_verified') AND rh.last_inbound_provider_accepted_at IS NOT NULL AND rh.last_inbox_verified_at IS NOT NULL ORDER BY rh.last_inbox_verified_at DESC LIMIT 200;",
   );
   const proofs: Record<string, InboundProof> = {};
 
   for (const row of rows) {
-    if (typeof row.detail_json !== "string") continue;
-    const detail = parseJson<InboundAuditDetail>(row.detail_json);
-    if (!detail?.envelopeTo || proofs[domainPart(detail.envelopeTo)]) continue;
-    if (!detail.rawR2Key || detail.storageError) continue;
-    if (detail.forwardErrors && detail.forwardErrors.length > 0) continue;
-
-    const domain = domainPart(detail.envelopeTo);
+    if (
+      typeof row.route_address !== "string" ||
+      typeof row.route_kind !== "string" ||
+      typeof row.operator_count !== "number" ||
+      typeof row.reply_identity !== "string" ||
+      typeof row.policy_sha256 !== "string" ||
+      typeof row.last_inbound_provider_accepted_at !== "string" ||
+      typeof row.last_inbox_verified_at !== "string"
+    ) continue;
+    const providerMessageIds = typeof row.last_inbound_provider_message_ids_json === "string"
+      ? parseJson<unknown>(row.last_inbound_provider_message_ids_json)
+      : null;
+    if (!Array.isArray(providerMessageIds) || providerMessageIds.some((value) => typeof value !== "string")) continue;
+    const domain = domainPart(row.route_address);
     if (!domain) continue;
+    if (proofs[domain]) continue;
     proofs[domain] = {
       status: "ok",
-      envelope_to: detail.envelopeTo,
-      route_kind: detail.routeKind,
-      forwarded_to: detail.forwardedTo ?? [],
-      forward_errors: detail.forwardErrors ?? [],
-      default_reply_identity: detail.defaultReplyIdentity,
-      raw_r2_key: detail.rawR2Key,
-      audit_event_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      envelope_to: row.route_address,
+      route_kind: row.route_kind as InboundProof["route_kind"],
+      operator_count: row.operator_count,
+      policy_sha256: row.policy_sha256,
+      provider_message_ids: providerMessageIds as string[],
+      provider_accepted_at: row.last_inbound_provider_accepted_at,
+      inbox_verified_at: row.last_inbox_verified_at,
+      default_reply_identity: row.reply_identity,
+      provider: "cloudflare_email_service",
     };
   }
 
@@ -425,7 +439,7 @@ function collectOutboundProofs(databaseName: string): Record<string, OutboundPro
 }
 
 function wranglerD1Results(databaseName: string, sql: string): Array<Record<string, unknown>> {
-  const result = spawnSync("wrangler", ["d1", "execute", databaseName, "--remote", "--command", sql], {
+  const result = spawnSync(wranglerBin, ["d1", "execute", databaseName, "--remote", "--command", sql], {
     cwd: root,
     encoding: "utf8",
   });
@@ -555,16 +569,6 @@ interface DnsRecord {
   name?: string;
   type?: string;
   content?: string;
-}
-
-interface InboundAuditDetail {
-  envelopeTo?: string;
-  routeKind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  forwardedTo?: string[];
-  forwardErrors?: Array<{ recipient?: string; error?: string }>;
-  defaultReplyIdentity?: string;
-  rawR2Key?: string;
-  storageError?: string;
 }
 
 interface GoogleResourceSearch {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -48,6 +49,7 @@ describe("maildesk receipt workflow", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      r2_policy_sha256: fileSha256(policyPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -80,10 +82,12 @@ describe("maildesk receipt workflow", () => {
           status: "ok",
           envelope_to: "founders@tenant.example.com",
           route_kind: "role_alias",
-          forwarded_to: ["operator@tenant.example.com"],
-          forward_errors: [],
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["provider-inbound-tenant"],
+          provider_accepted_at: "2026-07-01T00:00:00.000Z",
+          inbox_verified_at: "2026-07-01T00:01:00.000Z",
           default_reply_identity: "founders@tenant.example.com",
-          raw_r2_key: "raw/example",
         },
       },
       outbound_proofs: {
@@ -177,7 +181,7 @@ describe("maildesk receipt workflow", () => {
       sender_domain_ack_ready_count: 1,
       sender_domain_ack_missing_count: 0,
     });
-    expect(plan.actions[0]).toMatchObject({
+    expect(plan.actions.find((action) => action.operation_id)).toMatchObject({
       operation_id: "20260701T000000Z-00000-tenant",
       ack_command:
         "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
@@ -187,6 +191,10 @@ describe("maildesk receipt workflow", () => {
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function fileSha256(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function canonicalTopology() {

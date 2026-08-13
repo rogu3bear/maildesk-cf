@@ -39,7 +39,7 @@ sha256 = "sha256:ed4e860a93c8f1fe14b2fe44edfe76f9c6637f48dfb385ef16f778181bec4cf
 
 [[operation.migration]]
 path = "migrations/0007_inbound_delivery_claims.sql"
-sha256 = "sha256:6e636218d183ceb83336cb82b7d6d51cc4efbb55ea41d38c33cbaf006c8e35d5"
+sha256 = "sha256:815045f5f6f582d1bd76dd6e5321a6ffb1d3b4f9a9472948cd8a43c7eae1bb5b"
 
 [[operation.assertion]]
 kind = "table_exists"

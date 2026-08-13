@@ -86,6 +86,11 @@ interface ProofEvidence {
   provider?: string;
   external_receipt_path?: string;
   provider_message_id?: string;
+  operator_count?: number;
+  policy_sha256?: string;
+  provider_message_ids?: string[];
+  provider_accepted_at?: string;
+  inbox_verified_at?: string;
 }
 
 interface CfctlMaildeskEvidence {
@@ -150,6 +155,11 @@ interface EvidenceSummary {
     provider: string | null;
     external_receipt_path: string | null;
     audit_event_at: string | null;
+    operator_count: number | null;
+    policy_sha256: string | null;
+    provider_message_ids: string[];
+    provider_accepted_at: string | null;
+    inbox_verified_at: string | null;
   };
   outbound: {
     status: string | null;
@@ -320,7 +330,13 @@ function buildRows(
       r2_policy: checkR2Policy(live, localPolicySha256),
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
-      inbound_proof: checkInboundProof(domainName, policyDomain, desiredDomain, live.inbound_proofs?.[domainName]),
+      inbound_proof: checkInboundProof(
+        domainName,
+        policyDomain,
+        desiredDomain,
+        live.inbound_proofs?.[domainName],
+        localPolicySha256,
+      ),
       outbound_sender: checkSender(domainName, desired, live),
       outbound_proof: checkOutboundProof(domainName, desired, live.outbound_proofs?.[domainName]),
     };
@@ -441,10 +457,8 @@ function checkInboundMx(
 }
 
 function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
-  if (live.r2_policy_sha256) {
-    return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
-  }
-  return live.cfctl_maildesk?.storage?.r2_policy_bucket === "ok" ? "ok" : "not_checked";
+  if (!live.r2_policy_sha256) return "not_checked";
+  return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
 }
 
 function cloudflareEmailRoutingMx(): string[] {
@@ -518,6 +532,7 @@ function checkInboundProof(
   policyDomain: PolicyDomain | undefined,
   desiredDomain: DesiredDomain | undefined,
   proof: ProofEvidence | undefined,
+  localPolicySha256: string,
 ): Status {
   if (!proof) return "not_checked";
   if (!isOkProofStatus(proof.status)) return "drift";
@@ -529,20 +544,51 @@ function checkInboundProof(
   if (!mailbox || mailbox.domain !== domainName) return "drift";
 
   const roleAlias = policyDomain.role_aliases[mailbox.localPart];
-  const requireRawR2Key = (desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing") === "cloudflare_email_routing";
+  const provider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
   if (roleAlias) {
     if (roleAlias.sink) {
-      return proofMatchesSink(proof, requireRawR2Key);
+      return provider === "cloudflare_email_routing"
+        ? proofMatchesInboxRelay(proof, "sink", 0, roleAlias.reply_identity, localPolicySha256)
+        : proofMatchesSink(proof, false);
     }
-    return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, requireRawR2Key);
+    return provider === "cloudflare_email_routing"
+      ? proofMatchesInboxRelay(
+        proof,
+        "role_alias",
+        roleAlias.operators.length,
+        roleAlias.reply_identity,
+        localPolicySha256,
+      )
+      : proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, false);
   }
 
   const personalAlias = policyDomain.personal_aliases[mailbox.localPart];
   if (personalAlias) {
-    return proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity, requireRawR2Key);
+    return provider === "cloudflare_email_routing"
+      ? proofMatchesInboxRelay(proof, "personal_alias", 1, personalAlias.reply_identity, localPolicySha256)
+      : proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity, false);
   }
 
   return "drift";
+}
+
+function proofMatchesInboxRelay(
+  proof: ProofEvidence,
+  expectedRouteKind: "role_alias" | "personal_alias" | "sink",
+  expectedOperatorCount: number,
+  expectedReplyIdentity: string,
+  localPolicySha256: string,
+): Status {
+  if (proof.route_kind !== expectedRouteKind) return "drift";
+  if (proof.operator_count !== expectedOperatorCount) return "drift";
+  if (proof.policy_sha256 !== localPolicySha256) return "drift";
+  if (normalizeMailbox(proof.default_reply_identity ?? "") !== normalizeMailbox(expectedReplyIdentity)) {
+    return "drift";
+  }
+  if (!proof.provider_accepted_at || !proof.inbox_verified_at) return "drift";
+  if (!proof.provider_message_ids || proof.provider_message_ids.length !== expectedOperatorCount) return "drift";
+  if (proof.forwarded_to || proof.raw_r2_key) return "drift";
+  return "ok";
 }
 
 function proofMatchesRoute(
@@ -701,6 +747,11 @@ function evidenceSummary(
       provider: inbound?.provider ?? null,
       external_receipt_path: inbound?.external_receipt_path ?? null,
       audit_event_at: inbound?.audit_event_at ?? null,
+      operator_count: inbound?.operator_count ?? null,
+      policy_sha256: inbound?.policy_sha256 ?? null,
+      provider_message_ids: inbound?.provider_message_ids ?? [],
+      provider_accepted_at: inbound?.provider_accepted_at ?? null,
+      inbox_verified_at: inbound?.inbox_verified_at ?? null,
     },
     outbound: {
       status: outbound?.status ?? null,

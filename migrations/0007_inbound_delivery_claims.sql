@@ -20,6 +20,8 @@ CREATE TABLE inbound_recipient_deliveries (
   delivery_id TEXT NOT NULL REFERENCES inbound_deliveries(id) ON DELETE CASCADE,
   operator_ref TEXT NOT NULL CHECK (length(operator_ref) = 64),
   delivery_message_id TEXT NOT NULL,
+  delivery_payload_r2_key TEXT NOT NULL,
+  delivery_payload_sha256 TEXT NOT NULL CHECK (length(delivery_payload_sha256) = 64),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'sending', 'provider_accepted', 'recovery_required', 'failed')),
   provider_message_id TEXT,
