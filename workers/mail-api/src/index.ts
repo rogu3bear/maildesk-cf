@@ -135,7 +135,10 @@ function isOutboundReplyRequestedJob(value: unknown): value is OutboundReplyRequ
     (typeof candidate.text === "string" || typeof candidate.html === "string") &&
     (candidate.headers === undefined || isStringRecord(candidate.headers)) &&
     (candidate.attachments === undefined || isAttachmentArray(candidate.attachments)) &&
+    (candidate.policySha256 === undefined ||
+      (typeof candidate.policySha256 === "string" && /^[a-f0-9]{64}$/.test(candidate.policySha256))) &&
     (candidate.relayAttemptId === undefined || typeof candidate.relayAttemptId === "string") &&
+    (candidate.relayAttemptId === undefined || typeof candidate.policySha256 === "string") &&
     (candidate.relaySpoolKey === undefined || typeof candidate.relaySpoolKey === "string") &&
     typeof candidate.queuedAt === "string" &&
     (candidate.requestedIdentity === undefined || typeof candidate.requestedIdentity === "string")
@@ -165,12 +168,12 @@ async function processInboxReply(
     return ACK;
   }
 
-  const policy = await loadPolicy(env);
-  if (!policy) {
+  const activePolicy = await loadActivePolicy(env);
+  if (!activePolicy) {
     await recoverRelayAttempt(job, env, "policy_unavailable");
     return ACK;
   }
-  const authorization = authorizeReplyWithPolicy(policy, {
+  const authorization = authorizeReplyWithPolicy(activePolicy.policy, {
     envelopeTo: relay.route_address,
     operator: job.operator,
     requestedIdentity: relay.reply_identity,
@@ -255,6 +258,7 @@ async function processInboxReply(
     headers,
     attachments: payload.attachments,
     requestedIdentity: relay.reply_identity,
+    policySha256: activePolicy.sha256,
     relayAttemptId: job.attemptId,
     relaySpoolKey: job.rawR2Key,
     queuedAt: job.receivedAt,
@@ -548,6 +552,7 @@ async function finalizeTerminalSendState(
   result: OutboundSendResult,
 ): Promise<void> {
   if (job.relayAttemptId) {
+    if (!job.policySha256) throw new Error("relay terminal result is missing policy authority");
     const status = action === "outbound_reply_delivered"
       ? "provider_accepted"
       : action === "outbound_reply_recovery_required"
@@ -558,16 +563,47 @@ async function finalizeTerminalSendState(
     )
       .bind(status, result.providerMessageId ?? null, result.error ? status : null, job.relayAttemptId)
       .run();
-    await env.DB.prepare(
-    "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_reply_provider_message_id = CASE WHEN ?1 = 'provider_accepted' THEN ?2 ELSE last_reply_provider_message_id END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?4)",
-  )
+    const projected = await env.DB.prepare(
+      "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_reply_provider_message_id = CASE WHEN ?1 = 'provider_accepted' THEN ?2 ELSE last_reply_provider_message_id END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?4) AND policy_sha256 = ?5 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?5)",
+    )
       .bind(
         status,
         result.providerMessageId ?? null,
         result.error ? status : null,
         job.relayAttemptId,
+        job.policySha256,
       )
       .run();
+    if (Number(projected.meta?.changes ?? 0) === 0) {
+      const runtime = await env.DB.prepare(
+        "SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1",
+      ).first<{ active_policy_sha256: string }>();
+      if (!runtime?.active_policy_sha256 || runtime.active_policy_sha256 === job.policySha256) {
+        throw new Error("active route health revision is unavailable for terminal reply projection");
+      }
+      await recordAuditEvent(
+        env,
+        "system",
+        "outbound_reply_result_superseded",
+        {
+          messageId: job.messageId,
+          threadId: job.threadId,
+          relayAttemptId: job.relayAttemptId,
+          policySha256: job.policySha256,
+          result: auditSendResult(result),
+        },
+        `${job.messageId}:outbound_reply_result_superseded`,
+        job.threadId,
+      );
+      if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
+        if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+        await env.RELAY_SPOOL.delete(job.relaySpoolKey);
+        await env.DB.prepare(
+          "UPDATE relay_attempts SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        ).bind(job.relayAttemptId).run();
+      }
+      return;
+    }
     if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
       if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
       await env.RELAY_SPOOL.delete(job.relaySpoolKey);
@@ -792,6 +828,9 @@ async function sendOutboundReply(
     const activePolicy = await loadActivePolicy(env);
     if (!activePolicy) {
       return { ok: false, provider: mode, error: "active policy is unavailable" };
+    }
+    if (job.relayAttemptId && activePolicy.sha256 !== job.policySha256) {
+      return { ok: false, provider: mode, error: "relay policy revision is no longer active" };
     }
     const privacyFailure = outboundPrivacyFailure(job, activePolicy.policy);
     if (privacyFailure) {

@@ -191,6 +191,11 @@ describe("mail API outbound sender modes", () => {
     expect(deleted).toEqual(["relay-spool/reply-1.eml"]);
     const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET reply_status"));
     expect(healthUpdate?.sql).toContain("reply_status = 'reply_verified'");
+    expect(healthUpdate?.sql).toContain("policy_sha256 = ?5");
+    expect(healthUpdate?.sql).toContain("rs.active_policy_sha256 = ?5");
+    expect(healthUpdate?.binds[4]).toBe(
+      createHash("sha256").update(policyJson).digest("hex"),
+    );
   });
 
   test("redelivery resumes terminal D1 projection and spool cleanup without sending twice", async () => {
@@ -209,6 +214,7 @@ describe("mail API outbound sender modes", () => {
       subject: "Terminal resume proof",
       text: "Authorized reply body",
       requestedIdentity: "security@tenant.example.com",
+      policySha256: "a".repeat(64),
       relayAttemptId: "relay-attempt:terminal-resume",
       relaySpoolKey: "relay-spool/terminal-resume.eml",
       queuedAt: "2026-08-12T00:00:00.000Z",
@@ -248,6 +254,166 @@ describe("mail API outbound sender modes", () => {
     expect(db.statements.some((entry) =>
       entry.sql.includes("UPDATE relay_attempts SET raw_r2_key = NULL")
     )).toBe(true);
+  });
+
+  test("terminal redelivery cannot advance a superseding policy revision", async () => {
+    const db = new D1Recorder(
+      undefined,
+      undefined,
+      undefined,
+      "UPDATE route_health SET reply_status",
+      "b".repeat(64),
+    );
+    db.seedAudit(
+      "message-policy-a:outbound_reply_requested",
+      "outbound_reply_requested",
+    );
+    db.seedAudit(
+      "message-policy-a:outbound_reply_result",
+      "outbound_reply_delivered",
+      {
+        result: {
+          ok: true,
+          provider: "cloudflare_email_service",
+          providerMessageId: "provider-from-policy-a",
+        },
+      },
+    );
+    const email = new SendEmailRecorder("must-not-send");
+    const deleted: string[] = [];
+    const job: MailJob = {
+      kind: "outbound_reply_requested",
+      messageId: "message-policy-a",
+      threadId: "thread-policy-a",
+      operator: "operator@tenant.example.com",
+      envelopeTo: "security@tenant.example.com",
+      fromIdentity: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      subject: "Superseded terminal result",
+      text: "Already delivered under policy A",
+      requestedIdentity: "security@tenant.example.com",
+      policySha256: "a".repeat(64),
+      relayAttemptId: "relay-attempt:policy-a",
+      relaySpoolKey: "relay-spool/policy-a.eml",
+      queuedAt: "2026-08-12T00:00:00.000Z",
+    };
+
+    const batch = new MessageBatchRecorder([job], 2);
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(deleted).toEqual(["relay-spool/policy-a.eml"]);
+    expect(db.hasAuditAction("outbound_reply_result_superseded")).toBe(true);
+    const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET reply_status"));
+    expect(healthUpdate?.binds[4]).toBe("a".repeat(64));
+    expect(healthUpdate?.sql).toContain("policy_sha256 = ?5");
+    expect(healthUpdate?.sql).toContain("rs.active_policy_sha256 = ?5");
+  });
+
+  test("a superseded policy job cannot reach the outbound provider", async () => {
+    const policyJson = inboxRelayPolicyJson();
+    const db = new D1Recorder(undefined, policyJson);
+    const email = new SendEmailRecorder("must-not-send");
+    const job: MailJob = {
+      kind: "outbound_reply_requested",
+      messageId: "message-stale-policy-send",
+      threadId: "thread-stale-policy-send",
+      operator: "operator@tenant.example.com",
+      envelopeTo: "security@tenant.example.com",
+      fromIdentity: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      subject: "Stale policy send",
+      text: "Must not reach the provider",
+      requestedIdentity: "security@tenant.example.com",
+      policySha256: "a".repeat(64),
+      relayAttemptId: "relay-attempt:stale-policy-send",
+      relaySpoolKey: "relay-spool/stale-policy-send.eml",
+      queuedAt: "2026-08-12T00:00:00.000Z",
+    };
+
+    const batch = new MessageBatchRecorder([job]);
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: {},
+      POLICY_STORE: policyStore(policyJson),
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env);
+
+    expect(email.messages).toHaveLength(0);
+    expect(batch.ackCount).toBe(1);
+    expect(batch.retryCount).toBe(0);
+    expect(db.auditDetail("outbound_reply_failed")).toMatchObject({
+      result: { error: "relay policy revision is no longer active" },
+    });
+  });
+
+  test("missing active-revision reply health retains terminal recovery for retry", async () => {
+    const db = new D1Recorder(
+      undefined,
+      undefined,
+      undefined,
+      "UPDATE route_health SET reply_status",
+      "a".repeat(64),
+    );
+    db.seedAudit(
+      "message-active-policy:outbound_reply_requested",
+      "outbound_reply_requested",
+    );
+    db.seedAudit(
+      "message-active-policy:outbound_reply_result",
+      "outbound_reply_delivered",
+      {
+        result: {
+          ok: true,
+          provider: "cloudflare_email_service",
+          providerMessageId: "provider-active-policy",
+        },
+      },
+    );
+    const deleted: string[] = [];
+    const job: MailJob = {
+      kind: "outbound_reply_requested",
+      messageId: "message-active-policy",
+      threadId: "thread-active-policy",
+      operator: "operator@tenant.example.com",
+      envelopeTo: "security@tenant.example.com",
+      fromIdentity: "security@tenant.example.com",
+      to: ["correspondent@example.net"],
+      subject: "Active terminal recovery",
+      text: "Already delivered under active policy",
+      requestedIdentity: "security@tenant.example.com",
+      policySha256: "a".repeat(64),
+      relayAttemptId: "relay-attempt:active-policy",
+      relaySpoolKey: "relay-spool/active-policy.eml",
+      queuedAt: "2026-08-12T00:00:00.000Z",
+    };
+
+    const batch = new MessageBatchRecorder([job], 2);
+    await expect(mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      MAILDESK_OUTBOUND_MODE: "disabled",
+    } as unknown as Env)).rejects.toThrow("active route health revision is unavailable");
+
+    expect(batch.ackCount).toBe(0);
+    expect(deleted).toHaveLength(0);
+    expect(db.hasAuditAction("outbound_reply_result_superseded")).toBe(false);
   });
 
   test("inbox relay rejects opaque outbound attachments before provider send", async () => {

@@ -177,6 +177,8 @@ export interface OutboundReplyRequestedJob {
   headers?: Record<string, string>;
   attachments?: MailAttachmentPayload[];
   requestedIdentity?: string;
+  /** Active policy revision that authorized an inbox-relay provider send. */
+  policySha256?: string;
   relayAttemptId?: string;
   relaySpoolKey?: string;
   queuedAt: string;
