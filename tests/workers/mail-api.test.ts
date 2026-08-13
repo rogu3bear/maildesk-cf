@@ -213,6 +213,7 @@ describe("mail API outbound sender modes", () => {
       operator: "operator@tenant.example.com",
       operatorMessageId: "<operator-reply@tenant.example.com>",
       rawR2Key: "relay-spool/reply-1.eml",
+      rawSha256: createHash("sha256").update(new Uint8Array(raw)).digest("hex"),
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
 
@@ -252,6 +253,74 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.binds[4]).toBe(
       createHash("sha256").update(policyJson).digest("hex"),
     );
+  });
+
+  test("changed reply-spool bytes fail closed before parsing or outbound delivery", async () => {
+    const policyJson = inboxRelayPolicyJson();
+    const db = new D1Recorder({
+      id: "relay-integrity",
+      thread_id: "thread-integrity",
+      external_recipient: "correspondent@example.net",
+      reply_identity: "security@tenant.example.com",
+      original_message_id: "<original@example.net>",
+      references_json: "[]",
+      expires_at: "2099-01-01T00:00:00.000Z",
+      revoked_at: null,
+      route_address: "security@tenant.example.com",
+    }, policyJson);
+    const email = new SendEmailRecorder("must-not-send");
+    const authenticated = new TextEncoder().encode([
+      "From: Operator <operator@tenant.example.com>",
+      "To: r+opaque@reply.maildesk.example.com",
+      "Subject: Re: security question",
+      "Message-ID: <operator-integrity@tenant.example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Authenticated reply body",
+    ].join("\r\n"));
+    const changed = new TextEncoder().encode([
+      "From: Operator <operator@tenant.example.com>",
+      "To: r+opaque@reply.maildesk.example.com",
+      "Subject: Re: security question",
+      "Message-ID: <operator-integrity@tenant.example.com>",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "CHANGED AFTER AUTHENTICATION",
+    ].join("\r\n"));
+    const batch = new MessageBatchRecorder([{
+      kind: "inbox_reply_received",
+      attemptId: "relay-attempt:integrity",
+      relayId: "relay-integrity",
+      operator: "operator@tenant.example.com",
+      operatorMessageId: "<operator-integrity@tenant.example.com>",
+      rawR2Key: "relay-spool/integrity.eml",
+      rawSha256: createHash("sha256").update(authenticated).digest("hex"),
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: {
+        get: async () => ({
+          size: changed.byteLength,
+          arrayBuffer: async () => changed.buffer,
+        }),
+      },
+      POLICY_STORE: policyStore(policyJson),
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+      MAILDESK_MAX_ENCODED_MESSAGE_BYTES: "5242880",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(db.auditDetail("inbox_reply_failed")).toMatchObject({
+      errorCode: "relay_spool_digest_mismatch",
+    });
   });
 
   test("redelivery resumes terminal D1 projection and spool cleanup without sending twice", async () => {
@@ -512,6 +581,7 @@ describe("mail API outbound sender modes", () => {
       operator: "operator@tenant.example.com",
       operatorMessageId: "<operator-leak@tenant.example.com>",
       rawR2Key: "relay-spool/leak.eml",
+      rawSha256: createHash("sha256").update(new Uint8Array(raw)).digest("hex"),
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
 
@@ -566,6 +636,7 @@ describe("mail API outbound sender modes", () => {
       operator: "operator@tenant.example.com",
       operatorMessageId: "<operator-visible-leak@tenant.example.com>",
       rawR2Key: "relay-spool/visible-leak.eml",
+      rawSha256: createHash("sha256").update(new Uint8Array(raw)).digest("hex"),
       receivedAt: "2026-08-12T00:00:00.000Z",
     }]);
 

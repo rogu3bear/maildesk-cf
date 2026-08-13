@@ -41,6 +41,10 @@ sha256 = "sha256:ed4e860a93c8f1fe14b2fe44edfe76f9c6637f48dfb385ef16f778181bec4cf
 path = "migrations/0007_inbound_delivery_claims.sql"
 sha256 = "sha256:815045f5f6f582d1bd76dd6e5321a6ffb1d3b4f9a9472948cd8a43c7eae1bb5b"
 
+[[operation.migration]]
+path = "migrations/0008_reply_spool_integrity.sql"
+sha256 = "sha256:df60b93e9a0f11b365c4a40504a851c88adb8ae1f59b82554f6c931a4d00cfcf"
+
 [[operation.assertion]]
 kind = "table_exists"
 table = "policy_revisions"

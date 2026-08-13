@@ -47,6 +47,14 @@ and Rust authorizes that operator for the stored route identity. Sender-supplied
 authentication-result headers never authorize a reply. The recipient and public
 sender come only from the relay row.
 
+The Worker hashes the exact DKIM-authenticated RFC 822 bytes and atomically
+stores that digest with the relay-attempt spool key. The Queue job carries the
+same key and digest. Before parsing or outbound delivery, the consumer hashes
+the fetched R2 bytes, requires the Queue pair to match the D1 claim, and fails
+closed on any key, digest, or generation mismatch; authenticated content
+therefore cannot be substituted after the
+authorization boundary.
+
 Duplicate operator messages use `(relay, normalized operator Message-ID)` as the
 idempotency boundary. Either current operator may make a distinct reply during
 the 90-day relay lifetime; v1 has no assignment or conversation lock.

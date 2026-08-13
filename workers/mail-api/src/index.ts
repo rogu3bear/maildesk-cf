@@ -25,6 +25,9 @@ const RESEND_REQUEST_TIMEOUT_MS = 10_000;
 // wrangler.toml allows five retries after the initial Queue delivery.
 const MAX_OUTBOUND_ATTEMPTS = 6;
 
+export const CLAIMED_REPLY_SPOOL_SQL =
+  "SELECT id FROM relay_attempts WHERE id = ?1 AND relay_id = ?2 AND operator = ?3 AND operator_message_id = ?4 AND raw_r2_key = ?5 AND raw_sha256 = ?6 AND status IN ('receiving', 'queued', 'authorized') LIMIT 1";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -183,6 +186,23 @@ async function processInboxReply(
     return ACK;
   }
 
+  const claimedAttempt = await env.DB.prepare(
+    CLAIMED_REPLY_SPOOL_SQL,
+  )
+    .bind(
+      job.attemptId,
+      job.relayId,
+      job.operator,
+      job.operatorMessageId,
+      job.rawR2Key,
+      job.rawSha256,
+    )
+    .first<{ id: string }>();
+  if (!claimedAttempt) {
+    await failRelayAttempt(job, env, "relay_attempt_integrity_mismatch");
+    return ACK;
+  }
+
   const object = await env.RELAY_SPOOL.get(job.rawR2Key);
   if (!object) {
     await recoverRelayAttempt(job, env, "relay_spool_missing");
@@ -194,9 +214,19 @@ async function processInboxReply(
     return ACK;
   }
 
+  if (!/^[a-f0-9]{64}$/.test(job.rawSha256)) {
+    await failRelayAttempt(job, env, "relay_spool_digest_invalid");
+    return ACK;
+  }
+  const rawBytes = await object.arrayBuffer();
+  if ((await sha256Hex(rawBytes)) !== job.rawSha256) {
+    await failRelayAttempt(job, env, "relay_spool_digest_mismatch");
+    return ACK;
+  }
+
   let parsed: Awaited<ReturnType<typeof parseRelayEmail>>;
   try {
-    parsed = await parseRelayEmail(await object.arrayBuffer());
+    parsed = await parseRelayEmail(rawBytes);
   } catch {
     await failRelayAttempt(job, env, "reply_mime_invalid");
     return ACK;

@@ -142,6 +142,8 @@ export interface InboxReplyReceivedJob {
   operator: string;
   operatorMessageId: string;
   rawR2Key: string;
+  /** SHA-256 of the exact RFC 822 bytes authenticated before spooling. */
+  rawSha256: string;
   receivedAt: string;
 }
 

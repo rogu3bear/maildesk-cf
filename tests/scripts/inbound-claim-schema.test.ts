@@ -7,6 +7,7 @@ import {
   CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL,
   DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
 } from "../../workers/mail-router/src/index";
+import { CLAIMED_REPLY_SPOOL_SQL } from "../../workers/mail-api/src/index";
 
 const root = resolve(import.meta.dir, "../..");
 const OLD_POLICY = "a".repeat(64);
@@ -15,7 +16,7 @@ const ACTIVE_POLICY = "b".repeat(64);
 function migratedDatabase(): Database {
   const database = new Database(":memory:", { strict: true });
   database.exec("PRAGMA foreign_keys = ON");
-  for (let version = 1; version <= 7; version += 1) {
+  for (let version = 1; version <= 8; version += 1) {
     const filename = [
       "0001_maildesk_core.sql",
       "0002_audit_idempotency.sql",
@@ -24,11 +25,66 @@ function migratedDatabase(): Database {
       "0005_route_proof_timestamps.sql",
       "0006_active_policy_revision.sql",
       "0007_inbound_delivery_claims.sql",
+      "0008_reply_spool_integrity.sql",
     ][version - 1]!;
     database.exec(readFileSync(resolve(root, "migrations", filename), "utf8"));
   }
   return database;
 }
+
+test("relay attempts persist the authenticated reply-spool digest", () => {
+  const database = migratedDatabase();
+  try {
+    const columns = database.query("PRAGMA table_info(relay_attempts)").all() as Array<{ name: string }>;
+    expect(columns.some((column) => column.name === "raw_sha256")).toBe(true);
+    seedSupersededClaim(database);
+    const digest = "9".repeat(64);
+    database.query(
+      "INSERT INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, raw_sha256, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'receiving')",
+    ).run(
+      "relay-attempt:integrity",
+      "relay:message",
+      "operator@example.com",
+      "<reply@example.com>",
+      "relay-spool/reply.eml",
+      digest,
+    );
+    expect(database.query(
+      "SELECT raw_r2_key, raw_sha256 FROM relay_attempts WHERE id = ?1",
+    ).get("relay-attempt:integrity")).toEqual({
+      raw_r2_key: "relay-spool/reply.eml",
+      raw_sha256: digest,
+    });
+    expect(database.query(CLAIMED_REPLY_SPOOL_SQL).get(
+      "relay-attempt:integrity",
+      "relay:message",
+      "operator@example.com",
+      "<reply@example.com>",
+      "relay-spool/reply.eml",
+      digest,
+    )).toEqual({ id: "relay-attempt:integrity" });
+    expect(database.query(CLAIMED_REPLY_SPOOL_SQL).get(
+      "relay-attempt:integrity",
+      "relay:message",
+      "operator@example.com",
+      "<reply@example.com>",
+      "relay-spool/reply.eml",
+      "7".repeat(64),
+    )).toBeNull();
+    expect(() => database.query(
+      "INSERT INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, raw_sha256, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'receiving')",
+    ).run(
+      "relay-attempt:invalid-integrity",
+      "relay:message",
+      "operator@example.com",
+      "<invalid@example.com>",
+      "relay-spool/invalid.eml",
+      "8".repeat(63),
+    )).toThrow();
+  } finally {
+    database.close();
+  }
+});
 
 function seedSupersededClaim(database: Database): void {
   database.exec(`

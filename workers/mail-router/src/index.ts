@@ -455,10 +455,20 @@ async function acceptOperatorReply(
   const attemptDigest = await sha256Hex(`${relay.id}\0${parsed.messageId.toLowerCase()}`);
   const attemptId = `relay-attempt:${attemptDigest}`;
   const receivedAt = new Date().toISOString();
-  const rawR2Key = relaySpoolKey(attemptId, receivedAt);
+  const candidateRawR2Key = relaySpoolKey(attemptId, receivedAt);
+  const rawSha256 = await sha256Hex(rawBytes);
 
   const existingAttempt = await loadRelayAttempt(attemptId, env);
   if (existingAttempt && existingAttempt.status !== "receiving") return;
+  if (existingAttempt && existingAttempt.raw_sha256 !== rawSha256) {
+    message.setReject("maildesk reply bytes changed for an existing attempt");
+    return;
+  }
+  const rawR2Key = existingAttempt?.raw_r2_key ?? candidateRawR2Key;
+  if (!rawR2Key) {
+    message.setReject("maildesk reply spool identity is unavailable");
+    return;
+  }
 
   try {
     await env.RELAY_SPOOL.put(rawR2Key, rawBytes, {
@@ -472,12 +482,26 @@ async function acceptOperatorReply(
 
   const claimed = existingAttempt
     ? existingAttempt
-    : await claimRelayAttempt(attemptId, relay, operator, parsed.messageId, rawR2Key, env);
+    : await claimRelayAttempt(attemptId, relay, operator, parsed.messageId, rawR2Key, rawSha256, env);
   if (!claimed) {
     message.setReject("maildesk could not durably claim this reply");
     return;
   }
   if (claimed.status !== "receiving") return;
+  if (claimed.raw_sha256 !== rawSha256 || !claimed.raw_r2_key) {
+    if (rawR2Key === candidateRawR2Key && rawR2Key !== claimed.raw_r2_key) {
+      await env.RELAY_SPOOL.delete(rawR2Key).catch(() => undefined);
+    }
+    message.setReject("maildesk reply claim does not match authenticated bytes");
+    return;
+  }
+  if (claimed.raw_r2_key !== rawR2Key) {
+    await env.RELAY_SPOOL.put(claimed.raw_r2_key, rawBytes, {
+      httpMetadata: { contentType: MIME_CONTENT_TYPE },
+      customMetadata: { retentionClass: "relay-spool", relayId: relay.id },
+    });
+    await env.RELAY_SPOOL.delete(rawR2Key).catch(() => undefined);
+  }
 
   try {
     await env.MAIL_JOBS.send({
@@ -486,7 +510,8 @@ async function acceptOperatorReply(
       relayId: relay.id,
       operator,
       operatorMessageId: parsed.messageId,
-      rawR2Key,
+      rawR2Key: claimed.raw_r2_key,
+      rawSha256: claimed.raw_sha256,
       receivedAt,
     });
   } catch {
@@ -500,7 +525,7 @@ async function acceptOperatorReply(
     await env.DB.prepare(
       "UPDATE relay_attempts SET status = 'queued', raw_r2_key = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
     )
-      .bind(rawR2Key, attemptId)
+      .bind(claimed.raw_r2_key, attemptId)
       .run();
     await recordAudit(
       env,
@@ -1114,22 +1139,23 @@ async function claimRelayAttempt(
   operator: string,
   operatorMessageId: string,
   rawR2Key: string,
+  rawSha256: string,
   env: Env,
 ): Promise<RelayAttemptRow | null> {
   const result = await env.DB.prepare(
-    "INSERT OR IGNORE INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, status) VALUES (?1, ?2, ?3, ?4, ?5, 'receiving')",
+    "INSERT OR IGNORE INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, raw_sha256, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'receiving')",
   )
-    .bind(attemptId, relay.id, operator, operatorMessageId, rawR2Key)
+    .bind(attemptId, relay.id, operator, operatorMessageId, rawR2Key, rawSha256)
     .run();
   if (Number(result.meta.changes ?? 0) > 0) {
-    return { status: "receiving", raw_r2_key: rawR2Key };
+    return { status: "receiving", raw_r2_key: rawR2Key, raw_sha256: rawSha256 };
   }
   return loadRelayAttempt(attemptId, env);
 }
 
 async function loadRelayAttempt(attemptId: string, env: Env): Promise<RelayAttemptRow | null> {
   return env.DB.prepare(
-    "SELECT status, raw_r2_key FROM relay_attempts WHERE id = ?1 LIMIT 1",
+    "SELECT status, raw_r2_key, raw_sha256 FROM relay_attempts WHERE id = ?1 LIMIT 1",
   )
     .bind(attemptId)
     .first<RelayAttemptRow>();
@@ -1365,4 +1391,5 @@ interface ReplyRelayRow {
 interface RelayAttemptRow {
   status: "receiving" | "queued" | "authorized" | "provider_accepted" | "failed" | "recovery_required";
   raw_r2_key: string | null;
+  raw_sha256: string | null;
 }

@@ -92,6 +92,9 @@ Generated WASM is rebuilt before each Worker bundle and is not committed.
 D1 stores queryable route, relay, idempotency, health, and body-free audit state.
 R2 stores temporary relay/recovery content only in `inbox_relay`: original MIME,
 generated per-recipient operator-delivery payloads, and operator-reply MIME.
+Every operator-reply spool key is paired with the SHA-256 of the exact
+DKIM-authenticated bytes in D1 and the Queue job; the outbound consumer verifies
+that digest before parsing.
 Successful processing deletes each object early and lifecycle policy provides a
 seven-day ceiling.
 Queues own async delivery and redelivery; provider retry policy must remain explicit.
