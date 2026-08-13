@@ -130,6 +130,11 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
     expect(sql).toContain("route:example.com:team%2Bops");
     expect(sql).toContain("route:example.com:team_ops");
     expect(sql).toContain("'excluded'");
+    expect(sql).toContain("route_health.policy_sha256 IS NOT excluded.policy_sha256");
+    expect(sql).toContain("last_inbound_provider_message_ids_json = CASE WHEN");
+    expect(sql).toContain("THEN '[]' ELSE route_health.last_inbound_provider_message_ids_json END");
+    expect(sql).toContain("last_reply_verified_at = CASE WHEN");
+    expect(sql).toContain("THEN NULL ELSE route_health.last_reply_verified_at END");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
