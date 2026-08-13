@@ -1,4 +1,5 @@
 import {
+  InboundDeliveryResultJob,
   InboxReplyReceivedJob,
   json,
   MailJob,
@@ -307,6 +308,10 @@ async function recordQueueEvent(
   if (job.kind === "inbox_reply_received") {
     return processInboxReply(job, env, attempt);
   }
+  if (job.kind === "inbound_delivery_result") {
+    await projectInboundDeliveryResult(job, env);
+    return ACK;
+  }
   const base = dedupeBase(job);
 
   const claimed = await recordAuditEvent(
@@ -427,6 +432,62 @@ async function recordQueueEvent(
   // the configured DLQ. Definitive non-retryable failures are complete and can
   // be acknowledged without entering recovery triage.
   return sendResult.retryable ? { kind: "retry", delaySeconds: 0 } : ACK;
+}
+
+async function projectInboundDeliveryResult(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const acceptedCount = job.results.filter((result) => result.ok).length;
+  const providerMessageIds = job.results.flatMap((result) =>
+    result.providerMessageId ? [result.providerMessageId] : []
+  );
+  await env.DB.prepare(
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5",
+  )
+    .bind(
+      job.status,
+      acceptedCount,
+      JSON.stringify(providerMessageIds),
+      job.status === "provider_accepted" ? null : job.status,
+      job.routeId,
+    )
+    .run();
+  for (const [index, result] of job.results.entries()) {
+    await recordAuditEvent(
+      env,
+      "system",
+      result.ok ? "operator_delivery_recipient_provider_accepted" : "operator_delivery_recipient_recovery_required",
+      {
+        deliveryId: job.deliveryId,
+        relayId: job.relayId,
+        operatorRef: result.operatorRef,
+        providerMessageId: result.providerMessageId,
+        errorCode: result.errorCode,
+      },
+      `${job.deliveryId}:operator_delivery:${index}`,
+      job.threadId,
+    );
+  }
+  await recordAuditEvent(
+    env,
+    "system",
+    job.status === "provider_accepted" ? "operator_delivery_provider_accepted" : job.status,
+    {
+      deliveryId: job.deliveryId,
+      relayId: job.relayId,
+      acceptedCount,
+      failedCount: job.results.length - acceptedCount,
+      providerMessageIds,
+      recoverySpool: true,
+    },
+    `${job.deliveryId}:operator_delivery_result`,
+    job.threadId,
+  );
+  if (job.status === "provider_accepted") {
+    if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+    await env.RELAY_SPOOL.delete(job.relaySpoolKey);
+  }
 }
 
 async function recordTerminalSendEvent(

@@ -1,4 +1,5 @@
 import {
+  InboundDeliveryResultJob,
   MaildeskEnv,
   operatorDeliveryConfig,
   rawMailKey,
@@ -59,25 +60,26 @@ async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<
     return;
   }
 
-  const route = await routeMessage(message, env);
-  if (route instanceof Error) {
-    message.setReject(route.message);
+  const boundRoute = await routeMessage(message, env);
+  if (boundRoute instanceof Error) {
+    message.setReject(boundRoute.message);
     return;
   }
 
   if (config.mode === "inbox_relay") {
-    await acceptInboxRelay(message, route, env);
+    await acceptInboxRelay(message, boundRoute, env);
     return;
   }
 
-  await acceptWebDesk(message, route, env);
+  await acceptWebDesk(message, boundRoute.route, env);
 }
 
 async function acceptInboxRelay(
   message: ForwardableEmailMessage,
-  route: RouteDecision,
+  boundRoute: PolicyBoundRoute,
   env: Env,
 ): Promise<void> {
+  const { route, policySha256 } = boundRoute;
   const config = operatorDeliveryConfig(env);
   if (!config.replyDomain || !env.EMAIL) {
     message.setReject("maildesk inbox relay is not configured");
@@ -88,7 +90,11 @@ async function acceptInboxRelay(
     return;
   }
   if (route.routeKind === "sink") {
-    await persistSinkRoute(message, route, env);
+    try {
+      await persistSinkRoute(message, route, policySha256, env);
+    } catch {
+      message.setReject("maildesk policy changed before the sink route was recorded");
+    }
     return;
   }
   if (route.operators.length === 0) {
@@ -137,6 +143,17 @@ async function acceptInboxRelay(
     return;
   }
 
+  const candidateSpoolKey = relaySpoolKey(deliveryId, receivedAt);
+  try {
+    await env.RELAY_SPOOL.put(candidateSpoolKey, rawBytes, {
+      httpMetadata: { contentType: MIME_CONTENT_TYPE },
+      customMetadata: { retentionClass: "relay-spool", deliveryId },
+    });
+  } catch {
+    message.setReject("maildesk could not create a durable operator-delivery spool");
+    return;
+  }
+
   let persisted: PersistedInbound;
   try {
     persisted = await persistInboxRelay(
@@ -151,11 +168,23 @@ async function acceptInboxRelay(
         expiresAt: tokenExpiresAt(new Date(receivedAt), config.replyTokenTtlDays),
         receivedAt,
       },
+      policySha256,
       env,
     );
   } catch {
+    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
     structuredError("inbound_persistence_failed", { deliveryId });
     message.setReject("maildesk could not create a durable route for this message");
+    return;
+  }
+
+  const currentPolicy = await loadActivePolicy(env);
+  if (!currentPolicy || currentPolicy.sha256 !== policySha256) {
+    await env.DB.prepare(
+      "UPDATE reply_relays SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?1 AND revoked_at IS NULL",
+    ).bind(relayId).run().catch(() => undefined);
+    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
+    message.setReject("maildesk policy changed before operator delivery");
     return;
   }
 
@@ -173,28 +202,27 @@ async function acceptInboxRelay(
       ? "partial_delivery"
       : "recovery_required";
 
-  let spoolKey: string | null = null;
-  let spoolFailed = false;
-  if (accepted !== results.length) {
-    const candidateSpoolKey = relaySpoolKey(deliveryId, receivedAt);
-    try {
-      await env.RELAY_SPOOL.put(candidateSpoolKey, rawBytes, {
-        httpMetadata: { contentType: MIME_CONTENT_TYPE },
-        customMetadata: { retentionClass: "relay-spool", deliveryId },
+  try {
+    await recordDeliveryResults(persisted, results, status, candidateSpoolKey, env);
+    if (status === "provider_accepted") {
+      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => {
+        structuredError("inbound_terminal_spool_cleanup_failed", { deliveryId });
       });
-      spoolKey = candidateSpoolKey;
-    } catch {
-      spoolFailed = true;
-      status = "failed";
-      structuredError("inbound_recovery_spool_failed", { deliveryId });
     }
-  }
-
-  await recordDeliveryResults(persisted, results, status, spoolKey, env).catch(() => {
+  } catch {
     structuredError("inbound_delivery_audit_failed", { deliveryId });
-  });
-  if (spoolFailed) {
-    message.setReject("maildesk could not preserve failed operator deliveries for recovery");
+    const recoveryJob = await inboundDeliveryResultJob(
+      persisted,
+      results,
+      status,
+      candidateSpoolKey,
+      receivedAt,
+    );
+    await env.MAIL_JOBS.send(recoveryJob).catch(() => {
+      // The pre-send spool remains as the bounded recovery artifact even when
+      // both D1 projection and Queue submission are unavailable.
+      structuredError("inbound_delivery_recovery_enqueue_failed", { deliveryId });
+    });
   }
 }
 
@@ -416,6 +444,7 @@ async function persistInboxRelay(
     expiresAt: string;
     receivedAt: string;
   },
+  policySha256: string,
   env: Env,
 ): Promise<PersistedInbound> {
   const recipient = parseMailbox(message.to);
@@ -436,32 +465,12 @@ async function persistInboxRelay(
     parsed.inReplyTo ?? null,
     parsed.references.join(" ") || null,
   );
-  const storageKind = route.routeKind === "personal_alias" ? "personal" : "role";
-
-  await env.DB.batch([
-    env.DB.prepare("INSERT OR IGNORE INTO domains (id, domain) VALUES (?1, ?2)").bind(domainId, recipient.domain),
+  const persisted = await env.DB.batch([
     env.DB.prepare(
-      "INSERT OR IGNORE INTO identities (id, domain_id, address, kind) VALUES (?1, ?2, ?3, ?4)",
-    ).bind(identityId, domainId, route.defaultReplyIdentity, storageKind),
+      "INSERT INTO threads (id, domain_id, route_id, external_sender, subject, status) SELECT ?1, ?2, ?3, ?4, NULL, 'open' FROM alias_routes ar JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE ar.id = ?3 AND ar.domain_id = ?2 AND ar.default_reply_identity_id = ?5 AND ar.decision_kind = ?6 AND ar.enabled = 1 AND ar.policy_sha256 = ?7 ON CONFLICT(id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+    ).bind(threadId, domainId, routeId, externalSender, identityId, route.routeKind, policySha256),
     env.DB.prepare(
-      "INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind",
-    ).bind(routeId, domainId, route.localPart, storageKind, identityId, route.routeKind),
-  ]);
-  for (const operator of route.operators) {
-    const operatorId = stableId("operator", operator);
-    await env.DB.batch([
-      env.DB.prepare("INSERT OR IGNORE INTO operators (id, email) VALUES (?1, ?2)").bind(operatorId, operator),
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO alias_route_operators (route_id, operator_id) VALUES (?1, ?2)",
-      ).bind(routeId, operatorId),
-    ]);
-  }
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO threads (id, domain_id, route_id, external_sender, subject, status) VALUES (?1, ?2, ?3, ?4, NULL, 'open') ON CONFLICT(id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
-    ).bind(threadId, domainId, routeId, externalSender),
-    env.DB.prepare(
-      "INSERT INTO reply_relays (id, token_sha256, thread_id, route_id, external_recipient, reply_identity, original_message_id, references_json, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+      "INSERT INTO reply_relays (id, token_sha256, thread_id, route_id, external_recipient, reply_identity, original_message_id, references_json, expires_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM alias_routes ar JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE ar.id = ?4 AND ar.enabled = 1 AND ar.policy_sha256 = ?10",
     ).bind(
       relay.relayId,
       relay.tokenHash,
@@ -472,11 +481,15 @@ async function persistInboxRelay(
       parsed.messageId ?? relay.messageId,
       JSON.stringify(parsed.references),
       relay.expiresAt,
+      policySha256,
     ),
     env.DB.prepare(
-      "INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, last_inbound_at, updated_at) VALUES (?1, ?2, ?3, 'cloudflare_email_routing', ?4, ?5, 'local_policy_valid', 'declared', ?6, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, last_inbound_at = excluded.last_inbound_at, updated_at = CURRENT_TIMESTAMP",
-    ).bind(routeId, `${route.localPart}@${recipient.domain}`, route.routeKind, route.operators.length, route.defaultReplyIdentity, relay.receivedAt),
+      "UPDATE route_health SET last_inbound_at = ?1, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?2 AND policy_sha256 = ?3 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?3)",
+    ).bind(relay.receivedAt, routeId, policySha256),
   ]);
+  if (persisted.slice(0, 2).some((result) => Number(result.meta?.changes ?? 0) === 0)) {
+    throw new Error("active policy revision changed during inbound persistence");
+  }
   await recordAudit(
     env,
     `${relay.deliveryId}:inbox_relay_created`,
@@ -549,28 +562,44 @@ async function recordDeliveryResults(
   );
 }
 
+async function inboundDeliveryResultJob(
+  inbound: PersistedInbound,
+  results: OperatorDeliveryResult[],
+  status: InboundDeliveryResultJob["status"],
+  relaySpoolKey: string,
+  receivedAt: string,
+): Promise<InboundDeliveryResultJob> {
+  return {
+    kind: "inbound_delivery_result",
+    deliveryId: inbound.deliveryId,
+    relayId: inbound.relayId,
+    threadId: inbound.threadId,
+    routeId: inbound.routeId,
+    status,
+    results: await Promise.all(results.map(async (result) => ({
+      operatorRef: await sha256Hex(result.operator),
+      ok: result.ok,
+      providerMessageId: result.providerMessageId,
+      errorCode: result.errorCode,
+    }))),
+    relaySpoolKey,
+    receivedAt,
+  };
+}
+
 async function persistSinkRoute(
   message: ForwardableEmailMessage,
   route: RouteDecision,
+  policySha256: string,
   env: Env,
 ): Promise<void> {
   const recipient = parseMailbox(message.to);
   if (!recipient) return;
-  const domainId = stableId("domain", recipient.domain);
-  const identityId = stableId("identity", route.defaultReplyIdentity);
   const routeId = stableId("route", recipient.domain, route.localPart);
-  await env.DB.batch([
-    env.DB.prepare("INSERT OR IGNORE INTO domains (id, domain) VALUES (?1, ?2)").bind(domainId, recipient.domain),
-    env.DB.prepare(
-      "INSERT OR IGNORE INTO identities (id, domain_id, address, kind) VALUES (?1, ?2, ?3, 'role')",
-    ).bind(identityId, domainId, route.defaultReplyIdentity),
-    env.DB.prepare(
-      "INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind) VALUES (?1, ?2, ?3, 'role', ?4, 'sink') ON CONFLICT(id) DO UPDATE SET decision_kind = 'sink'",
-    ).bind(routeId, domainId, route.localPart, identityId),
-    env.DB.prepare(
-      "INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, last_inbound_at, updated_at) VALUES (?1, ?2, 'sink', 'cloudflare_email_routing', 0, ?3, 'intentionally_excluded', 'intentionally_excluded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET inbound_status = 'intentionally_excluded', reply_status = 'intentionally_excluded', last_inbound_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
-    ).bind(routeId, `${route.localPart}@${recipient.domain}`, route.defaultReplyIdentity),
-  ]);
+  const result = await env.DB.prepare(
+    "UPDATE route_health SET inbound_status = 'intentionally_excluded', reply_status = 'intentionally_excluded', last_inbound_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs JOIN alias_routes ar ON ar.id = ?1 AND ar.enabled = 1 AND ar.decision_kind = 'sink' AND ar.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?2)",
+  ).bind(routeId, policySha256).run();
+  if (Number(result.meta?.changes ?? 0) === 0) throw new Error("active sink policy changed");
 }
 
 async function loadActiveRelay(tokenHash: string, env: Env): Promise<ReplyRelayRow | null> {
@@ -613,16 +642,18 @@ async function loadRelayAttempt(attemptId: string, env: Env): Promise<RelayAttem
 async function routeMessage(
   message: ForwardableEmailMessage,
   env: Env,
-): Promise<RouteDecision | Error> {
-  const policy = await loadPolicy(env);
-  if (!policy) return new Error("maildesk policy unavailable");
-  const result = routeInbound(policy, {
+): Promise<PolicyBoundRoute | Error> {
+  const activePolicy = await loadActivePolicy(env);
+  if (!activePolicy) return new Error("maildesk policy unavailable");
+  const result = routeInbound(activePolicy.policy, {
     envelopeTo: message.to,
     headerFrom: message.from,
     messageId: message.headers.get("message-id") ?? undefined,
     subject: message.headers.get("subject") ?? undefined,
   });
-  return result.ok ? result.value : new Error(result.error.message);
+  return result.ok
+    ? { route: result.value, policySha256: activePolicy.sha256 }
+    : new Error(result.error.message);
 }
 
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
@@ -776,6 +807,11 @@ interface PersistedInbound {
   relayId: string;
   routeId: string;
   threadId: string;
+}
+
+interface PolicyBoundRoute {
+  route: RouteDecision;
+  policySha256: string;
 }
 
 interface OperatorDeliveryResult {

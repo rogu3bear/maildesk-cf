@@ -4,6 +4,47 @@ import { createHash } from "node:crypto";
 import mailApiWorker from "../../workers/mail-api/src/index";
 
 describe("mail API outbound sender modes", () => {
+  test("an inbound result recovery job projects provider outcomes and cleans the spool without sending", async () => {
+    const db = new D1Recorder();
+    const email = new SendEmailRecorder("must-not-send");
+    const deleted: string[] = [];
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-recovery",
+      relayId: "relay-recovery",
+      threadId: "thread-recovery",
+      routeId: "route:tenant.example.com:security",
+      status: "provider_accepted",
+      results: [
+        { operatorRef: "operator-ref-a", ok: true, providerMessageId: "provider-a" },
+        { operatorRef: "operator-ref-b", ok: true, providerMessageId: "provider-b" },
+      ],
+      relaySpoolKey: "relay-spool/delivery-recovery.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(deleted).toEqual(["relay-spool/delivery-recovery.eml"]);
+    expect(db.hasAuditAction("operator_delivery_provider_accepted")).toBe(true);
+    const healthUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE route_health SET inbound_status"));
+    expect(healthUpdate?.binds.slice(0, 3)).toEqual([
+      "provider_accepted",
+      2,
+      JSON.stringify(["provider-a", "provider-b"]),
+    ]);
+  });
+
   test("an authorized inbox reply derives its external target from D1 and deletes the terminal spool", async () => {
     const policyJson = inboxRelayPolicyJson();
     const db = new D1Recorder({

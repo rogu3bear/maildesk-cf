@@ -26,6 +26,7 @@ export interface MaildeskEnv {
 export type MailJob =
   | InboundEmailReceivedJob
   | InboundEmailPersistedJob
+  | InboundDeliveryResultJob
   | InboxReplyReceivedJob
   | OutboundReplyRequestedJob;
 
@@ -112,6 +113,23 @@ export interface InboundEmailPersistedJob {
   threadId: string;
   routeId: string;
   queuedAt: string;
+}
+
+export interface InboundDeliveryResultJob {
+  kind: "inbound_delivery_result";
+  deliveryId: string;
+  relayId: string;
+  threadId: string;
+  routeId: string;
+  status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
+  results: Array<{
+    operatorRef: string;
+    ok: boolean;
+    providerMessageId?: string;
+    errorCode?: string;
+  }>;
+  relaySpoolKey: string;
+  receivedAt: string;
 }
 
 export interface InboxReplyReceivedJob {

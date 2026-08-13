@@ -63,7 +63,10 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(relayInsert?.bindings.join(" ")).not.toContain("r+");
   expect(db.calls.some((call) => call.sql.includes("INSERT INTO messages"))).toBe(false);
   const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
-  expect(threadInsert?.sql).toContain("subject, status) VALUES (?1, ?2, ?3, ?4, NULL");
+  expect(threadInsert?.sql).toContain("subject, status) SELECT ?1, ?2, ?3, ?4, NULL");
+  expect(threadInsert?.sql).toContain("rs.active_policy_sha256 = ar.policy_sha256");
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_routes"))).toBe(false);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_route_operators"))).toBe(false);
   const recipientAudits = db.calls.filter(
     (call) => call.sql.includes("INSERT INTO audit_events") &&
       String(call.bindings[4]).startsWith("operator_delivery_recipient_"),
@@ -71,8 +74,7 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(recipientAudits).toHaveLength(2);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-a@example.com"))).toBe(true);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-b@example.com"))).toBe(true);
-  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
-  expect(healthInsert?.sql).not.toContain("inbound_status = 'local_policy_valid'");
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO route_health"))).toBe(false);
   const healthResult = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
   expect(healthResult?.sql).toContain("inbound_status = 'inbox_verified'");
 });
@@ -97,7 +99,7 @@ test("inbox relay binds the external destination to the visible sender, not an u
   expect(relayInsert?.bindings).not.toContain("redirect-target@example.org");
 });
 
-test("failed recovery spool rejects and never claims recoverable MIME exists", async () => {
+test("a pre-send spool failure rejects before any operator delivery", async () => {
   const db = new RelayD1();
   const message = inboundMessage(
     "sender@example.net",
@@ -105,20 +107,17 @@ test("failed recovery spool rejects and never claims recoverable MIME exists", a
     mime({ from: "sender@example.net", messageId: "<spool-failure@example.net>" }),
   );
   const env = relayEnv(db, []);
-  env.EMAIL = { send: async () => { throw new Error("provider unavailable"); } } as SendEmail;
+  let providerCalls = 0;
+  env.EMAIL = { send: async () => { providerCalls += 1; return { messageId: "must-not-send" }; } } as SendEmail;
   env.RELAY_SPOOL = {
     put: async () => { throw new Error("spool unavailable"); },
   } as unknown as R2Bucket;
 
   await mailRouterWorker.email(message, env, {} as ExecutionContext);
 
-  expect(message.rejected).toContain("could not preserve failed operator deliveries");
-  const healthUpdate = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
-  expect(healthUpdate?.bindings[0]).toBe("failed");
-  const resultAudit = db.calls.find((call) =>
-    call.sql.includes("INSERT INTO audit_events") && call.bindings[4] === "failed"
-  );
-  expect(JSON.parse(String(resultAudit?.bindings[5])).recoverySpool).toBe(false);
+  expect(message.rejected).toContain("could not create a durable operator-delivery spool");
+  expect(providerCalls).toBe(0);
+  expect(db.calls.some((call) => call.sql.includes("UPDATE route_health SET inbound_status"))).toBe(false);
 });
 
 test("route identifiers preserve distinct valid alias characters", async () => {
@@ -151,8 +150,8 @@ test("route identifiers preserve distinct valid alias characters", async () => {
   );
 
   expect(message.rejected).toBeUndefined();
-  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
-  expect(routeInsert?.bindings[0]).toBe("route:example.com:team%2Bops");
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.bindings[2]).toBe("route:example.com:team%2Bops");
 });
 
 test("catch-all delivery advances the declared wildcard route while showing the actual recipient", async () => {
@@ -191,14 +190,67 @@ test("catch-all delivery advances the declared wildcard route while showing the 
     email: "info@example.com",
   });
   expect(deliveries[0]?.text).toContain("Received at: unlisted@example.com");
-  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
-  expect(routeInsert?.bindings.slice(0, 3)).toEqual([
-    "route:example.com:*",
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.bindings.slice(1, 3)).toEqual([
     "domain:example.com",
-    "*",
+    "route:example.com:*",
   ]);
-  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
-  expect(healthInsert?.bindings[1]).toBe("*@example.com");
+  const healthAdvance = db.calls.find((call) => call.sql.includes("UPDATE route_health SET last_inbound_at"));
+  expect(healthAdvance?.bindings[1]).toBe("route:example.com:*");
+});
+
+test("accepted inbound deliveries retain a spool and enqueue body-free recovery when D1 projection fails", async () => {
+  const db = new RelayD1("UPDATE route_health SET inbound_status");
+  const deliveries: EmailMessageBuilder[] = [];
+  const queued: unknown[] = [];
+  const puts: string[] = [];
+  const deletes: string[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<audit-recovery@example.net>" }),
+  );
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { puts.push(key); },
+    delete: async (key: string) => { deletes.push(key); },
+  } as unknown as R2Bucket;
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(2);
+  expect(puts).toHaveLength(1);
+  expect(deletes).toHaveLength(0);
+  expect(queued).toHaveLength(1);
+  expect(queued[0]).toMatchObject({
+    kind: "inbound_delivery_result",
+    status: "provider_accepted",
+    results: [
+      { ok: true, providerMessageId: "provider-1" },
+      { ok: true, providerMessageId: "provider-2" },
+    ],
+  });
+  expect(JSON.stringify(queued[0])).not.toContain("operator-a@example.com");
+  expect(JSON.stringify(queued[0])).not.toContain("operator-b@example.com");
+});
+
+test("a policy revision change during persistence rejects without rewriting route authority", async () => {
+  const db = new RelayD1(undefined, true);
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<revision-race@example.net>" }),
+  );
+
+  await mailRouterWorker.email(message, relayEnv(db, deliveries), {} as ExecutionContext);
+
+  expect(message.rejected).toContain("could not create a durable route");
+  expect(deliveries).toHaveLength(0);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_routes"))).toBe(false);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_route_operators"))).toBe(false);
 });
 
 test("inbox relay rejects malformed and oversized messages without direct-forward fallback", async () => {
@@ -479,13 +531,25 @@ function mime(input: { from: string; replyTo?: string; messageId: string }): str
 class RelayD1 {
   calls: Array<{ sql: string; bindings: unknown[] }> = [];
   activePolicy?: { sha256: string; json: string };
+  private failedOnce = false;
+
+  constructor(
+    private readonly failOnceSql?: string,
+    private readonly rejectPolicyBoundPersistence = false,
+  ) {}
 
   prepare(sql: string): D1PreparedStatement {
     const call = { sql, bindings: [] as unknown[] };
     this.calls.push(call);
     const statement = {
       bind: (...bindings: unknown[]) => { call.bindings = bindings; return statement; },
-      run: async () => ({ success: true, meta: { changes: 1 } }),
+      run: async () => {
+        if (!this.failedOnce && this.failOnceSql && sql.includes(this.failOnceSql)) {
+          this.failedOnce = true;
+          throw new Error(`forced D1 failure for ${this.failOnceSql}`);
+        }
+        return { success: true, meta: { changes: 1 } };
+      },
       first: async () => sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
         ? {
             active_policy_sha256: this.activePolicy.sha256,
@@ -505,6 +569,10 @@ class RelayD1 {
   }
 
   async batch(statements: D1PreparedStatement[]) {
-    return statements.map(() => ({ success: true, meta: { changes: 1 }, results: [] }));
+    return statements.map((_, index) => ({
+      success: true,
+      meta: { changes: this.rejectPolicyBoundPersistence && index < 2 ? 0 : 1 },
+      results: [],
+    }));
   }
 }
