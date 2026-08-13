@@ -24,6 +24,7 @@ const root = resolve(import.meta.dir, "..");
 const desiredPath = arg("--desired-state") ?? "config/desired-state.example.json";
 const outputPath = arg("--out");
 const desired = json<DesiredState>(desiredPath);
+assertDarkActivation(desired.operator_delivery);
 const head = git("rev-parse", "HEAD");
 const tree = git("rev-parse", "HEAD^{tree}");
 const dirty = git("status", "--porcelain").length > 0;
@@ -137,6 +138,17 @@ function arg(name: string): string | undefined {
 
 function json<T>(path: string): T {
   return JSON.parse(readFileSync(resolve(root, path), "utf8")) as T;
+}
+
+function assertDarkActivation(operatorDelivery: DesiredState["operator_delivery"] | undefined): void {
+  if (
+    operatorDelivery?.inbound_processing_mode !== "disabled" ||
+    operatorDelivery.reply_processing_mode !== "disabled"
+  ) {
+    throw new Error(
+      "dark deployment requires operator_delivery.inbound_processing_mode and operator_delivery.reply_processing_mode to both equal disabled",
+    );
+  }
 }
 
 function shaFile(path: string): string {

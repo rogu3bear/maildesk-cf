@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
@@ -39,6 +40,39 @@ describe("dark deployment blueprint", () => {
     for (const [, path, declared] of migrations) {
       const observed = `sha256:${createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex")}`;
       expect(declared).toBe(observed);
+    }
+  });
+
+  test("rejects enabled, missing, or invalid relay activation modes", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const fixtures: Array<[string, (desired: Record<string, any>) => void]> = [
+      ["enabled inbound", (desired) => (desired.operator_delivery.inbound_processing_mode = "enabled")],
+      ["enabled reply", (desired) => (desired.operator_delivery.reply_processing_mode = "enabled")],
+      ["missing inbound", (desired) => delete desired.operator_delivery.inbound_processing_mode],
+      ["missing reply", (desired) => delete desired.operator_delivery.reply_processing_mode],
+      ["invalid inbound", (desired) => (desired.operator_delivery.inbound_processing_mode = "preview")],
+      ["invalid reply", (desired) => (desired.operator_delivery.reply_processing_mode = "preview")],
+    ];
+    const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-plan-"));
+
+    try {
+      for (const [name, mutate] of fixtures) {
+        const desired = structuredClone(original);
+        mutate(desired);
+        const path = join(directory, `${name.replaceAll(" ", "-")}.json`);
+        writeFileSync(path, JSON.stringify(desired));
+
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
+          cwd: root,
+          encoding: "utf8",
+        });
+
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain("both equal disabled");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });
