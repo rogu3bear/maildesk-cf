@@ -106,8 +106,8 @@ const plan = {
     "sender-domain onboarding",
     "website alias or MX changes",
     "live inbound or outbound email probes",
-    "mlnavigator.com Cloudflare migration",
-    "windowdrop.pro migration",
+    "domains retained on an external mail authority",
+    "separately reviewed future domain migrations",
   ],
   stop_conditions: [
     "dirty or drifting source checkout",

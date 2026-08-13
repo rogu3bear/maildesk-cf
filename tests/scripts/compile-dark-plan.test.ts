@@ -31,6 +31,8 @@ describe("dark deployment blueprint", () => {
     expect(JSON.stringify(plan)).not.toContain("access-application-and-policy-readback");
     expect(JSON.stringify(plan)).not.toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/);
     expect(plan.explicit_exclusions).toContain("live inbound or outbound email probes");
+    expect(JSON.stringify(plan)).not.toContain(["mlnavigator", "com"].join("."));
+    expect(JSON.stringify(plan)).not.toContain(["windowdrop", "pro"].join("."));
   });
 
   test("binds every D1 migration to cfctl's prefixed content digest", () => {
