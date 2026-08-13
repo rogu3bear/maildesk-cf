@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
 
@@ -27,7 +28,7 @@ interface PersonalAlias {
   reply_identity: string;
 }
 
-interface DesiredState {
+interface DesiredState extends CanonicalDesiredTopology {
   domains: DesiredDomain[];
   sender?: {
     mode?: string;
@@ -194,6 +195,7 @@ const evidencePath = argValue("--evidence");
 const policyText = readFileSync(policyPath, "utf8");
 const policy = JSON.parse(policyText) as PolicyFile;
 const desiredState = readJson<DesiredState>(desiredStatePath);
+requireCanonicalDesiredTopology(desiredState);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
 const rows = buildRows(policy, desiredState, evidence, policySha256);
@@ -442,7 +444,7 @@ function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
   if (live.r2_policy_sha256) {
     return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
   }
-  return live.cfctl_maildesk?.storage?.r2_raw_mail_bucket === "ok" ? "ok" : "not_checked";
+  return live.cfctl_maildesk?.storage?.r2_policy_bucket === "ok" ? "ok" : "not_checked";
 }
 
 function cloudflareEmailRoutingMx(): string[] {
@@ -468,31 +470,33 @@ function inboundMxProvider(actual: string[] | undefined): string | null {
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) {
-    const workers = live.cfctl_maildesk?.workers;
-    const storage = live.cfctl_maildesk?.storage;
-    return workers?.mail_api === "ok" &&
-      workers.mail_router === "ok" &&
-      storage?.d1_database === "ok" &&
-      storage.r2_raw_mail_bucket === "ok" &&
-      storage.queue === "ok"
+  const workers = live.cfctl_maildesk?.workers;
+  if (workers) {
+    return workers.relay_router === "ok" &&
+      workers.relay_outbound === "ok" &&
+      workers.routing_health === "ok"
       ? "ok"
-      : "not_checked";
+      : "drift";
   }
-  return requiredReadyzChecks(live, ["db_binding", "raw_mail_binding", "mail_jobs_binding", "policy_config"])
-    ? "ok"
-    : "drift";
+  // A single Worker's /readyz cannot prove the required three-Worker
+  // least-privilege topology. Keep that evidence honest until cfctl readback
+  // names every canonical role.
+  return "not_checked";
 }
 
 function checkD1Queue(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) {
-    return live.cfctl_maildesk?.storage?.d1_database === "ok" && live.cfctl_maildesk?.storage?.queue === "ok"
+  const storage = live.cfctl_maildesk?.storage;
+  if (storage) {
+    return storage.d1_database === "ok" &&
+      storage.r2_spool_bucket === "ok" &&
+      storage.queue === "ok" &&
+      storage.dead_letter_queue === "ok"
       ? "ok"
-      : "not_checked";
+      : "drift";
   }
-  if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding"])) return "drift";
-  if (!live.d1) return "ok";
-  if (!live.d1.tables) return "drift";
+  if (!live.readyz?.checks) return "not_checked";
+  if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding", "relay_spool_binding"])) return "drift";
+  if (!live.d1?.tables) return "not_checked";
 
   const requiredTables = [
     "audit_events",

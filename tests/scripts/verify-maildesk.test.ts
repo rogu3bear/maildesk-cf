@@ -7,6 +7,34 @@ import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dir, "../..");
 
 describe("maildesk verifier", () => {
+  test("the tracked canonical desired state verifies local policy without inferring edge readiness", () => {
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { local_truth_ok: boolean; edge_ready: boolean; mail_ready: boolean };
+    };
+    expect(receipt.status).toEqual({
+      local_truth_ok: true,
+      edge_ready: false,
+      mail_ready: false,
+      live_evidence_present: false,
+    });
+  });
+
   test("uses cfctl lifecycle evidence for edge readiness without hiding sender drift", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const policyPath = join(dir, "policy.json");
@@ -28,6 +56,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "example.com",
@@ -55,13 +84,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
         sender_domains: {
           "example.com": "missing",
@@ -141,6 +173,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "tenant.example.com",
@@ -168,13 +201,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
       },
       inbound_proofs: {
@@ -252,6 +288,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "tenant.example.com",
@@ -279,13 +316,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
         sender_domains: {
           "tenant.example.com": "missing",
@@ -352,4 +392,21 @@ describe("maildesk verifier", () => {
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function canonicalTopology() {
+  return {
+    workers: {
+      relay_router: { script_name: "maildesk-cf-router", config: "deploy/mail-router/wrangler.toml" },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "deploy/mail-outbound/wrangler.toml" },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: "deploy/routing-health/wrangler.toml" },
+    },
+    storage: {
+      d1_database: "maildesk-cf-relay-db",
+      r2_policy_bucket: "maildesk-cf-policy",
+      r2_spool_bucket: "maildesk-cf-relay-spool",
+      queue: "maildesk-cf-relay-jobs",
+      dead_letter_queue: "maildesk-cf-relay-dlq",
+    },
+  };
 }

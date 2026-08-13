@@ -3,19 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
+import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
-interface DesiredState {
+interface DesiredState extends CanonicalDesiredTopology {
   domains: Array<{ name: string; inbound_mx_provider?: string }>;
   sender?: {
     mode?: string;
-  };
-  workers?: {
-    mail_router?: {
-      script_name?: string;
-    };
-  };
-  storage?: {
-    d1_database?: string;
   };
 }
 
@@ -85,9 +78,10 @@ const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-polic
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
 const desiredState = readJson<DesiredState>(desiredStatePath);
+requireCanonicalDesiredTopology(desiredState);
 const senderMode = senderModeOrDefault(desiredState.sender?.mode);
 const useResend = senderMode === "resend" && !args.includes("--no-resend");
-const routerService = desiredState.workers?.mail_router?.script_name;
+const routerService = desiredState.workers.relay_router.script_name;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };

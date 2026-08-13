@@ -6,7 +6,7 @@
 // Idempotent and resumable. Every Cloudflare mutation flows through cfctl
 // (repo doctrine: "Do not mutate Cloudflare outside cfctl").
 //
-// Inbound aliases route to the Rust `mail_router` Worker (action type `worker`),
+// Inbound aliases route to the Rust `relay_router` Worker (action type `worker`),
 // which needs no verified destination address — matching the architecture where
 // the Rust router owns policy. See docs/architecture/email-routing-provisioning.md.
 //
@@ -23,6 +23,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external";
 
@@ -34,9 +35,8 @@ interface DesiredDomain {
   zone_id?: string; // optional pin; otherwise resolved by name (edge case 4)
 }
 
-interface DesiredState {
+interface DesiredState extends CanonicalDesiredTopology {
   domains: DesiredDomain[];
-  workers: { mail_router: { script_name: string } };
 }
 
 // The Email Routing MX hostnames Cloudflare publishes for inbound routing.
@@ -52,7 +52,7 @@ const domainFilter = argValue("--domain");
 const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDesiredStatePath());
 
 const state = readDesiredState(desiredStatePath);
-const workerScript = state.workers?.mail_router?.script_name;
+const workerScript = state.workers?.relay_router?.script_name;
 
 // Edge case 5 (non-CF domains) + --domain filter: only cloudflare_email_routing
 // domains get Email Routing mutations; google_workspace/external are skipped so
@@ -126,9 +126,9 @@ function reconcileDomain(domain: DesiredDomain) {
   }
   const zoneId = zone.zone_id;
 
-  // Edge case 3: the mail_router Worker must exist before a worker-action rule.
+  // Edge case 3: the relay_router Worker must exist before a worker-action rule.
   if (!workerScript) {
-    failed.push({ item: "preflight:worker", reason: "desired-state has no workers.mail_router.script_name" });
+    failed.push({ item: "preflight:worker", reason: "desired-state has no workers.relay_router.script_name" });
   }
 
   // Observe current state (edge cases 1, 2, 8 hinge on this).
@@ -251,7 +251,7 @@ function applyGoverned(zoneId: string, delta: Delta, worker: string | undefined,
   return { status: "failed", reason: `run failed: ${msg}` };
 }
 
-// A per-alias literal rule routing to the mail_router Worker (edge case 5).
+// A per-alias literal rule routing to the relay_router Worker (edge case 5).
 function desiredRule(address: string, worker: string, domainName: string): unknown {
   return {
     name: `maildesk:${address}`, // stable identity for reconciliation
@@ -321,7 +321,10 @@ function errText(env: CfctlEnvelope | undefined): string | undefined {
 
 function readDesiredState(path: string): DesiredState {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as DesiredState;
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    requireCanonicalDesiredTopology(parsed);
+    if (!("domains" in parsed) || !Array.isArray(parsed.domains)) throw new Error("domains must be an array");
+    return parsed as DesiredState;
   } catch (error) {
     console.error(`invalid desired-state at ${relativePath(path)}: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
