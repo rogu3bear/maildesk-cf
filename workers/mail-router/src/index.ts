@@ -707,15 +707,14 @@ async function discardSupersededUnsentInbound(
   const activePolicy = await loadActivePolicy(env);
   if (!activePolicy || activePolicy.sha256 === inbound.policy_sha256) return false;
 
-  const discarded = await env.DB.batch([
-    env.DB.prepare(
-      "DELETE FROM inbound_deliveries WHERE id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = inbound_deliveries.id AND rd.status != 'pending')",
-    ).bind(inbound.id, inbound.policy_sha256),
-    env.DB.prepare(
-      "DELETE FROM reply_relays WHERE id = ?1 AND policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id)",
-    ).bind(inbound.relay_id, inbound.policy_sha256),
-  ]);
-  return discarded.length === 2 && discarded.every((result) => Number(result.meta?.changes ?? 0) === 1);
+  // Deleting the relay cascades through inbound_deliveries and its recipient
+  // rows. One conditional statement therefore retires the entire token
+  // generation or changes nothing; no partial cleanup result can poison the
+  // fingerprint while leaving its relay behind.
+  const discarded = await env.DB.prepare(
+    "DELETE FROM reply_relays WHERE id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id AND d.id = ?3 AND d.policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'pending'))",
+  ).bind(inbound.relay_id, inbound.policy_sha256, inbound.id).run();
+  return Number(discarded.meta?.changes ?? 0) === 1;
 }
 
 async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Promise<void> {

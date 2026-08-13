@@ -714,6 +714,17 @@ class RelayD1 {
         if (sql.includes("UPDATE inbound_deliveries SET status = ?1") && this.inboundDelivery) {
           this.inboundDelivery.status = String(call.bindings[0]);
         }
+        if (sql.startsWith("DELETE FROM reply_relays")) {
+          const canDiscard = this.inboundDelivery?.relay_id === call.bindings[0] &&
+            this.inboundDelivery.policy_sha256 === call.bindings[1] &&
+            this.inboundDelivery.id === call.bindings[2] &&
+            this.activePolicy?.sha256 !== this.inboundDelivery.policy_sha256 &&
+            this.recipientDeliveries.every((row) => row.status === "pending");
+          if (!canDiscard) return { success: true, meta: { changes: 0 } };
+          const deliveryId = this.inboundDelivery.id;
+          this.inboundDelivery = undefined;
+          this.recipientDeliveries = this.recipientDeliveries.filter((row) => row.delivery_id !== deliveryId);
+        }
         return { success: true, meta: { changes: 1 } };
       },
       first: async () => {
@@ -752,23 +763,6 @@ class RelayD1 {
       const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
       return call ? [call] : [];
     });
-    const discardingInbound = calls.find((call) => call.sql.startsWith("DELETE FROM inbound_deliveries"));
-    if (discardingInbound) {
-      const canDiscard = this.inboundDelivery?.id === discardingInbound.bindings[0] &&
-        this.inboundDelivery.policy_sha256 === discardingInbound.bindings[1] &&
-        this.activePolicy?.sha256 !== this.inboundDelivery.policy_sha256 &&
-        this.recipientDeliveries.every((row) => row.status === "pending");
-      if (canDiscard) {
-        const deliveryId = this.inboundDelivery!.id;
-        this.inboundDelivery = undefined;
-        this.recipientDeliveries = this.recipientDeliveries.filter((row) => row.delivery_id !== deliveryId);
-      }
-      return statements.map(() => ({
-        success: true,
-        meta: { changes: canDiscard ? 1 : 0 },
-        results: [],
-      }));
-    }
     for (const statement of this.rejectPolicyBoundPersistence ? [] : statements) {
       const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
       if (!call) continue;

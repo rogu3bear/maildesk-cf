@@ -171,6 +171,7 @@ idempotency key for safely replaying that transition.
 Policy supersession is the one safe automatic retirement case: D1 may remove
 an old fingerprint and relay only when the active revision differs and every
 recipient is still `pending`. The conditional delete serializes against the
-policy-bound `pending -> sending` claim. R2 cleanup follows confirmed D1
-retirement, and every attempt uses a distinct spool key so stale cleanup cannot
-erase a replacement attempt.
+policy-bound `pending -> sending` claim. One conditional relay deletion cascades
+through the inbound fingerprint and recipient rows, so the token generation is
+retired as a unit. R2 cleanup follows confirmed D1 retirement, and every attempt
+uses a distinct spool key so stale cleanup cannot erase a replacement attempt.
