@@ -223,7 +223,7 @@ function canonicalizeSignedHeaders(
     selected.push(canonicalizeHeader(header.raw, mode));
   }
   const withoutSignature = signature.header.raw.replace(/\bb\s*=\s*([^;\r\n]*(?:\r\n[ \t]+[^;\r\n]*)*)/i, "b=");
-  selected.push(canonicalizeHeader(withoutSignature, mode, false));
+  selected.push(canonicalizeHeader(withoutSignature, mode));
   return byteArray(selected.join(""));
 }
 

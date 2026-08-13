@@ -92,7 +92,7 @@ async function signedMessage(selector = "test", signingKey = privateKey): Promis
     "to:relay@example.net\r\n",
     "subject:reply\r\n",
     "date:Wed, 12 Aug 2026 12:00:00 +0000\r\n",
-    `dkim-signature:${value}`,
+    `dkim-signature:${value}\r\n`,
   ].join("");
   const signature = base64(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", signingKey, encode(canonical)));
   return encode([`DKIM-Signature: ${value}${signature}`, ...headers, "", body].join("\r\n"));
