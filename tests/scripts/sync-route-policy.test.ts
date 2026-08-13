@@ -124,6 +124,8 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
     expect(sql.match(/COMMIT;/g)).toHaveLength(1);
     expect(sql.indexOf("UPDATE alias_routes SET enabled = 0")).toBeLessThan(sql.indexOf("enabled, policy_sha256"));
     expect(sql.lastIndexOf("INSERT INTO runtime_state")).toBeGreaterThan(sql.lastIndexOf("INSERT INTO route_health"));
+    expect(sql.lastIndexOf("INSERT INTO policy_projection_state")).toBeGreaterThan(sql.lastIndexOf("INSERT INTO runtime_state"));
+    expect(sql).toContain(summary.projection_sha256);
     expect(sql).toContain(summary.policy_r2_key);
     expect(sql).toContain("route:example.com:team%2Bops");
     expect(sql).toContain("route:example.com:team_ops");

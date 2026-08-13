@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "id": "expire-relay-spool-7d",
+      "enabled": true,
+      "conditions": {
+        "prefix": "relay-spool/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 604800
+        }
+      }
+    }
+  ]
+}

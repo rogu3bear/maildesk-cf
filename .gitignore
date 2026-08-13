@@ -3,6 +3,7 @@
 /dist/
 /generated/
 /.wrangler/
+**/.wrangler/
 /.dev.vars
 /.env
 /.env.*
@@ -23,4 +24,5 @@
 /.claude/
 /*.local.md
 /config/*.local.json
+/deploy/**/wrangler.production.toml
 /ops/local/

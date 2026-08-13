@@ -148,6 +148,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-rece
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run check:cfctl-provisioning
+bun run plan:dark
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
 bun run check:maildesk-closeout -- --env-file .dev.vars --summary var/maildesk-receipt-summary.json --redact-sensitive --json
 bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
@@ -189,6 +190,10 @@ against the `cfctl maildesk-cf` schema and emits the non-mutating
 plan/ack/verify handoff. It proves this checkout has a provisioning lane input;
 it does not install `cfctl`, supply account credentials, acknowledge a preview,
 or mutate Cloudflare.
+`bun run plan:dark` emits the two-stage, source-hash-bound dark-deployment
+blueprint described in
+[docs/operations/dark-deployment.md](docs/operations/dark-deployment.md). It
+does not create child operation IDs or perform any Cloudflare action.
 `bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
 workflow and writes the receipt artifacts under `var/`. Pass
 `--summary <path>` to persist the compact readiness handoff JSON. Pass

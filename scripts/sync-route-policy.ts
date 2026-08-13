@@ -69,8 +69,12 @@ const routes = projectRoutes(policy, desired);
 const policySha256 = sha256(policyBytes);
 const desiredStateSha256 = sha256(desiredStateBytes);
 const policyR2Key = `config/policy/${policySha256}.json`;
-const projection = projectionSql(routes, policySha256, policyR2Key);
-const projectionSha256 = sha256(projection);
+const { sql: projection, projectionSha256 } = projectionSql(
+  routes,
+  policySha256,
+  policyR2Key,
+  desiredStateSha256,
+);
 
 const outputPath = argValue("--out");
 if (outputPath) {
@@ -79,7 +83,11 @@ if (outputPath) {
 }
 
 if (executeLocal) {
-  executeLocalProjection(projection, argValue("--database") ?? desired.storage.d1_database);
+  executeLocalProjection(
+    projection,
+    argValue("--database") ?? desired.storage.d1_database,
+    argValue("--config") ?? "deploy/mail-router/wrangler.toml",
+  );
 }
 
 console.log(JSON.stringify({
@@ -186,7 +194,12 @@ function projectedRoute(
   return { domain, localPart, decisionKind, storageKind, desiredProvider: provider, operators, replyIdentity, initialStatus };
 }
 
-function projectionSql(routes: ProjectedRoute[], policySha256: string, policyR2Key: string): string {
+function projectionSql(
+  routes: ProjectedRoute[],
+  policySha256: string,
+  policyR2Key: string,
+  desiredStateSha256: string,
+): { sql: string; projectionSha256: string } {
   const domainCount = new Set(routes.map((route) => route.domain)).size;
   const statements: string[] = [
     `INSERT INTO policy_revisions (policy_sha256, r2_object_key, expected_domain_count, expected_route_count) VALUES (${sql(policySha256)}, ${sql(policyR2Key)}, ${domainCount}, ${routes.length}) ON CONFLICT(policy_sha256) DO UPDATE SET r2_object_key = excluded.r2_object_key, expected_domain_count = excluded.expected_domain_count, expected_route_count = excluded.expected_route_count;`,
@@ -214,27 +227,30 @@ function projectionSql(routes: ProjectedRoute[], policySha256: string, policyR2K
     );
     statements.push(...routeStatements);
   }
+  const projectionSha256 = sha256(transaction(statements));
   statements.push(
     `UPDATE policy_revisions SET superseded_at = CURRENT_TIMESTAMP WHERE activated_at IS NOT NULL AND policy_sha256 <> ${sql(policySha256)} AND superseded_at IS NULL;`,
     `UPDATE policy_revisions SET activated_at = COALESCE(activated_at, CURRENT_TIMESTAMP), superseded_at = NULL WHERE policy_sha256 = ${sql(policySha256)};`,
     `INSERT INTO runtime_state (singleton, active_policy_sha256, active_policy_r2_key, activated_at) VALUES (1, ${sql(policySha256)}, ${sql(policyR2Key)}, CURRENT_TIMESTAMP) ON CONFLICT(singleton) DO UPDATE SET active_policy_sha256 = excluded.active_policy_sha256, active_policy_r2_key = excluded.active_policy_r2_key, activated_at = excluded.activated_at;`,
+    `INSERT INTO policy_projection_state (key, value, updated_at) VALUES ('active_policy_sha256', ${sql(policySha256)}, CURRENT_TIMESTAMP), ('active_desired_state_sha256', ${sql(desiredStateSha256)}, CURRENT_TIMESTAMP), ('active_projection_sha256', ${sql(projectionSha256)}, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
   );
-  return transaction(statements);
+  return { sql: transaction(statements), projectionSha256 };
 }
 
 function transaction(statements: string[]): string {
   return ["PRAGMA foreign_keys = ON;", "BEGIN TRANSACTION;", ...statements, "COMMIT;", ""].join("\n");
 }
 
-function executeLocalProjection(sqlText: string, database: string) {
+function executeLocalProjection(sqlText: string, database: string, config: string) {
   if (!/^[a-zA-Z0-9._-]+$/.test(database)) fail("D1 database name is invalid");
+  if (!/^[a-zA-Z0-9._/-]+$/.test(config) || config.includes("..")) fail("Wrangler config path is invalid");
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-sync-"));
   try {
     const file = join(directory, "projection.sql");
     writeFileSync(file, sqlText, { encoding: "utf8", mode: 0o600 });
     const result = spawnSync(
       "bunx",
-      ["wrangler", "d1", "execute", database, "--local", "--file", file],
+      ["wrangler", "d1", "execute", database, "--local", "--config", config, "--file", file],
       { cwd: root, encoding: "utf8", env: process.env },
     );
     if (result.status !== 0) {
