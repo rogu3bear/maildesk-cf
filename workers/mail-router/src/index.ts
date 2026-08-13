@@ -29,6 +29,9 @@ import { loadActivePolicy } from "../../shared/policy-store";
 
 const MIME_CONTENT_TYPE = "message/rfc822";
 
+export const DISCARD_SUPERSEDED_UNSENT_RELAY_SQL =
+  "DELETE FROM reply_relays WHERE id = ?1 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id AND d.id = ?3 AND d.policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'pending'))";
+
 export default {
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     await acceptEmail(message, env);
@@ -712,7 +715,7 @@ async function discardSupersededUnsentInbound(
   // generation or changes nothing; no partial cleanup result can poison the
   // fingerprint while leaving its relay behind.
   const discarded = await env.DB.prepare(
-    "DELETE FROM reply_relays WHERE id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id AND d.id = ?3 AND d.policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'pending'))",
+    DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
   ).bind(inbound.relay_id, inbound.policy_sha256, inbound.id).run();
   return Number(discarded.meta?.changes ?? 0) === 1;
 }
