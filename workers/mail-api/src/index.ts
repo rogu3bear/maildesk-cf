@@ -202,7 +202,13 @@ async function processInboxReply(
     return ACK;
   }
 
-  const payload = outboundReplyPayload(parsed);
+  let payload: ReturnType<typeof outboundReplyPayload>;
+  try {
+    payload = outboundReplyPayload(parsed);
+  } catch {
+    await failRelayAttempt(job, env, "reply_plaintext_required");
+    return ACK;
+  }
   try {
     assertWithinRelayLimit(payload, config);
   } catch {
@@ -810,7 +816,7 @@ function normalizedVisibleValue(value: string): string {
     .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
-    .replace(/[\u00ad\u200b-\u200d\ufeff]/g, "");
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
 async function auditOperator(env: Env, operator: string): Promise<string> {

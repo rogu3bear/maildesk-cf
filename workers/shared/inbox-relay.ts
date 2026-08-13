@@ -114,10 +114,13 @@ export function outboundReplyPayload(parsed: ParsedRelayEmail): {
   html?: string;
   attachments?: MailAttachmentPayload[];
 } {
+  if (!parsed.text.trim()) {
+    throw new Error("operator replies require a plaintext MIME alternative");
+  }
   return {
     subject: parsed.subject,
-    text: parsed.text || undefined,
-    html: parsed.html,
+    text: parsed.text,
+    html: `<pre style="white-space:pre-wrap">${escapeHtml(parsed.text)}</pre>`,
     attachments: parsed.attachments.length > 0 ? parsed.attachments : undefined,
   };
 }

@@ -6,6 +6,7 @@ import type { RouterPolicy } from "../../workers/shared/router";
 import {
   buildOperatorDelivery,
   encodedMessageUpperBound,
+  outboundReplyPayload,
   parseRelayEmail,
   relayAddress,
   relayRecordIsActive,
@@ -383,6 +384,28 @@ test("encoded-size ceiling covers transfer encoding and base64 line wrapping", (
   });
 
   expect(bound).toBeGreaterThanOrEqual(16 * 1024 + rawTextBytes * 8 + base64Bytes + base64LineBreaks);
+});
+
+test("operator reply HTML is regenerated only from verified plaintext", () => {
+  const payload = outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: "Safe <reply>\u2060 body",
+    html: '<p>oper<span style="display:none">X</span>ator@example.com</p>',
+    references: [],
+    attachments: [],
+  });
+  expect(payload.text).toBe("Safe <reply>\u2060 body");
+  expect(payload.html).toBe('<pre style="white-space:pre-wrap">Safe &lt;reply&gt;\u2060 body</pre>');
+  expect(payload.html).not.toContain("display:none");
+  expect(() => outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "HTML only",
+    text: "",
+    html: "<p>HTML only</p>",
+    references: [],
+    attachments: [],
+  })).toThrow("plaintext MIME alternative");
 });
 
 function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: RouterPolicy = policy) {

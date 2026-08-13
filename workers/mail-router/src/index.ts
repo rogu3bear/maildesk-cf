@@ -264,7 +264,13 @@ async function acceptOperatorReply(
     return;
   }
 
-  const payload = outboundReplyPayload(parsed);
+  let payload: ReturnType<typeof outboundReplyPayload>;
+  try {
+    payload = outboundReplyPayload(parsed);
+  } catch {
+    message.setReject("maildesk replies require a plaintext message alternative");
+    return;
+  }
   try {
     assertWithinRelayLimit(payload, config);
   } catch {

@@ -90,9 +90,17 @@ describe("mail API outbound sender modes", () => {
       "To: relay@example.net",
       "Subject: Re: security question",
       "Message-ID: <operator-leak@tenant.example.com>",
+      'Content-Type: multipart/alternative; boundary="reply-boundary"',
+      "",
+      "--reply-boundary",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Contact operator\u2060@tenant.example.com",
+      "--reply-boundary",
       "Content-Type: text/html; charset=utf-8",
       "",
-      "<p>Contact <span>operator</span><span>@tenant.example.com</span></p>",
+      '<p>Contact oper<span style="display:none">X</span>ator@tenant.example.com</p>',
+      "--reply-boundary--",
     ].join("\r\n")).buffer;
     const batch = new MessageBatchRecorder([{
       kind: "inbox_reply_received",

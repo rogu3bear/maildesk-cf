@@ -50,8 +50,11 @@ The outbound Worker consumes durable reply jobs. It should:
 - delete temporary MIME after terminal provider acceptance.
 
 In `inbox_relay`, its Queue consumer parses the temporary operator-reply spool,
-constructs a public-identity outbound job, records body-free state, and removes
-the spool on terminal provider acceptance. The inbox-relay deploy target is
+requires a plaintext MIME alternative, constructs both outbound text and fresh
+escaped HTML from that verified plaintext, records body-free state, and removes
+the spool on terminal provider acceptance. Original operator-authored HTML is
+never forwarded because renderer-dependent hidden content cannot be proven free
+of private operator identity leakage. The inbox-relay deploy target is
 `deploy/mail-outbound/wrangler.toml`. The generic `wrangler.toml` web-desk
 target may retain its legacy shared-token `POST /api/replies` route, disabled
 unless `MAILDESK_REPLY_API_MODE=token` is set explicitly. Private inbox-relay
