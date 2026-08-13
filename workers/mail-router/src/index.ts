@@ -471,10 +471,19 @@ async function recordDeliveryResults(
   env: Env,
 ): Promise<void> {
   const acceptedCount = results.filter((result) => result.ok).length;
+  const providerMessageIds = results.flatMap((result) =>
+    result.providerMessageId ? [result.providerMessageId] : []
+  );
   await env.DB.prepare(
-    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?4",
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5",
   )
-    .bind(status, acceptedCount, status === "provider_accepted" ? null : status, inbound.routeId)
+    .bind(
+      status,
+      acceptedCount,
+      JSON.stringify(providerMessageIds),
+      status === "provider_accepted" ? null : status,
+      inbound.routeId,
+    )
     .run();
   await Promise.all(results.map(async (result, index) => {
     await recordAudit(
@@ -503,7 +512,7 @@ async function recordDeliveryResults(
       relayId: inbound.relayId,
       acceptedCount,
       failedCount: results.filter((result) => !result.ok).length,
-      providerMessageIds: results.flatMap((result) => result.providerMessageId ? [result.providerMessageId] : []),
+      providerMessageIds,
       recoverySpool: Boolean(spoolKey),
     },
   );

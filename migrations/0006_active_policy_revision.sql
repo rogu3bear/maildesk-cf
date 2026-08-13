@@ -24,6 +24,12 @@ ADD COLUMN policy_sha256 TEXT REFERENCES policy_revisions(policy_sha256);
 ALTER TABLE route_health
 ADD COLUMN policy_sha256 TEXT REFERENCES policy_revisions(policy_sha256);
 
+ALTER TABLE route_health
+ADD COLUMN last_inbound_provider_message_ids_json TEXT NOT NULL DEFAULT '[]';
+
+ALTER TABLE route_health
+ADD COLUMN last_reply_provider_message_id TEXT;
+
 CREATE TABLE route_proofs (
   id TEXT PRIMARY KEY,
   route_id TEXT NOT NULL REFERENCES alias_routes(id) ON DELETE CASCADE,

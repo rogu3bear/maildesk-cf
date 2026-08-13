@@ -36,39 +36,39 @@ live, unexpired relay; matching envelope and visible operator identity; aligned
 Cloudflare SPF or DKIM results; and a fresh Rust `authorize_reply` decision.
 The external destination is always loaded from D1, never from reply headers.
 
-### API Worker
+### Queue-only outbound Worker
 
-The API Worker powers the operator desk. It should:
+The outbound Worker consumes durable reply jobs. It should:
 
-- enforce authentication before thread, message, or reply access;
-- read body-free route-health and audit data from D1;
-- create outbound reply intents only after router authorization;
-- enqueue outbound send jobs instead of sending inline;
-- expose health and readiness endpoints that do not leak private config.
+- have no public HTTP route or `workers.dev` origin;
+- load only the exact active policy revision;
+- send only after cryptographic operator and Rust policy authorization;
+- preserve idempotency and bounded recovery state;
+- delete temporary MIME after terminal provider acceptance.
 
 In `inbox_relay`, its Queue consumer parses the temporary operator-reply spool,
 constructs a public-identity outbound job, records body-free state, and removes
-the spool on terminal provider acceptance. The template deploy target for this
-Worker is `wrangler.toml`.
-Its legacy shared-token `POST /api/replies` route is disabled unless
-`MAILDESK_REPLY_API_MODE=token` is set explicitly. Human replies should use the
-Access-authenticated Leptos server-function path. Token mode is appropriate
-only behind a service boundary that binds the credential to one integration;
-the token itself is not an operator identity.
+the spool on terminal provider acceptance. The inbox-relay deploy target is
+`deploy/mail-outbound/wrangler.toml`. The generic `wrangler.toml` web-desk
+target may retain its legacy shared-token `POST /api/replies` route, disabled
+unless `MAILDESK_REPLY_API_MODE=token` is set explicitly. Private inbox-relay
+deployments do not expose that surface.
 
 ### Leptos UI Worker
 
-The Cargo-Leptos Worker serves public explanatory routes and the operator desk.
-For `/desk*` in production it must validate the Cloudflare Access application
+The Cargo-Leptos Worker serves routing health. For every protected path it must
+validate the Cloudflare Access application
 JWT signature, issuer, audience, and expiry against the account JWKS before the
 Rust server trusts the email claim. Header presence alone is not
 authentication. `MAILDESK_ACCESS_TEAM_DOMAIN` and `MAILDESK_ACCESS_AUD` are
 required production inputs; local template preview bypasses Access only when
 `MAILDESK_UI_AUTH_MODE=preview` is set explicitly.
 
-The template deploy target for this Worker is `deploy/ui/wrangler.toml`, which keeps
-`workers_dev = false` so an alternate public origin cannot bypass the Access
-application on the production hostname.
+The inbox-relay deploy target is `deploy/routing-health/wrangler.toml`, which
+binds only D1 and static assets and keeps `workers_dev = false`. `desk_only`
+remains a generic template option; private instances select `all_routes` so the
+application verifies Access on `/`, `/architecture`, `/desk`, APIs, and static
+assets rather than relying only on edge policy.
 
 ### Rust Router
 
@@ -92,22 +92,20 @@ Queues own async delivery and redelivery; provider retry policy must remain expl
 
 | Binding | Kind | Purpose |
 | --- | --- | --- |
-| `DB` | D1 | domains, identities, routes, threads, messages, audit events |
-| `RAW_MAIL` | R2 | raw MIME bodies and attachment blobs |
-| `MAIL_JOBS` | Queue | parsing, notification, indexing, and outbound attempt delivery |
+| `DB` | D1 | policy projection, relays, route health, proofs, and body-free audit events |
+| `POLICY_STORE` | R2 | immutable digest-addressed private policy revisions |
+| `RELAY_SPOOL` | R2 | bounded temporary inbound recovery and operator-reply MIME |
+| `MAIL_JOBS` | Queue | durable outbound relay jobs from router to outbound Worker |
 | `EMAIL` | Email Service | operator delivery and authenticated public-identity replies |
-| policy config | secret or versioned config | deployable router policy |
 
-The template ships placeholder `wrangler.toml` values. Production provisioning
-must replace them through `cfctl` before `preflight:production` can pass.
-Private instances should provision both production and preview D1/R2 resources
-so Wrangler preview and targeted checks do not reuse production mail storage.
-Top-level Worker configs should bind production resources only; preview resources
-belong in explicit preview/dev flows, not in the production deploy path.
-Runtime policy may be supplied inline through `MAILDESK_POLICY_JSON` for small
-fixtures, but production instances should store policy JSON in R2 at
-`MAILDESK_POLICY_R2_KEY` so larger multi-domain policies do not hit Worker text
-binding limits.
+The template ships placeholder D1 identifiers. Production provisioning must
+replace them through `cfctl` before `preflight:production` can pass. Preview
+resources belong in explicit preview/dev flows, not in the production deploy
+path. Inbox-relay production policy is an immutable
+`config/policy/<sha256>.json` object selected by the active D1 policy pointer;
+the Worker fails closed when the pointer, revision metadata, object key, bytes,
+or expected counts disagree. Inline `MAILDESK_POLICY_JSON` remains only a
+legacy non-inbox development input.
 
 ## Mail Flow
 

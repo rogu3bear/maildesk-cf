@@ -40,6 +40,9 @@ if (!shim.includes("this.env.ASSETS.fetch(request)")) {
 if (!shim.includes("verifiedAccessRequest(request, this.env)")) {
   throw new Error("UI Worker shim does not mark the verified Access boundary for Rust");
 }
+if (!shim.includes("isAccessProtectedPath(url.pathname, this.env.MAILDESK_UI_ACCESS_SCOPE)")) {
+  throw new Error("UI Worker shim does not enforce the selected whole-host Access scope");
+}
 
 const accessAdapter = readFileSync(join(root, "workers/ui/access.ts"), "utf8");
 if (!accessAdapter.includes("jwtVerify(token, jwks") || !accessAdapter.includes('algorithms: ["RS256"]')) {

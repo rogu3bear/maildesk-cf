@@ -41,10 +41,10 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
 
     view! {
-        <Title text="maildesk-cf — Edge mail, proven"/>
+        <Title text="maildesk-cf — Routing health, proven"/>
         <Meta
             name="description"
-            content="A Cloudflare-native mail desk where Rust policy chooses the route, operators preserve domain identity, and cfctl proves the edge state."
+            content="A Cloudflare-native routing control plane where Rust policy chooses each destination, Gmail replies preserve public identity, and cfctl proves the edge state."
         />
 
         <Router>
@@ -87,7 +87,7 @@ fn SiteHeader(active: &'static str) -> impl IntoView {
                     "Architecture"
                 </A>
                 <A href="/desk" attr:class="nav-action" attr:aria-current=move || (active == "desk").then_some("page")>
-                    "Open the desk"
+                    "Routing health"
                     <span aria-hidden="true">"↗"</span>
                 </A>
             </nav>
@@ -103,18 +103,18 @@ fn HomePage() -> impl IntoView {
             <main>
                 <section class="hero-section" aria-labelledby="hero-title">
                     <div class="hero-copy">
-                        <p class="eyebrow"><span></span>"Cloudflare-native shared mail"</p>
+                        <p class="eyebrow"><span></span>"Cloudflare-native mail routing"</p>
                         <h1 id="hero-title">
                             "Route at the edge."
                             <em>"Reply with the right identity."</em>
                             "Prove every step."
                         </h1>
                         <p class="hero-lede">
-                            "maildesk-cf turns Email Routing, Rust policy, D1, R2, Queues, and governed Cloudflare state into one calm operator workflow."
+                            "maildesk-cf routes website mail into existing operator inboxes, relays ordinary Gmail replies from the right public identity, and keeps every readiness claim tied to evidence."
                         </p>
                         <div class="hero-actions">
                             <A href="/desk" attr:class="button button--primary">
-                                "Open the desk" <span aria-hidden="true">"↗"</span>
+                                "Open routing health" <span aria-hidden="true">"↗"</span>
                             </A>
                             <A href="/architecture" attr:class="text-link">
                                 "Read the architecture" <span aria-hidden="true">"→"</span>
@@ -128,9 +128,9 @@ fn HomePage() -> impl IntoView {
                 <section class="statement-section" aria-labelledby="statement-title">
                     <p class="section-index">"01 / The difference"</p>
                     <div>
-                        <h2 id="statement-title">"A chain of custody, not another inbox skin."</h2>
+                        <h2 id="statement-title">"A routing control plane, not another inbox."</h2>
                         <p>
-                            "The router decides where mail belongs. The desk makes that decision legible. The server authorizes the reply identity. The audit trail records what actually happened."
+                            "The router decides where mail belongs. Existing Gmail inboxes remain the reading and reply surface. Routing health makes configuration, failures, and proof state legible without retaining a second mailbox."
                         </p>
                     </div>
                 </section>
@@ -164,10 +164,10 @@ fn HomePage() -> impl IntoView {
                 <section class="closing-section">
                     <div>
                         <p class="eyebrow"><span></span>"Operator experience"</p>
-                        <h2>"See what needs attention. Know what is safe to do next."</h2>
+                        <h2>"See what is routed, what is proven, and what needs correction."</h2>
                     </div>
                     <A href="/desk" attr:class="button button--light">
-                        "Open the desk" <span aria-hidden="true">"↗"</span>
+                        "Open routing health" <span aria-hidden="true">"↗"</span>
                     </A>
                 </section>
             </main>
@@ -181,9 +181,9 @@ fn RouteInstrument() -> impl IntoView {
     let stages = [
         ("01", "Edge", "Envelope accepted"),
         ("02", "Policy", "Role alias matched"),
-        ("03", "Store", "Metadata + raw MIME"),
-        ("04", "Desk", "Operator authorized"),
-        ("05", "Send", "Identity verified"),
+        ("03", "Spool", "Temporary MIME only"),
+        ("04", "Inbox", "Operator authenticated"),
+        ("05", "Relay", "Public identity verified"),
     ];
 
     view! {
@@ -274,15 +274,15 @@ fn ArchitecturePage() -> impl IntoView {
                     <div class="map-spine" aria-hidden="true"></div>
                     <article><span>"01"</span><h2>"Email Routing"</h2><p>"Cloudflare receives the envelope and invokes a bounded Email Worker adapter."</p><code>"attacker-controlled envelope + MIME"</code></article>
                     <article><span>"02"</span><h2>"Rust router"</h2><p>"Typed policy resolves domain, alias, operators, and the default reply identity."</p><code>"fail closed on unknown or unauthorized"</code></article>
-                    <article><span>"03"</span><h2>"D1 + R2"</h2><p>"D1 stores queryable thread and audit metadata. R2 stores raw MIME and attachment blobs."</p><code>"metadata ≠ raw content"</code></article>
+                    <article><span>"03"</span><h2>"D1 + R2"</h2><p>"D1 stores body-free policy, relay, proof, and audit metadata. R2 holds immutable policy revisions and bounded temporary MIME spools."</p><code>"routing state ≠ mailbox archive"</code></article>
                     <article><span>"04"</span><h2>"Queues"</h2><p>"Parsing, notification, indexing, and outbound attempts move asynchronously with audit evidence."</p><code>"queued ≠ delivered"</code></article>
-                    <article><span>"05"</span><h2>"Operator desk"</h2><p>"An authenticated operator sees bounded state and the policy-selected identity before the reply gate."</p><code>"identity before action"</code></article>
+                    <article><span>"05"</span><h2>"Routing health"</h2><p>"An authenticated operator sees declared routes, provider observations, proof state, and bounded failures without message content."</p><code>"evidence before readiness"</code></article>
                     <article><span>"06"</span><h2>"cfctl"</h2><p>"Account reads, plans, applies, and post-change verification stay outside the runtime."</p><code>"source ≠ live Cloudflare state"</code></article>
                 </section>
 
                 <section class="architecture-cta">
                     <p>"The UI can change. The router and evidence boundaries are the product spine."</p>
-                    <A href="/desk" attr:class="button button--primary">"Open the desk" <span aria-hidden="true">"↗"</span></A>
+                    <A href="/desk" attr:class="button button--primary">"Open routing health" <span aria-hidden="true">"↗"</span></A>
                 </section>
             </main>
             <SiteFooter/>
@@ -494,7 +494,9 @@ fn RoutingHealthDashboard(
     let ready_count = routes
         .iter()
         .filter(|route| {
-            route.inbound_status == "inbox_verified" && route.reply_status == "reply_verified"
+            route.enabled
+                && route.inbound_status == "inbox_verified"
+                && route.reply_status == "reply_verified"
         })
         .count();
     let route_count = routes.len();
@@ -547,23 +549,30 @@ fn RoutingHealthDashboard(
                                         let needs_attention = route_needs_attention(&route);
                                         let observed = route.observed_provider.clone().unwrap_or_else(|| "unobserved".to_string());
                                         let inbound_provider = proof_timestamp(route.last_inbound_provider_accepted_at.as_deref());
+                                        let inbound_provider_ids = if route.last_inbound_provider_message_ids.is_empty() { "Not recorded".to_string() } else { route.last_inbound_provider_message_ids.join(", ") };
                                         let inbox_verified = proof_timestamp(route.last_inbox_verified_at.as_deref());
                                         let reply_provider = proof_timestamp(route.last_reply_provider_accepted_at.as_deref());
+                                        let reply_provider_id = route.last_reply_provider_message_id.clone().unwrap_or_else(|| "Not recorded".to_string());
                                         let reply_verified = proof_timestamp(route.last_reply_verified_at.as_deref());
                                         let next = next_route_action(&route);
+                                        let revision = route.policy_sha256.clone().unwrap_or_else(|| "unbound".to_string());
+                                        let route_state = if route.enabled { "enabled" } else { "disabled" };
                                         view! {
                                             <li>
                                                 <article class="thread-row" id="proof">
                                                     <div class="thread-status" data-status=if needs_attention { "open" } else { "closed" }></div>
                                                     <div class="thread-copy">
-                                                        <span>{route.decision_kind.clone()}" · "{route.operator_count}" destinations"</span>
+                                                        <span>{route.decision_kind.clone()}" · "{route_state}" · "{route.operator_count}" destinations"</span>
                                                         <strong>{route.route_address.clone()}</strong>
                                                         <small>"Reply as "{route.reply_identity.clone()}</small>
                                                         <small>"Desired "{route.desired_provider.clone()}" · observed "{observed}</small>
                                                         <small>"Inbound "{route.inbound_status.clone()}" · reply "{route.reply_status.clone()}</small>
+                                                        <small>"Policy revision "{revision}</small>
                                                         <small>"Inbound provider accepted: "{inbound_provider}</small>
+                                                        <small>"Inbound provider IDs: "{inbound_provider_ids}</small>
                                                         <small>"Inbox verified: "{inbox_verified}</small>
                                                         <small>"Reply provider accepted: "{reply_provider}</small>
+                                                        <small>"Reply provider ID: "{reply_provider_id}</small>
                                                         <small>"External reply verified: "{reply_verified}</small>
                                                         <small>"Next: "{next}</small>
                                                     </div>
@@ -587,17 +596,20 @@ fn proof_timestamp(value: Option<&str>) -> String {
 }
 
 fn route_needs_attention(route: &RouteHealthSummary) -> bool {
-    matches!(
-        route.inbound_status.as_str(),
-        "partial_delivery" | "recovery_required" | "failed"
-    ) || matches!(
-        route.reply_status.as_str(),
-        "partial_delivery" | "recovery_required" | "failed"
-    )
+    route.enabled
+        && (matches!(
+            route.inbound_status.as_str(),
+            "partial_delivery" | "recovery_required" | "failed"
+        ) || matches!(
+            route.reply_status.as_str(),
+            "partial_delivery" | "recovery_required" | "failed"
+        ))
 }
 
 fn next_route_action(route: &RouteHealthSummary) -> &'static str {
-    if route_needs_attention(route) {
+    if !route.enabled {
+        "No processing; route is disabled in the active policy"
+    } else if route_needs_attention(route) {
         "Reconcile the bounded failure before retrying"
     } else if route.inbound_status == "intentionally_excluded" {
         "No action; route is intentionally excluded"

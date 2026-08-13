@@ -51,17 +51,21 @@ struct AuditRow {
 struct RouteHealthRow {
     route_address: String,
     decision_kind: String,
+    enabled: i64,
     desired_provider: String,
     observed_provider: Option<String>,
     operator_count: i64,
     reply_identity: String,
+    policy_sha256: Option<String>,
     inbound_status: String,
     reply_status: String,
     last_inbound_at: Option<String>,
     last_reply_at: Option<String>,
     last_inbound_provider_accepted_at: Option<String>,
+    last_inbound_provider_message_ids_json: String,
     last_inbox_verified_at: Option<String>,
     last_reply_provider_accepted_at: Option<String>,
+    last_reply_provider_message_id: Option<String>,
     last_reply_verified_at: Option<String>,
     last_error_code: Option<String>,
 }
@@ -122,7 +126,7 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
         .filter(|thread| thread.status == "open")
         .count();
     Ok(DeskSnapshot {
-        operator,
+        operator: dashboard_operator_label(&operator_delivery_mode, operator),
         preview: false,
         threads,
         open_count,
@@ -268,13 +272,15 @@ async fn query_threads(db: &worker::D1Database, operator: &str) -> AppResult<Vec
 async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealthSummary>> {
     let rows = db
         .prepare(
-            "SELECT route_address, decision_kind, desired_provider, observed_provider,
-                    operator_count, reply_identity, inbound_status, reply_status,
+            "SELECT rh.route_address, rh.decision_kind, ar.enabled, rh.desired_provider, rh.observed_provider,
+                    rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.inbound_status, rh.reply_status,
                     last_inbound_at, last_reply_at,
-                    last_inbound_provider_accepted_at, last_inbox_verified_at,
-                    last_reply_provider_accepted_at, last_reply_verified_at,
+                    last_inbound_provider_accepted_at, last_inbound_provider_message_ids_json,
+                    last_inbox_verified_at, last_reply_provider_accepted_at,
+                    last_reply_provider_message_id, last_reply_verified_at,
                     last_error_code
-             FROM route_health
+             FROM route_health rh
+             JOIN alias_routes ar ON ar.id = rh.route_id
              ORDER BY CASE
                WHEN inbound_status IN ('partial_delivery', 'recovery_required', 'failed')
                  OR reply_status IN ('partial_delivery', 'recovery_required', 'failed') THEN 0
@@ -291,25 +297,42 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
         .map(|row| {
             let operator_count = usize::try_from(row.operator_count)
                 .map_err(|error| AppError::internal("Stored operator count is invalid.", error))?;
+            let last_inbound_provider_message_ids =
+                serde_json::from_str::<Vec<String>>(&row.last_inbound_provider_message_ids_json)
+                    .map_err(|error| {
+                        AppError::internal("Stored provider message IDs are invalid.", error)
+                    })?;
             Ok(RouteHealthSummary {
                 route_address: row.route_address,
                 decision_kind: row.decision_kind,
+                enabled: row.enabled == 1,
                 desired_provider: row.desired_provider,
                 observed_provider: row.observed_provider,
                 operator_count,
                 reply_identity: row.reply_identity,
+                policy_sha256: row.policy_sha256,
                 inbound_status: row.inbound_status,
                 reply_status: row.reply_status,
                 last_inbound_at: row.last_inbound_at,
                 last_reply_at: row.last_reply_at,
                 last_inbound_provider_accepted_at: row.last_inbound_provider_accepted_at,
+                last_inbound_provider_message_ids,
                 last_inbox_verified_at: row.last_inbox_verified_at,
                 last_reply_provider_accepted_at: row.last_reply_provider_accepted_at,
+                last_reply_provider_message_id: row.last_reply_provider_message_id,
                 last_reply_verified_at: row.last_reply_verified_at,
                 last_error_code: row.last_error_code,
             })
         })
         .collect()
+}
+
+fn dashboard_operator_label(operator_delivery_mode: &str, operator: String) -> String {
+    if operator_delivery_mode == "inbox_relay" {
+        "authorized-operator".to_string()
+    } else {
+        operator
+    }
 }
 
 async fn query_thread(
@@ -566,8 +589,9 @@ fn random_message_id() -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_thread, normalize_identifier, normalize_mailbox, normalize_subject, normalize_text,
-        route_decision_for_thread, ThreadRow, MAX_REPLY_BODY_BYTES, MAX_REPLY_SUBJECT_BYTES,
+        dashboard_operator_label, map_thread, normalize_identifier, normalize_mailbox,
+        normalize_subject, normalize_text, route_decision_for_thread, ThreadRow,
+        MAX_REPLY_BODY_BYTES, MAX_REPLY_SUBJECT_BYTES,
     };
 
     fn example_thread_row() -> ThreadRow {
@@ -650,6 +674,18 @@ mod tests {
         assert_eq!(mapped.message_count, 2);
         assert_eq!(mapped.route_address, "founders@example.com");
         assert_eq!(mapped.reply_identity, "founders@example.com");
+    }
+
+    #[test]
+    fn inbox_relay_dashboard_never_serializes_the_operator_mailbox() {
+        assert_eq!(
+            dashboard_operator_label("inbox_relay", "private@example.com".to_string()),
+            "authorized-operator"
+        );
+        assert_eq!(
+            dashboard_operator_label("web_desk", "operator@example.com".to_string()),
+            "operator@example.com"
+        );
     }
 
     #[test]

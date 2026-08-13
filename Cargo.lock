@@ -1094,6 +1094,7 @@ dependencies = [
  "maildesk-router",
  "send_wrapper",
  "serde",
+ "serde_json",
  "tower-service",
  "wasm-bindgen",
  "worker",

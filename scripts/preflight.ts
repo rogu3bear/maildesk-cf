@@ -382,6 +382,10 @@ function checkRequiredEnvAny(names: string[]) {
 function checkAccessValidationEnv() {
   checkRequiredEnv("MAILDESK_ACCESS_TEAM_DOMAIN");
   checkRequiredEnv("MAILDESK_ACCESS_AUD");
+  const scope = process.env.MAILDESK_UI_ACCESS_SCOPE?.trim() || "desk_only";
+  if (scope !== "desk_only" && scope !== "all_routes") {
+    failures.push("MAILDESK_UI_ACCESS_SCOPE must be desk_only or all_routes");
+  }
 
   const configuredDomain = process.env.MAILDESK_ACCESS_TEAM_DOMAIN?.trim();
   if (!configuredDomain || !isUsableValue(configuredDomain)) return;

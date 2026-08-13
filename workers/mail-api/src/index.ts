@@ -445,9 +445,14 @@ async function recordTerminalSendEvent(
       .bind(status, result.providerMessageId ?? null, result.error ? status : null, job.relayAttemptId)
       .run();
     await env.DB.prepare(
-      "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_error_code = ?2, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?3)",
-    )
-      .bind(status, result.error ? status : null, job.relayAttemptId)
+    "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_reply_provider_message_id = CASE WHEN ?1 = 'provider_accepted' THEN ?2 ELSE last_reply_provider_message_id END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?4)",
+  )
+      .bind(
+        status,
+        result.providerMessageId ?? null,
+        result.error ? status : null,
+        job.relayAttemptId,
+      )
       .run();
     if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
       if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");

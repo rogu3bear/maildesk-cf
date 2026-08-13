@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 export interface AccessEnvironment {
   MAILDESK_ACCESS_AUD?: string;
   MAILDESK_ACCESS_TEAM_DOMAIN?: string;
+  MAILDESK_UI_ACCESS_SCOPE?: "desk_only" | "all_routes";
 }
 
 export interface AccessConfiguration {
@@ -22,6 +23,15 @@ const ACCESS_JWKS_CACHE_MAX_AGE_MS = 10 * 60_000;
 
 export function isDeskPath(pathname: string): boolean {
   return pathname === "/desk" || pathname.startsWith("/desk/");
+}
+
+export function isAccessProtectedPath(
+  pathname: string,
+  scope: AccessEnvironment["MAILDESK_UI_ACCESS_SCOPE"] = "desk_only",
+): boolean {
+  if (scope === "all_routes") return pathname.startsWith("/");
+  if (scope === "desk_only") return isDeskPath(pathname);
+  return true;
 }
 
 export function accessConfiguration(env: AccessEnvironment): AccessConfiguration | null {
