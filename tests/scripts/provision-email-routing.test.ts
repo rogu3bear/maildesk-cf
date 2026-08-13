@@ -34,6 +34,24 @@ describe("governed email-routing provisioning reconciler", () => {
     expect(log).not.toContain("plans run");
   });
 
+  test("the tracked canonical desired state resolves the relay router", () => {
+    const { cfctl } = fixture({ zoneFound: true, enabled: true, existingRuleAddresses: [] });
+    const out = run([
+      "--plan",
+      "--desired-state",
+      "config/desired-state.example.json",
+      "--domain",
+      "example.com",
+      "--cfctl",
+      cfctl,
+      "--json",
+    ]);
+    expect(out.status).toBe(0);
+    const summary = JSON.parse(out.stdout);
+    expect(summary.worker_script).toBe("maildesk-cf-router");
+    expect(summary.failed_count).toBe(0);
+  });
+
   test("idempotent: already-enabled zone with all rules present applies nothing", () => {
     const { cfctl, state } = fixture({
       zoneFound: true,
@@ -106,7 +124,21 @@ function fixture(scenario: Scenario, withGoogle = false) {
       personal_aliases: [],
     });
   }
-  writeFileSync(state, JSON.stringify({ domains, workers: { mail_router: { script_name: "maildesk-cf-router" } } }));
+  writeFileSync(state, JSON.stringify({
+    domains,
+    workers: {
+      relay_router: { script_name: "maildesk-cf-router", config: "deploy/mail-router/wrangler.toml" },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "deploy/mail-outbound/wrangler.toml" },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: "deploy/routing-health/wrangler.toml" },
+    },
+    storage: {
+      d1_database: "maildesk-cf-relay-db",
+      r2_policy_bucket: "maildesk-cf-policy",
+      r2_spool_bucket: "maildesk-cf-relay-spool",
+      queue: "maildesk-cf-relay-jobs",
+      dead_letter_queue: "maildesk-cf-relay-dlq",
+    },
+  }));
   return { cfctl, logPath, state };
 }
 

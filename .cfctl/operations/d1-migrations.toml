@@ -1,0 +1,89 @@
+schema_version = 1
+
+[[operation]]
+id = "maildesk-cf.d1-migrations-apply"
+title = "Apply Maildesk relay D1 migrations"
+description = "Apply the exact ordered Maildesk routing, relay, health, and proof schema to one isolated D1 database."
+config_template = "deploy/mail-router/wrangler.toml"
+production_config = "deploy/mail-router/wrangler.production.toml"
+migrations_dir = "migrations"
+database_binding = "DB"
+wrangler_version = "4.110.0"
+recovery_capability_id = "d1-time-travel-get-bookmark"
+recovery_max_age_seconds = 600
+rollback_capability_id = "d1-restore-exact-bookmark"
+
+[[operation.migration]]
+path = "migrations/0001_maildesk_core.sql"
+sha256 = "sha256:4879a49edc0b69923a8f8c13d763ef3d60d092d3a5a3c4b79df307e170499029"
+
+[[operation.migration]]
+path = "migrations/0002_audit_idempotency.sql"
+sha256 = "sha256:5dc96df8068f3df262a07d78366990e27081258f6c8ed5f5b9f395387edcf6c9"
+
+[[operation.migration]]
+path = "migrations/0003_outbound_delivery_status.sql"
+sha256 = "sha256:09b705a869a3b491e3fae2387547f6e576696802f67d98e13a9e7bd07ae33bed"
+
+[[operation.migration]]
+path = "migrations/0004_inbox_reply_relay.sql"
+sha256 = "sha256:fc474dfa6538686a9952358562e26692a7fb493862e1817c8b0be24eb0e7c582"
+
+[[operation.migration]]
+path = "migrations/0005_route_proof_timestamps.sql"
+sha256 = "sha256:8660249e395791774454d985727b7e33fb462dc8ec9c99ed30954105a2f46f20"
+
+[[operation.migration]]
+path = "migrations/0006_active_policy_revision.sql"
+sha256 = "sha256:ed4e860a93c8f1fe14b2fe44edfe76f9c6637f48dfb385ef16f778181bec4cfa"
+
+[[operation.migration]]
+path = "migrations/0007_inbound_delivery_claims.sql"
+sha256 = "sha256:815045f5f6f582d1bd76dd6e5321a6ffb1d3b4f9a9472948cd8a43c7eae1bb5b"
+
+[[operation.migration]]
+path = "migrations/0008_reply_spool_integrity.sql"
+sha256 = "sha256:df60b93e9a0f11b365c4a40504a851c88adb8ae1f59b82554f6c931a4d00cfcf"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "policy_revisions"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "runtime_state"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "policy_projection_state"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "reply_relays"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "relay_attempts"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "route_health"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "route_proofs"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "route_proof_coverage"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "inbound_deliveries"
+
+[[operation.assertion]]
+kind = "table_exists"
+table = "inbound_recipient_deliveries"
+
+[[operation.assertion]]
+kind = "foreign_key_check_empty"

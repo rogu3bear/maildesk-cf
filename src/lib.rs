@@ -95,7 +95,22 @@ fn operator_access(
 ) -> Result<OperatorAccess, AccessRejection> {
     use axum::http::StatusCode;
 
-    if !is_desk_path(req.uri().path()) {
+    let access_scope = env
+        .var("MAILDESK_UI_ACCESS_SCOPE")
+        .ok()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "desk_only".to_string());
+    let protected = match access_protected_path(req.uri().path(), &access_scope) {
+        Ok(protected) => protected,
+        Err(()) => {
+            return Err(AccessRejection {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "The UI Access scope is invalid.",
+            });
+        }
+    };
+
+    if !protected {
         return Ok(OperatorAccess {
             operator: None,
             preview: false,
@@ -192,6 +207,15 @@ fn is_desk_path(path: &str) -> bool {
     path == "/desk" || path.starts_with("/desk/")
 }
 
+#[cfg(any(feature = "ssr", test))]
+fn access_protected_path(path: &str, scope: &str) -> Result<bool, ()> {
+    match scope {
+        "desk_only" => Ok(is_desk_path(path)),
+        "all_routes" => Ok(true),
+        _ => Err(()),
+    }
+}
+
 #[cfg(feature = "ssr")]
 fn apply_response_headers(
     response: &mut axum::http::Response<axum::body::Body>,
@@ -285,8 +309,8 @@ pub(crate) fn install_render_content_security_policy() {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_security_policy_value, is_desk_path, same_origin_desk_api_policy,
-        verified_access_email,
+        access_protected_path, content_security_policy_value, is_desk_path,
+        same_origin_desk_api_policy, verified_access_email,
     };
 
     #[test]
@@ -322,6 +346,25 @@ mod tests {
         assert!(is_desk_path("/desk/api/load"));
         assert!(!is_desk_path("/desktop"));
         assert!(!is_desk_path("/desk-preview"));
+    }
+
+    #[test]
+    fn whole_host_access_scope_protects_every_application_path() {
+        assert_eq!(access_protected_path("/", "all_routes"), Ok(true));
+        assert_eq!(
+            access_protected_path("/architecture", "all_routes"),
+            Ok(true)
+        );
+        assert_eq!(
+            access_protected_path("/favicon.svg", "all_routes"),
+            Ok(true)
+        );
+        assert_eq!(
+            access_protected_path("/architecture", "desk_only"),
+            Ok(false)
+        );
+        assert_eq!(access_protected_path("/desk", "desk_only"), Ok(true));
+        assert_eq!(access_protected_path("/", "invalid"), Err(()));
     }
 
     #[test]

@@ -20,9 +20,9 @@ cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan 
 - operator policy;
 - outbound identity policy;
 - D1 database name;
-- R2 bucket name;
-- Queue name;
-- Worker script names;
+- immutable-policy and temporary-spool R2 bucket names;
+- outbound and dead-letter Queue names;
+- relay-router, relay-outbound, and routing-health Worker script names;
 - sender provider mode.
 
 ## Desired State Shape
@@ -32,27 +32,46 @@ The first version should be able to consume a file with these sections:
 ```text
 project:
   name
-  account_id
+  account_id_env
 domains:
   name
   role_aliases
   personal_aliases
 workers:
-  mail_router_script
-  mail_api_script
+  relay_router:
+    script_name
+    config
+  relay_outbound:
+    script_name
+    config
+  routing_health:
+    script_name
+    config
 storage:
   d1_database
   d1_preview_database
-  r2_raw_mail_bucket
-  r2_raw_mail_preview_bucket
+  r2_policy_bucket
+  r2_spool_bucket
   queue
+  dead_letter_queue
+operator_delivery:
+  mode
+  inbound_processing_mode
+  reply_processing_mode
+  reply_domain
+  reply_token_ttl_days
+  spool_retention_days
+  max_encoded_message_bytes
+  banner_mode
 sender:
   mode
-  authenticated_domains
+  candidate_domains
 ```
 
-The exact serialization can evolve, but plan/apply/verify should preserve these
-boundaries.
+These role names are the canonical serialization. Provisioning, plan
+compilation, evidence collection, and verification must consume this same
+shape; a legacy Worker or raw-mail storage vocabulary is not accepted as an
+independent authority.
 
 `config/desired-state.example.json` is the current template fixture for this
 shape.

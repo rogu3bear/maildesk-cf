@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
 
@@ -12,6 +14,11 @@ interface PolicyFile {
 interface PolicyDomain {
   role_aliases: Record<string, RoleAlias>;
   personal_aliases: Record<string, PersonalAlias>;
+  catch_all?: {
+    operators: string[];
+    reply_identity: string;
+    sink?: boolean;
+  };
 }
 
 interface RoleAlias {
@@ -27,11 +34,11 @@ interface PersonalAlias {
   reply_identity: string;
 }
 
-interface DesiredState {
+interface DesiredState extends CanonicalDesiredTopology {
   domains: DesiredDomain[];
   sender?: {
     mode?: string;
-    authenticated_domains?: string[];
+    candidate_domains?: string[];
   };
 }
 
@@ -40,6 +47,7 @@ interface DesiredDomain {
   role_aliases: string[];
   personal_aliases: string[];
   inbound_mx_provider?: InboundMxProvider;
+  catch_all?: boolean;
 }
 
 type InboundMxProvider = "cloudflare_email_routing" | "google_workspace" | "external";
@@ -48,7 +56,7 @@ interface LiveEvidence {
   zones?: string[];
   email_routing?: Record<string, RoutingEvidence>;
   dns_mx?: Record<string, string[]>;
-  r2_policy_sha256?: string;
+  active_policy?: ActivePolicyEvidence;
   readyz?: {
     ok?: boolean;
     checks?: Array<{ name: string; ok: boolean; detail?: string }>;
@@ -58,6 +66,28 @@ interface LiveEvidence {
   inbound_proofs?: Record<string, ProofEvidence>;
   outbound_proofs?: Record<string, ProofEvidence>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
+}
+
+interface ActivePolicyEvidence {
+  active_policy_sha256?: string;
+  active_policy_r2_key?: string;
+  revision_r2_key?: string;
+  object_key?: string;
+  object_sha256?: string;
+  expected_domain_count?: number;
+  expected_route_count?: number;
+  projected_domain_count?: number;
+  projected_route_count?: number;
+  active_desired_state_sha256?: string;
+  active_projection_sha256?: string;
+  projection_policy_sha256?: string;
+}
+
+interface LocalProjectionEvidence {
+  domains: number;
+  routes: number;
+  desired_state_sha256: string;
+  projection_sha256: string;
 }
 
 interface D1Evidence {
@@ -85,6 +115,11 @@ interface ProofEvidence {
   provider?: string;
   external_receipt_path?: string;
   provider_message_id?: string;
+  operator_count?: number;
+  policy_sha256?: string;
+  provider_message_ids?: string[];
+  provider_accepted_at?: string;
+  inbox_verified_at?: string;
 }
 
 interface CfctlMaildeskEvidence {
@@ -149,6 +184,11 @@ interface EvidenceSummary {
     provider: string | null;
     external_receipt_path: string | null;
     audit_event_at: string | null;
+    operator_count: number | null;
+    policy_sha256: string | null;
+    provider_message_ids: string[];
+    provider_accepted_at: string | null;
+    inbox_verified_at: string | null;
   };
   outbound: {
     status: string | null;
@@ -194,9 +234,11 @@ const evidencePath = argValue("--evidence");
 const policyText = readFileSync(policyPath, "utf8");
 const policy = JSON.parse(policyText) as PolicyFile;
 const desiredState = readJson<DesiredState>(desiredStatePath);
+requireCanonicalDesiredTopology(desiredState);
+const localProjection = collectLocalProjection(policyPath, desiredStatePath);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
-const rows = buildRows(policy, desiredState, evidence, policySha256);
+const rows = buildRows(policy, desiredState, evidence, policySha256, localProjection);
 const gaps = buildGaps(rows);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
 const edgeFailures = rows.filter((row) =>
@@ -230,6 +272,7 @@ const receipt = {
   desired_state_path: relativePath(desiredStatePath),
   evidence_path: evidencePath ? relativePath(resolve(root, evidencePath)) : null,
   local_policy_sha256: policySha256,
+  local_projection: localProjection,
   status: {
     local_truth_ok: localFailures.length === 0,
     edge_ready: edgeFailures.length === 0 && hasLiveEvidence(evidence),
@@ -287,6 +330,7 @@ function buildRows(
   desired: DesiredState,
   live: LiveEvidence,
   localPolicySha256: string,
+  localProjection: LocalProjectionEvidence,
 ): DomainRow[] {
   const desiredByDomain = new Map(desired.domains.map((domain) => [domain.name, domain]));
   const domainNames = unique([
@@ -315,10 +359,16 @@ function buildRows(
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
       inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
-      r2_policy: checkR2Policy(live, localPolicySha256),
+      r2_policy: checkR2Policy(live, localPolicySha256, localProjection),
       worker_bindings: checkWorkerBindings(live),
       d1_queue: checkD1Queue(live),
-      inbound_proof: checkInboundProof(domainName, policyDomain, desiredDomain, live.inbound_proofs?.[domainName]),
+      inbound_proof: checkInboundProof(
+        domainName,
+        policyDomain,
+        desiredDomain,
+        live.inbound_proofs?.[domainName],
+        localPolicySha256,
+      ),
       outbound_sender: checkSender(domainName, desired, live),
       outbound_proof: checkOutboundProof(domainName, desired, live.outbound_proofs?.[domainName]),
     };
@@ -390,7 +440,11 @@ function comparePolicyAndDesired(
   const desiredRoles = [...desiredDomain.role_aliases].sort();
   const policyPersonal = Object.keys(policyDomain.personal_aliases).sort();
   const desiredPersonal = [...desiredDomain.personal_aliases].sort();
-  return same(policyRoles, desiredRoles) && same(policyPersonal, desiredPersonal) ? "ok" : "drift";
+  return same(policyRoles, desiredRoles) &&
+      same(policyPersonal, desiredPersonal) &&
+      Boolean(policyDomain.catch_all) === Boolean(desiredDomain.catch_all)
+    ? "ok"
+    : "drift";
 }
 
 function checkIncludes(values: string[] | undefined, expected: string): Status {
@@ -438,11 +492,49 @@ function checkInboundMx(
   return actualProvider === expectedProvider ? "ok" : "drift";
 }
 
-function checkR2Policy(live: LiveEvidence, localPolicySha256: string): Status {
-  if (live.r2_policy_sha256) {
-    return live.r2_policy_sha256 === localPolicySha256 ? "ok" : "drift";
+function checkR2Policy(
+  live: LiveEvidence,
+  localPolicySha256: string,
+  localProjection: LocalProjectionEvidence,
+): Status {
+  const proof = live.active_policy;
+  if (!proof) return "not_checked";
+  const canonicalKey = `config/policy/${localPolicySha256}.json`;
+  return proof.active_policy_sha256 === localPolicySha256 &&
+      proof.active_policy_r2_key === canonicalKey &&
+      proof.revision_r2_key === canonicalKey &&
+      proof.object_key === canonicalKey &&
+      proof.object_sha256 === localPolicySha256 &&
+      proof.projection_policy_sha256 === localPolicySha256 &&
+      proof.expected_domain_count === localProjection.domains &&
+      proof.expected_route_count === localProjection.routes &&
+      proof.expected_domain_count === proof.projected_domain_count &&
+      proof.expected_route_count === proof.projected_route_count &&
+      proof.active_desired_state_sha256 === localProjection.desired_state_sha256 &&
+      proof.active_projection_sha256 === localProjection.projection_sha256
+    ? "ok"
+    : "drift";
+}
+
+function collectLocalProjection(policyFile: string, desiredFile: string): LocalProjectionEvidence {
+  const result = spawnSync(
+    process.execPath,
+    [resolve(root, "scripts/sync-route-policy.ts"), "--policy", policyFile, "--desired-state", desiredFile],
+    { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+  );
+  if (result.status !== 0) {
+    throw new Error(`local policy projection failed: ${String(result.stderr || result.stdout).trim().slice(0, 240)}`);
   }
-  return live.cfctl_maildesk?.storage?.r2_raw_mail_bucket === "ok" ? "ok" : "not_checked";
+  const parsed = JSON.parse(result.stdout) as Partial<LocalProjectionEvidence>;
+  if (
+    typeof parsed.domains !== "number" ||
+    typeof parsed.routes !== "number" ||
+    typeof parsed.desired_state_sha256 !== "string" ||
+    typeof parsed.projection_sha256 !== "string"
+  ) {
+    throw new Error("local policy projection returned an invalid proof summary");
+  }
+  return parsed as LocalProjectionEvidence;
 }
 
 function cloudflareEmailRoutingMx(): string[] {
@@ -468,31 +560,33 @@ function inboundMxProvider(actual: string[] | undefined): string | null {
 }
 
 function checkWorkerBindings(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) {
-    const workers = live.cfctl_maildesk?.workers;
-    const storage = live.cfctl_maildesk?.storage;
-    return workers?.mail_api === "ok" &&
-      workers.mail_router === "ok" &&
-      storage?.d1_database === "ok" &&
-      storage.r2_raw_mail_bucket === "ok" &&
-      storage.queue === "ok"
+  const workers = live.cfctl_maildesk?.workers;
+  if (workers) {
+    return workers.relay_router === "ok" &&
+      workers.relay_outbound === "ok" &&
+      workers.routing_health === "ok"
       ? "ok"
-      : "not_checked";
+      : "drift";
   }
-  return requiredReadyzChecks(live, ["db_binding", "raw_mail_binding", "mail_jobs_binding", "policy_config"])
-    ? "ok"
-    : "drift";
+  // A single Worker's /readyz cannot prove the required three-Worker
+  // least-privilege topology. Keep that evidence honest until cfctl readback
+  // names every canonical role.
+  return "not_checked";
 }
 
 function checkD1Queue(live: LiveEvidence): Status {
-  if (!live.readyz?.checks) {
-    return live.cfctl_maildesk?.storage?.d1_database === "ok" && live.cfctl_maildesk?.storage?.queue === "ok"
+  const storage = live.cfctl_maildesk?.storage;
+  if (storage) {
+    return storage.d1_database === "ok" &&
+      storage.r2_spool_bucket === "ok" &&
+      storage.queue === "ok" &&
+      storage.dead_letter_queue === "ok"
       ? "ok"
-      : "not_checked";
+      : "drift";
   }
-  if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding"])) return "drift";
-  if (!live.d1) return "ok";
-  if (!live.d1.tables) return "drift";
+  if (!live.readyz?.checks) return "not_checked";
+  if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding", "relay_spool_binding"])) return "drift";
+  if (!live.d1?.tables) return "not_checked";
 
   const requiredTables = [
     "audit_events",
@@ -514,6 +608,7 @@ function checkInboundProof(
   policyDomain: PolicyDomain | undefined,
   desiredDomain: DesiredDomain | undefined,
   proof: ProofEvidence | undefined,
+  localPolicySha256: string,
 ): Status {
   if (!proof) return "not_checked";
   if (!isOkProofStatus(proof.status)) return "drift";
@@ -525,20 +620,51 @@ function checkInboundProof(
   if (!mailbox || mailbox.domain !== domainName) return "drift";
 
   const roleAlias = policyDomain.role_aliases[mailbox.localPart];
-  const requireRawR2Key = (desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing") === "cloudflare_email_routing";
+  const provider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
   if (roleAlias) {
     if (roleAlias.sink) {
-      return proofMatchesSink(proof, requireRawR2Key);
+      return provider === "cloudflare_email_routing"
+        ? proofMatchesInboxRelay(proof, "sink", 0, roleAlias.reply_identity, localPolicySha256)
+        : proofMatchesSink(proof, false);
     }
-    return proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, requireRawR2Key);
+    return provider === "cloudflare_email_routing"
+      ? proofMatchesInboxRelay(
+        proof,
+        "role_alias",
+        roleAlias.operators.length,
+        roleAlias.reply_identity,
+        localPolicySha256,
+      )
+      : proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, false);
   }
 
   const personalAlias = policyDomain.personal_aliases[mailbox.localPart];
   if (personalAlias) {
-    return proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity, requireRawR2Key);
+    return provider === "cloudflare_email_routing"
+      ? proofMatchesInboxRelay(proof, "personal_alias", 1, personalAlias.reply_identity, localPolicySha256)
+      : proofMatchesRoute(proof, "personal_alias", [personalAlias.operator], personalAlias.reply_identity, false);
   }
 
   return "drift";
+}
+
+function proofMatchesInboxRelay(
+  proof: ProofEvidence,
+  expectedRouteKind: "role_alias" | "personal_alias" | "sink",
+  expectedOperatorCount: number,
+  expectedReplyIdentity: string,
+  localPolicySha256: string,
+): Status {
+  if (proof.route_kind !== expectedRouteKind) return "drift";
+  if (proof.operator_count !== expectedOperatorCount) return "drift";
+  if (proof.policy_sha256 !== localPolicySha256) return "drift";
+  if (normalizeMailbox(proof.default_reply_identity ?? "") !== normalizeMailbox(expectedReplyIdentity)) {
+    return "drift";
+  }
+  if (!proof.provider_accepted_at || !proof.inbox_verified_at) return "drift";
+  if (!proof.provider_message_ids || proof.provider_message_ids.length !== expectedOperatorCount) return "drift";
+  if (proof.forwarded_to || proof.raw_r2_key) return "drift";
+  return "ok";
 }
 
 function proofMatchesRoute(
@@ -583,8 +709,8 @@ function checkSender(domainName: string, desired: DesiredState, live: LiveEviden
   if (mode === "invalid") return "drift";
   if (mode === "disabled") return "ok";
 
-  const desiredAuthenticated = desired.sender?.authenticated_domains?.includes(domainName) ?? false;
-  if (!desiredAuthenticated) return "missing";
+  const desiredCandidate = desired.sender?.candidate_domains?.includes(domainName) ?? false;
+  if (!desiredCandidate) return "missing";
 
   if (mode === "cloudflare_email_service") {
     const cfctlStatus = live.cfctl_maildesk?.sender_domains?.[domainName];
@@ -658,7 +784,7 @@ function domainRoutes(
 function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
   const mode = desiredSenderMode(desired);
   return {
-    authenticated: mode !== "disabled" && (desired.sender?.authenticated_domains?.includes(domainName) ?? false),
+    authenticated: mode !== "disabled" && checkSender(domainName, desired, live) === "ok",
     provider: mode,
     provider_status: senderProviderStatus(domainName, desired, live),
   };
@@ -697,6 +823,11 @@ function evidenceSummary(
       provider: inbound?.provider ?? null,
       external_receipt_path: inbound?.external_receipt_path ?? null,
       audit_event_at: inbound?.audit_event_at ?? null,
+      operator_count: inbound?.operator_count ?? null,
+      policy_sha256: inbound?.policy_sha256 ?? null,
+      provider_message_ids: inbound?.provider_message_ids ?? [],
+      provider_accepted_at: inbound?.provider_accepted_at ?? null,
+      inbox_verified_at: inbound?.inbox_verified_at ?? null,
     },
     outbound: {
       status: outbound?.status ?? null,
@@ -735,7 +866,7 @@ function hasLiveEvidence(live: LiveEvidence): boolean {
     live.zones ||
       live.email_routing ||
       live.dns_mx ||
-      live.r2_policy_sha256 ||
+      live.active_policy ||
       live.readyz ||
       live.d1 ||
       live.sender_domains ||

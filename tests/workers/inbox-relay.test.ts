@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import mailRouterWorker from "../../workers/mail-router/src/index";
+import type { RouterPolicy } from "../../workers/shared/router";
 import {
   buildOperatorDelivery,
   encodedMessageUpperBound,
-  operatorAuthenticationPassed,
+  outboundReplyPayload,
   parseRelayEmail,
   relayAddress,
   relayRecordIsActive,
@@ -59,7 +61,12 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(relayInsert).toBeDefined();
   expect(relayInsert?.bindings[1]).toMatch(/^[a-f0-9]{64}$/);
   expect(relayInsert?.bindings.join(" ")).not.toContain("r+");
-  expect(db.calls.some((call) => call.sql.includes("raw_r2_key") && call.bindings.includes(null))).toBe(true);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO messages"))).toBe(false);
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.sql).toContain("subject, status) SELECT ?1, ?2, ?3, ?4, NULL");
+  expect(threadInsert?.sql).toContain("rs.active_policy_sha256 = ar.policy_sha256");
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_routes"))).toBe(false);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_route_operators"))).toBe(false);
   const recipientAudits = db.calls.filter(
     (call) => call.sql.includes("INSERT INTO audit_events") &&
       String(call.bindings[4]).startsWith("operator_delivery_recipient_"),
@@ -67,10 +74,14 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(recipientAudits).toHaveLength(2);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-a@example.com"))).toBe(true);
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-b@example.com"))).toBe(true);
-  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
-  expect(healthInsert?.sql).not.toContain("inbound_status = 'local_policy_valid'");
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO route_health"))).toBe(false);
   const healthResult = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
   expect(healthResult?.sql).toContain("inbound_status = 'inbox_verified'");
+  expect(healthResult?.sql).toContain("policy_sha256 = ?6");
+  expect(healthResult?.sql).toContain("rs.active_policy_sha256 = ?6");
+  expect(healthResult?.bindings[5]).toBe(
+    createHash("sha256").update(JSON.stringify(policy)).digest("hex"),
+  );
 });
 
 test("inbox relay binds the external destination to the visible sender, not an untrusted Reply-To", async () => {
@@ -93,6 +104,27 @@ test("inbox relay binds the external destination to the visible sender, not an u
   expect(relayInsert?.bindings).not.toContain("redirect-target@example.org");
 });
 
+test("a pre-send spool failure rejects before any operator delivery", async () => {
+  const db = new RelayD1();
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<spool-failure@example.net>" }),
+  );
+  const env = relayEnv(db, []);
+  let providerCalls = 0;
+  env.EMAIL = { send: async () => { providerCalls += 1; return { messageId: "must-not-send" }; } } as SendEmail;
+  env.RELAY_SPOOL = {
+    put: async () => { throw new Error("spool unavailable"); },
+  } as unknown as R2Bucket;
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toContain("could not create a durable operator-delivery spool");
+  expect(providerCalls).toBe(0);
+  expect(db.calls.some((call) => call.sql.includes("UPDATE route_health SET inbound_status"))).toBe(false);
+});
+
 test("route identifiers preserve distinct valid alias characters", async () => {
   const db = new RelayD1();
   const message = inboundMessage(
@@ -100,9 +132,7 @@ test("route identifiers preserve distinct valid alias characters", async () => {
     "team+ops@example.com",
     mime({ from: "sender@example.net", messageId: "<plus-route@example.net>" }),
   );
-  const env = {
-    ...relayEnv(db, []),
-    MAILDESK_POLICY_JSON: JSON.stringify({
+  const env = relayEnv(db, [], {
       default_reply_mode: "role_first",
       domains: {
         "example.com": {
@@ -116,8 +146,7 @@ test("route identifiers preserve distinct valid alias characters", async () => {
           personal_aliases: {},
         },
       },
-    }),
-  };
+    });
 
   await mailRouterWorker.email(
     message,
@@ -126,8 +155,8 @@ test("route identifiers preserve distinct valid alias characters", async () => {
   );
 
   expect(message.rejected).toBeUndefined();
-  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
-  expect(routeInsert?.bindings[0]).toBe("route:example.com:team%2Bops");
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.bindings[2]).toBe("route:example.com:team%2Bops");
 });
 
 test("catch-all delivery advances the declared wildcard route while showing the actual recipient", async () => {
@@ -138,9 +167,7 @@ test("catch-all delivery advances the declared wildcard route while showing the 
     "unlisted@example.com",
     mime({ from: "sender@example.net", messageId: "<catch-all@example.net>" }),
   );
-  const env = {
-    ...relayEnv(db, deliveries),
-    MAILDESK_POLICY_JSON: JSON.stringify({
+  const env = relayEnv(db, deliveries, {
       default_reply_mode: "role_first",
       domains: {
         "example.com": {
@@ -153,8 +180,7 @@ test("catch-all delivery advances the declared wildcard route while showing the 
           },
         },
       },
-    }),
-  };
+    });
 
   await mailRouterWorker.email(
     message,
@@ -169,14 +195,356 @@ test("catch-all delivery advances the declared wildcard route while showing the 
     email: "info@example.com",
   });
   expect(deliveries[0]?.text).toContain("Received at: unlisted@example.com");
-  const routeInsert = db.calls.find((call) => call.sql.includes("INSERT INTO alias_routes"));
-  expect(routeInsert?.bindings.slice(0, 3)).toEqual([
-    "route:example.com:*",
+  const threadInsert = db.calls.find((call) => call.sql.includes("INSERT INTO threads"));
+  expect(threadInsert?.bindings.slice(1, 3)).toEqual([
     "domain:example.com",
-    "*",
+    "route:example.com:*",
   ]);
-  const healthInsert = db.calls.find((call) => call.sql.includes("INSERT INTO route_health"));
-  expect(healthInsert?.bindings[1]).toBe("*@example.com");
+  const healthAdvance = db.calls.find((call) => call.sql.includes("UPDATE route_health SET last_inbound_at"));
+  expect(healthAdvance?.bindings[1]).toBe("route:example.com:*");
+});
+
+test("accepted inbound deliveries retain a spool and enqueue body-free recovery when D1 projection fails", async () => {
+  const db = new RelayD1("UPDATE route_health SET inbound_status");
+  const deliveries: EmailMessageBuilder[] = [];
+  const queued: unknown[] = [];
+  const puts: string[] = [];
+  const deletes: string[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<audit-recovery@example.net>" }),
+  );
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { puts.push(key); },
+    delete: async (key: string) => { deletes.push(key); },
+  } as unknown as R2Bucket;
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(2);
+  expect(puts).toHaveLength(3);
+  expect(deletes).toHaveLength(2);
+  expect(queued).toHaveLength(1);
+  expect(queued[0]).toMatchObject({
+    kind: "inbound_delivery_result",
+    policySha256: createHash("sha256").update(JSON.stringify(policy)).digest("hex"),
+    status: "provider_accepted",
+    results: [
+      { ok: true, providerMessageId: "provider-1" },
+      { ok: true, providerMessageId: "provider-2" },
+    ],
+  });
+  expect(JSON.stringify(queued[0])).not.toContain("operator-a@example.com");
+  expect(JSON.stringify(queued[0])).not.toContain("operator-b@example.com");
+});
+
+test("identical inbound redelivery repairs durable results without repeating provider sends", async () => {
+  const db = new RelayD1("UPDATE route_health SET inbound_status");
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = {
+    send: async () => { throw new Error("queue unavailable"); },
+  } as unknown as Queue;
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); },
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<same-delivery@example.net>" });
+
+  const first = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(first, env, {} as ExecutionContext);
+  const firstMessageIds = deliveries.map((delivery) => delivery.headers?.["Message-ID"]);
+
+  const redelivery = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
+
+  expect(first.rejected).toBeUndefined();
+  expect(redelivery.rejected).toBeUndefined();
+  expect(spoolPuts).toHaveLength(3);
+  expect(deliveries.map((delivery) => delivery.to)).toEqual([
+    "operator-a@example.com",
+    "operator-b@example.com",
+  ]);
+  expect(firstMessageIds).toHaveLength(2);
+  expect(new Set(firstMessageIds).size).toBe(2);
+  expect(firstMessageIds.every((messageId) =>
+    /^<inbound\.[a-f0-9]{64}\.[a-f0-9]{16}@reply\.maildesk\.example\.com>$/.test(String(messageId))
+  )).toBe(true);
+  expect(db.inboundDelivery?.status).toBe("provider_accepted");
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "provider_accepted")).toBe(true);
+});
+
+test("ambiguous recipient projection is never replayed on identical inbound redelivery", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = ?1");
+  const deliveries: EmailMessageBuilder[] = [];
+  const queued: unknown[] = [];
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
+  const raw = mime({ from: "sender@example.net", messageId: "<ambiguous-recipient@example.net>" });
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries).toHaveLength(2);
+  expect(db.recipientDeliveries.map((recipient) => recipient.status).sort()).toEqual([
+    "provider_accepted",
+    "sending",
+  ]);
+  expect(queued.at(-1)).toMatchObject({
+    kind: "inbound_delivery_result",
+    status: "partial_delivery",
+    results: [
+      { ok: false, errorCode: "provider_outcome_unknown" },
+      { ok: true },
+    ],
+  });
+});
+
+test("identical redelivery sends a same-policy recipient whose provider claim never occurred", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
+  const deliveries: EmailMessageBuilder[] = [];
+  const objects = new Map<string, string | ArrayBuffer>();
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string, value: string | ArrayBuffer) => { objects.set(key, value); },
+    get: async (key: string) => {
+      const value = objects.get(key);
+      if (value === undefined) return null;
+      return {
+        text: async () => typeof value === "string" ? value : new TextDecoder().decode(value),
+      };
+    },
+    delete: async (key: string) => { objects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = [
+    "From: sender@example.net",
+    "To: security@example.com",
+    "Subject: Pending recipient recovery",
+    "Message-ID: <pending-recipient@example.net>",
+    'Content-Type: multipart/mixed; boundary="maildesk-boundary"',
+    "",
+    "--maildesk-boundary",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "Recover the exact generated delivery.",
+    "--maildesk-boundary",
+    "Content-Type: text/plain; name=proof.txt",
+    "Content-Disposition: attachment; filename=proof.txt",
+    "Content-Transfer-Encoding: base64",
+    "",
+    "cmVjb3ZlcnktYnl0ZXM=",
+    "--maildesk-boundary--",
+    "",
+  ].join("\r\n");
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  expect(db.recipientDeliveries.map((recipient) => recipient.status)).toEqual([
+    "pending",
+    "provider_accepted",
+  ]);
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries.map((delivery) => delivery.to)).toEqual([
+    "operator-b@example.com",
+    "operator-a@example.com",
+  ]);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "provider_accepted")).toBe(true);
+  expect(deliveries[1]?.replyTo).toBe(deliveries[0]?.replyTo);
+  expect(deliveries[1]?.attachments?.[0]?.filename).toBe("proof.txt");
+  expect(new TextDecoder().decode(deliveries[1]?.attachments?.[0]?.content)).toBe("recovery-bytes");
+});
+
+test("tampering a pending recovery payload cannot redirect an operator delivery", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
+  const deliveries: EmailMessageBuilder[] = [];
+  const objects = new Map<string, string | ArrayBuffer>();
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string, value: string | ArrayBuffer) => { objects.set(key, value); },
+    get: async (key: string) => {
+      const value = objects.get(key);
+      if (value === undefined) return null;
+      return { text: async () => typeof value === "string" ? value : new TextDecoder().decode(value) };
+    },
+    delete: async (key: string) => { objects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<tampered-recovery@example.net>" });
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+
+  const pending = db.recipientDeliveries.find((recipient) => recipient.status === "pending");
+  expect(pending).toBeDefined();
+  const serialized = objects.get(pending!.delivery_payload_r2_key);
+  expect(typeof serialized).toBe("string");
+  const tampered = JSON.parse(serialized as string) as { to: string };
+  tampered.to = "attacker@example.net";
+  objects.set(pending!.delivery_payload_r2_key, JSON.stringify(tampered));
+
+  await mailRouterWorker.email(
+    inboundMessage("sender@example.net", "security@example.com", raw),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  expect(db.recipientDeliveries.find((recipient) => recipient.operator_ref === pending!.operator_ref)?.status)
+    .toBe("pending");
+});
+
+test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
+  const supersedingPolicy = {
+    default_reply_mode: "role_first",
+    domains: {
+      "example.com": {
+        role_aliases: {
+          security: {
+            operators: ["operator-a@example.com", "operator-b@example.com"],
+            reply_identity: "security@example.com",
+            allowed_reply_identities: ["security@example.com"],
+          },
+          abuse: {
+            operators: ["operator-a@example.com"],
+            reply_identity: "abuse@example.com",
+            allowed_reply_identities: ["abuse@example.com"],
+          },
+        },
+        personal_aliases: {},
+      },
+    },
+  } as RouterPolicy;
+  const db = new RelayD1(undefined, false, supersedingPolicy);
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolObjects = new Set<string>();
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); spoolObjects.add(key); },
+    delete: async (key: string) => { spoolObjects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<superseded-pending@example.net>" });
+
+  const first = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(first, env, {} as ExecutionContext);
+  expect(first.rejected).toContain("policy changed before operator delivery");
+  expect(deliveries).toHaveLength(0);
+  expect(db.inboundDelivery).toBeUndefined();
+  expect(spoolObjects.size).toBe(0);
+
+  const redelivery = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
+  expect(redelivery.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(2);
+  expect(spoolPuts).toHaveLength(6);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[3]);
+  expect(spoolObjects.size).toBe(0);
+  expect(db.inboundDelivery?.status).toBe("provider_accepted");
+});
+
+test("an obsolete invocation cannot claim a replacement spool generation", async () => {
+  const db = new RelayD1(undefined, false, undefined, "relay-spool/replacement-generation.eml");
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<replacement-generation@example.net>" }),
+  );
+
+  await mailRouterWorker.email(message, relayEnv(db, deliveries), {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(0);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "pending")).toBe(true);
+  expect(db.inboundDelivery?.raw_r2_key).toBe("relay-spool/replacement-generation.eml");
+  expect(db.inboundDelivery?.status).toBe("recovery_required");
+});
+
+test("policy supersession between pre-send read and recipient claim reroutes only to current operators", async () => {
+  const supersedingPolicy = {
+    default_reply_mode: "role_first",
+    domains: {
+      "example.com": {
+        role_aliases: {
+          security: {
+            operators: ["operator-a@example.com"],
+            reply_identity: "security@example.com",
+            allowed_reply_identities: ["security@example.com"],
+          },
+        },
+        personal_aliases: {},
+      },
+    },
+  } as RouterPolicy;
+  const db = new RelayD1(undefined, false, undefined, undefined, supersedingPolicy);
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); },
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<claim-policy-race@example.net>" });
+
+  const staleAttempt = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(staleAttempt, env, {} as ExecutionContext);
+
+  expect(staleAttempt.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(0);
+  expect(db.recipientDeliveries.every((recipient) => recipient.status === "pending")).toBe(true);
+
+  const currentAttempt = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(currentAttempt, env, {} as ExecutionContext);
+
+  expect(currentAttempt.rejected).toBeUndefined();
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-a@example.com"]);
+  expect(spoolPuts).toHaveLength(5);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[3]);
+  expect(db.recipientDeliveries).toHaveLength(1);
+  expect(db.recipientDeliveries[0]?.status).toBe("provider_accepted");
+});
+
+test("a policy revision change during persistence rejects without rewriting route authority", async () => {
+  const db = new RelayD1(undefined, true);
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<revision-race@example.net>" }),
+  );
+
+  await mailRouterWorker.email(message, relayEnv(db, deliveries), {} as ExecutionContext);
+
+  expect(message.rejected).toContain("could not create a durable route");
+  expect(deliveries).toHaveLength(0);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_routes"))).toBe(false);
+  expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_route_operators"))).toBe(false);
 });
 
 test("inbox relay rejects malformed and oversized messages without direct-forward fallback", async () => {
@@ -207,6 +575,8 @@ test("inbox relay is fail-closed until relay processing is explicitly enabled", 
   );
   const env = relayEnv(db, deliveries);
   delete env.MAILDESK_RELAY_PROCESSING_MODE;
+  delete env.MAILDESK_INBOUND_RELAY_MODE;
+  delete env.MAILDESK_REPLY_RELAY_MODE;
 
   await mailRouterWorker.email(
     message,
@@ -214,7 +584,7 @@ test("inbox relay is fail-closed until relay processing is explicitly enabled", 
     {} as ExecutionContext,
   );
 
-  expect(message.rejected).toContain("relay processing is disabled");
+  expect(message.rejected).toContain("inbound relay is disabled");
   expect(deliveries).toHaveLength(0);
   expect(db.calls).toHaveLength(0);
   expect(message.forwarded).toHaveLength(0);
@@ -226,12 +596,12 @@ test("opaque reply relay is side-effect free while relay processing is disabled"
   const effects = { r2: 0, queue: 0 };
   const message = inboundMessage(
     "operator-a@example.com",
-    "r+opaque-token@reply.maildesk.example.com",
+    relayAddress("c".repeat(64), "reply.maildesk.example.com"),
     mime({ from: "operator-a@example.com", messageId: "<dark-reply@example.com>" }),
   );
   const env = {
     ...relayEnv(db, deliveries),
-    MAILDESK_RELAY_PROCESSING_MODE: "disabled" as const,
+    MAILDESK_REPLY_RELAY_MODE: "disabled" as const,
     RAW_MAIL: {
       put: async () => { effects.r2 += 1; },
       get: async () => { effects.r2 += 1; return null; },
@@ -248,7 +618,7 @@ test("opaque reply relay is side-effect free while relay processing is disabled"
     {} as ExecutionContext,
   );
 
-  expect(message.rejected).toContain("relay processing is disabled");
+  expect(message.rejected).toContain("reply relay is disabled");
   expect(db.calls).toHaveLength(0);
   expect(effects).toEqual({ r2: 0, queue: 0 });
   expect(deliveries).toHaveLength(0);
@@ -301,7 +671,7 @@ test("invalid delivery configuration and relay timestamps fail closed", async ()
   expect(relayRecordIsActive("2099-01-01T00:00:00.000Z", null, 0)).toBe(true);
 });
 
-test("reply relay requires aligned Cloudflare authentication before token lookup", async () => {
+test("reply relay requires cryptographic aligned DKIM before token lookup", async () => {
   const token = "a".repeat(64);
   const message = inboundMessage(
     "operator-a@example.com",
@@ -341,49 +711,68 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
   expect(delivery.headers["X-Maildesk-Original-To"]).toBe("unlisted@example.com");
   expect(delivery.headers["X-Maildesk-Reply-Identity"]).toBe("info@example.com");
   expect(encodedMessageUpperBound(delivery)).toBeGreaterThan(delivery.text.length);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "mx.cloudflare.net; dkim=pass header.d=example.com" }),
-    "operator-a@example.com",
-  )).toBe(true);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "mx.cloudflare.net; spf = pass smtp.mailfrom=\"operator-a@example.com\"" }),
-    "operator-a@example.com",
-  )).toBe(true);
-  expect(operatorAuthenticationPassed(
-    new Headers({ "Authentication-Results": "notcloudflare.example; dkim=pass header.d=example.com" }),
-    "operator-a@example.com",
-  )).toBe(false);
-  for (const lookalike of [
-    "mx.cloudflare.net; spf=passive smtp.mailfrom=operator-a@example.com",
-    "mx.cloudflare.net; spf=pass smtp.mailfrom=operator-a@example.com.attacker.invalid",
-    "mx.cloudflare.net; dkim=passive header.d=example.com",
-    "mx.cloudflare.net; dkim=pass header.d=example.com.attacker.invalid",
-    "mx.cloudflare.net; dkim=pass header.i=@example.com.attacker.invalid",
-  ]) {
-    expect(operatorAuthenticationPassed(
-      new Headers({ "Authentication-Results": lookalike }),
-      "operator-a@example.com",
-    )).toBe(false);
-  }
-  const duplicatedResults = new Headers();
-  duplicatedResults.append(
-    "Authentication-Results",
-    "mx.cloudflare.net; spf=fail smtp.mailfrom=operator-a@example.com",
-  );
-  duplicatedResults.append(
-    "Authentication-Results",
-    "attacker.example; dkim=pass header.d=example.com",
-  );
-  expect(operatorAuthenticationPassed(duplicatedResults, "operator-a@example.com")).toBe(false);
 });
 
-function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {
+test("encoded-size ceiling covers transfer encoding and base64 line wrapping", () => {
+  const unicodeText = "é=".repeat(1_000);
+  const attachment = new Uint8Array(7_600).buffer;
+  const rawTextBytes = new TextEncoder().encode(unicodeText).byteLength;
+  const base64Bytes = Math.ceil(attachment.byteLength / 3) * 4;
+  const base64LineBreaks = Math.ceil(base64Bytes / 76) * 2;
+  const bound = encodedMessageUpperBound({
+    subject: unicodeText,
+    text: unicodeText,
+    attachments: [{
+      disposition: "inline",
+      filename: "résumé=.txt",
+      type: "text/plain",
+      contentId: "operator-image@example.invalid",
+      content: attachment,
+    }],
+  });
+
+  expect(bound).toBeGreaterThanOrEqual(16 * 1024 + rawTextBytes * 8 + base64Bytes + base64LineBreaks);
+});
+
+test("operator reply HTML is regenerated only from verified plaintext", () => {
+  const payload = outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: "Safe <reply>\u2060 body",
+    html: '<p>oper<span style="display:none">X</span>ator@example.com</p>',
+    references: [],
+    attachments: [],
+  });
+  expect(payload.text).toBe("Safe <reply>\u2060 body");
+  expect(payload.html).toBe('<pre style="white-space:pre-wrap">Safe &lt;reply&gt;\u2060 body</pre>');
+  expect(payload.html).not.toContain("display:none");
+  expect(() => outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "HTML only",
+    text: "",
+    html: "<p>HTML only</p>",
+    references: [],
+    attachments: [],
+  })).toThrow("plaintext MIME alternative");
+});
+
+function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: RouterPolicy = policy) {
+  const policyJson = JSON.stringify(policyValue);
+  const policySha256 = createHash("sha256").update(policyJson).digest("hex");
+  db.activePolicy = { sha256: policySha256, json: policyJson };
+  const relaySpool = {
+    put: async () => undefined,
+    get: async () => null,
+    delete: async () => undefined,
+  } as unknown as R2Bucket;
   return {
     DB: db as unknown as D1Database,
-    RAW_MAIL: {
-      put: async () => undefined,
-      get: async () => null,
-      delete: async () => undefined,
+    RAW_MAIL: relaySpool,
+    RELAY_SPOOL: relaySpool,
+    POLICY_STORE: {
+      get: async (key: string) => db.activePolicy && key === `config/policy/${db.activePolicy.sha256}.json`
+        ? { arrayBuffer: async () => new TextEncoder().encode(db.activePolicy!.json).buffer }
+        : null,
     } as unknown as R2Bucket,
     MAIL_JOBS: { send: async () => undefined } as unknown as Queue,
     EMAIL: {
@@ -392,9 +781,9 @@ function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[]) {
         return { messageId: `provider-${deliveries.length}` };
       },
     } as SendEmail,
-    MAILDESK_POLICY_JSON: JSON.stringify(policy),
     MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
-    MAILDESK_RELAY_PROCESSING_MODE: "enabled" as const,
+    MAILDESK_INBOUND_RELAY_MODE: "enabled" as const,
+    MAILDESK_REPLY_RELAY_MODE: "enabled" as const,
     MAILDESK_REPLY_DOMAIN: "reply.maildesk.example.com",
     MAILDESK_REPLY_TOKEN_TTL_DAYS: "90",
     MAILDESK_SPOOL_RETENTION_DAYS: "7",
@@ -435,21 +824,182 @@ function mime(input: { from: string; replyTo?: string; messageId: string }): str
 
 class RelayD1 {
   calls: Array<{ sql: string; bindings: unknown[] }> = [];
+  activePolicy?: { sha256: string; json: string };
+  inboundDelivery?: {
+    id: string;
+    fingerprint_sha256: string;
+    relay_id: string;
+    thread_id: string;
+    route_id: string;
+    policy_sha256: string;
+    raw_r2_key: string;
+    received_at: string;
+    status: string;
+    reply_identity: string;
+    token_sha256: string;
+  };
+  recipientDeliveries: Array<{
+    delivery_id: string;
+    operator_ref: string;
+    delivery_message_id: string;
+    delivery_payload_r2_key: string;
+    delivery_payload_sha256: string;
+    status: string;
+    provider_message_id: string | null;
+    error_code: string | null;
+  }> = [];
+  private failedOnce = false;
+
+  constructor(
+    private readonly failOnceSql?: string,
+    private readonly rejectPolicyBoundPersistence = false,
+    private readonly supersedingPolicy?: RouterPolicy,
+    private readonly replacementSpoolKey?: string,
+    private claimSupersedingPolicy?: RouterPolicy,
+  ) {}
 
   prepare(sql: string): D1PreparedStatement {
     const call = { sql, bindings: [] as unknown[] };
     this.calls.push(call);
     const statement = {
       bind: (...bindings: unknown[]) => { call.bindings = bindings; return statement; },
-      run: async () => ({ success: true, meta: { changes: 1 } }),
-      first: async () => null,
-      all: async () => ({ success: true, results: [], meta: {} }),
+      run: async () => {
+        if (!this.failedOnce && this.failOnceSql && sql.includes(this.failOnceSql)) {
+          this.failedOnce = true;
+          throw new Error(`forced D1 failure for ${this.failOnceSql}`);
+        }
+        if (sql.includes("UPDATE inbound_recipient_deliveries SET status = 'sending'")) {
+          if (this.claimSupersedingPolicy) {
+            const json = JSON.stringify(this.claimSupersedingPolicy);
+            this.activePolicy = { sha256: createHash("sha256").update(json).digest("hex"), json };
+            this.claimSupersedingPolicy = undefined;
+          }
+          const recipient = this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending" &&
+            this.inboundDelivery?.policy_sha256 === call.bindings[2] &&
+            this.inboundDelivery.raw_r2_key === call.bindings[3] &&
+            this.activePolicy?.sha256 === this.inboundDelivery.policy_sha256
+          );
+          if (!recipient) return { success: true, meta: { changes: 0 } };
+          recipient.status = "sending";
+        }
+        if (sql.includes("UPDATE inbound_recipient_deliveries SET status = ?1")) {
+          const recipient = this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[3] && row.operator_ref === call.bindings[4] && row.status === "sending"
+          );
+          if (!recipient) return { success: true, meta: { changes: 0 } };
+          recipient.status = String(call.bindings[0]);
+          recipient.provider_message_id = call.bindings[1] === null ? null : String(call.bindings[1]);
+          recipient.error_code = call.bindings[2] === null ? null : String(call.bindings[2]);
+        }
+        if (sql.includes("UPDATE inbound_deliveries SET status = ?1") && this.inboundDelivery) {
+          this.inboundDelivery.status = String(call.bindings[0]);
+        }
+        if (sql.startsWith("DELETE FROM reply_relays")) {
+          const canDiscard = this.inboundDelivery?.relay_id === call.bindings[0] &&
+            this.inboundDelivery.policy_sha256 === call.bindings[1] &&
+            this.inboundDelivery.id === call.bindings[2] &&
+            this.activePolicy?.sha256 !== this.inboundDelivery.policy_sha256 &&
+            this.recipientDeliveries.every((row) => row.status === "pending");
+          if (!canDiscard) return { success: true, meta: { changes: 0 } };
+          const deliveryId = this.inboundDelivery.id;
+          this.inboundDelivery = undefined;
+          this.recipientDeliveries = this.recipientDeliveries.filter((row) => row.delivery_id !== deliveryId);
+        }
+        return { success: true, meta: { changes: 1 } };
+      },
+      first: async () => {
+        if (sql.includes("FROM inbound_recipient_deliveries") && sql.includes("operator_ref = ?2")) {
+          return this.recipientDeliveries.find((row) =>
+            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1]
+          ) ?? null;
+        }
+        if (sql.includes("FROM inbound_deliveries d") && this.inboundDelivery &&
+            this.inboundDelivery.fingerprint_sha256 === call.bindings[0]) {
+          return this.inboundDelivery;
+        }
+        return sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
+          ? {
+            active_policy_sha256: this.activePolicy.sha256,
+            active_policy_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
+            revision_sha256: this.activePolicy.sha256,
+            revision_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
+            expected_domain_count: 1,
+            expected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
+            projected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
+            projected_domain_count: 1,
+          }
+          : null;
+      },
+      all: async () => ({
+        success: true,
+        results: sql.includes("FROM inbound_recipient_deliveries")
+          ? this.recipientDeliveries.filter((row) => row.delivery_id === call.bindings[0])
+          : [],
+        meta: {},
+      }),
       raw: async () => [],
+      __call: call,
     };
     return statement as unknown as D1PreparedStatement;
   }
 
   async batch(statements: D1PreparedStatement[]) {
-    return statements.map(() => ({ success: true, meta: { changes: 1 }, results: [] }));
+    const calls = statements.flatMap((statement) => {
+      const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
+      return call ? [call] : [];
+    });
+    const relayCall = calls.find((call) => call.sql.includes("INSERT INTO reply_relays"));
+    for (const statement of this.rejectPolicyBoundPersistence ? [] : statements) {
+      const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
+      if (!call) continue;
+      if (call.sql.includes("INSERT INTO inbound_deliveries")) {
+        this.inboundDelivery = {
+          id: String(call.bindings[0]),
+          fingerprint_sha256: String(call.bindings[1]),
+          relay_id: String(call.bindings[2]),
+          thread_id: String(call.bindings[3]),
+          route_id: String(call.bindings[4]),
+          policy_sha256: String(call.bindings[5]),
+          raw_r2_key: String(call.bindings[6]),
+          received_at: String(call.bindings[7]),
+          status: "pending",
+          reply_identity: String(relayCall?.bindings[5] ?? ""),
+          token_sha256: String(relayCall?.bindings[1] ?? ""),
+        };
+      }
+      if (call.sql.includes("INSERT INTO inbound_recipient_deliveries")) {
+        this.recipientDeliveries.push({
+          delivery_id: String(call.bindings[0]),
+          operator_ref: String(call.bindings[1]),
+          delivery_message_id: String(call.bindings[2]),
+          delivery_payload_r2_key: String(call.bindings[3]),
+          delivery_payload_sha256: String(call.bindings[4]),
+          status: "pending",
+          provider_message_id: null,
+          error_code: null,
+        });
+      }
+    }
+    if (this.supersedingPolicy && calls.some((call) => call.sql.includes("INSERT INTO inbound_deliveries"))) {
+      const json = JSON.stringify(this.supersedingPolicy);
+      this.activePolicy = { sha256: createHash("sha256").update(json).digest("hex"), json };
+    }
+    if (this.replacementSpoolKey && this.inboundDelivery) {
+      this.inboundDelivery.raw_r2_key = this.replacementSpoolKey;
+    }
+    return statements.map((_, index) => ({
+      success: true,
+      meta: { changes: this.rejectPolicyBoundPersistence && index < 2 ? 0 : 1 },
+      results: [],
+    }));
   }
+}
+
+function policyRouteCount(policy: RouterPolicy): number {
+  return Object.values(policy.domains).reduce(
+    (count, domain) =>
+      count + Object.keys(domain.role_aliases).length + Object.keys(domain.personal_aliases).length + Number(Boolean(domain.catch_all)),
+    0,
+  );
 }

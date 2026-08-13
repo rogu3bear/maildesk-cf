@@ -1,4 +1,5 @@
 import {
+  InboundDeliveryResultJob,
   InboxReplyReceivedJob,
   json,
   MailJob,
@@ -15,12 +16,26 @@ import {
   outboundReplyPayload,
   parseRelayEmail,
   relayRecordIsActive,
+  sha256Hex,
 } from "../../shared/inbox-relay";
 import { authorizeReplyWithPolicy, RouterPolicy } from "../../shared/router";
+import { loadActivePolicy } from "../../shared/policy-store";
 
 const RESEND_REQUEST_TIMEOUT_MS = 10_000;
 // wrangler.toml allows five retries after the initial Queue delivery.
 const MAX_OUTBOUND_ATTEMPTS = 6;
+
+export const CLAIMED_REPLY_SPOOL_SQL =
+  "SELECT id FROM relay_attempts WHERE id = ?1 AND relay_id = ?2 AND operator = ?3 AND operator_message_id = ?4 AND raw_r2_key = ?5 AND raw_sha256 = ?6 AND status IN ('receiving', 'queued', 'authorized') LIMIT 1";
+
+export const CLAIMED_INBOUND_RESULT_SQL =
+  "SELECT d.raw_r2_key, (SELECT json_group_array(rd.delivery_payload_r2_key) FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AS accepted_payload_keys_json FROM inbound_deliveries d WHERE d.id = ?1 AND d.relay_id = ?2 AND d.thread_id = ?3 AND d.route_id = ?4 AND d.policy_sha256 = ?5 AND d.raw_r2_key = ?6 AND d.received_at = ?8 AND (SELECT COUNT(*) FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id) = json_array_length(?7) AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND NOT EXISTS (SELECT 1 FROM json_each(?7) queued WHERE json_extract(queued.value, '$.operatorRef') = rd.operator_ref AND json_extract(queued.value, '$.deliveryPayloadR2Key') = rd.delivery_payload_r2_key AND ((json_extract(queued.value, '$.ok') = 1 AND rd.status = 'provider_accepted' AND COALESCE(json_extract(queued.value, '$.providerMessageId'), '') = COALESCE(rd.provider_message_id, '')) OR (json_extract(queued.value, '$.ok') = 0 AND rd.status IN ('recovery_required', 'failed') AND COALESCE(json_extract(queued.value, '$.errorCode'), '') = COALESCE(rd.error_code, ''))))) AND NOT EXISTS (SELECT 1 FROM json_each(?7) queued WHERE NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.operator_ref = json_extract(queued.value, '$.operatorRef') AND rd.delivery_payload_r2_key = json_extract(queued.value, '$.deliveryPayloadR2Key'))) AND ((?9 = 'provider_accepted' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'provider_accepted')) OR (?9 = 'partial_delivery' AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'provider_accepted')) OR (?9 = 'recovery_required' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'recovery_required')) OR (?9 = 'failed' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'failed'))) LIMIT 1";
+
+export const PERSIST_INBOUND_DELIVERY_PROJECTION_SQL =
+  "UPDATE inbound_deliveries SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3";
+
+export const CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL =
+  "UPDATE inbound_deliveries SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND policy_sha256 = ?2 AND status = 'provider_accepted' AND raw_r2_key = ?3";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -50,6 +65,11 @@ export default {
   },
 
   async queue(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
+    await processQueueBatch(batch, env);
+  },
+};
+
+export async function processQueueBatch(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       const disposition = await recordQueueEvent(message.body, env, Math.max(1, message.attempts));
       if (disposition.kind === "retry") {
@@ -58,8 +78,7 @@ export default {
         message.ack();
       }
     }
-  },
-};
+}
 
 async function queueReply(request: Request, env: Env): Promise<Response> {
   if (!isAuthorizedRequest(request, env)) {
@@ -128,7 +147,10 @@ function isOutboundReplyRequestedJob(value: unknown): value is OutboundReplyRequ
     (typeof candidate.text === "string" || typeof candidate.html === "string") &&
     (candidate.headers === undefined || isStringRecord(candidate.headers)) &&
     (candidate.attachments === undefined || isAttachmentArray(candidate.attachments)) &&
+    (candidate.policySha256 === undefined ||
+      (typeof candidate.policySha256 === "string" && /^[a-f0-9]{64}$/.test(candidate.policySha256))) &&
     (candidate.relayAttemptId === undefined || typeof candidate.relayAttemptId === "string") &&
+    (candidate.relayAttemptId === undefined || typeof candidate.policySha256 === "string") &&
     (candidate.relaySpoolKey === undefined || typeof candidate.relaySpoolKey === "string") &&
     typeof candidate.queuedAt === "string" &&
     (candidate.requestedIdentity === undefined || typeof candidate.requestedIdentity === "string")
@@ -140,8 +162,12 @@ async function processInboxReply(
   env: Env,
   attempt: number,
 ): Promise<QueueDisposition> {
+  if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
+    await recoverRelayAttempt(job, env, "relay_storage_unavailable");
+    return ACK;
+  }
   const relay = await env.DB.prepare(
-    "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id WHERE rr.id = ?1 LIMIT 1",
+    "SELECT rr.id, rr.thread_id, rr.external_recipient, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE rr.id = ?1 AND ar.enabled = 1 LIMIT 1",
   )
     .bind(job.relayId)
     .first<ReplyRelayJobRow>();
@@ -154,12 +180,12 @@ async function processInboxReply(
     return ACK;
   }
 
-  const policy = await loadPolicy(env);
-  if (!policy) {
+  const activePolicy = await loadActivePolicy(env);
+  if (!activePolicy) {
     await recoverRelayAttempt(job, env, "policy_unavailable");
     return ACK;
   }
-  const authorization = authorizeReplyWithPolicy(policy, {
+  const authorization = authorizeReplyWithPolicy(activePolicy.policy, {
     envelopeTo: relay.route_address,
     operator: job.operator,
     requestedIdentity: relay.reply_identity,
@@ -169,7 +195,24 @@ async function processInboxReply(
     return ACK;
   }
 
-  const object = await env.RAW_MAIL.get(job.rawR2Key);
+  const claimedAttempt = await env.DB.prepare(
+    CLAIMED_REPLY_SPOOL_SQL,
+  )
+    .bind(
+      job.attemptId,
+      job.relayId,
+      job.operator,
+      job.operatorMessageId,
+      job.rawR2Key,
+      job.rawSha256,
+    )
+    .first<{ id: string }>();
+  if (!claimedAttempt) {
+    await failRelayAttempt(job, env, "relay_attempt_integrity_mismatch");
+    return ACK;
+  }
+
+  const object = await env.RELAY_SPOOL.get(job.rawR2Key);
   if (!object) {
     await recoverRelayAttempt(job, env, "relay_spool_missing");
     return ACK;
@@ -180,9 +223,19 @@ async function processInboxReply(
     return ACK;
   }
 
+  if (!/^[a-f0-9]{64}$/.test(job.rawSha256)) {
+    await failRelayAttempt(job, env, "relay_spool_digest_invalid");
+    return ACK;
+  }
+  const rawBytes = await object.arrayBuffer();
+  if ((await sha256Hex(rawBytes)) !== job.rawSha256) {
+    await failRelayAttempt(job, env, "relay_spool_digest_mismatch");
+    return ACK;
+  }
+
   let parsed: Awaited<ReturnType<typeof parseRelayEmail>>;
   try {
-    parsed = await parseRelayEmail(await object.arrayBuffer());
+    parsed = await parseRelayEmail(rawBytes);
   } catch {
     await failRelayAttempt(job, env, "reply_mime_invalid");
     return ACK;
@@ -192,7 +245,13 @@ async function processInboxReply(
     return ACK;
   }
 
-  const payload = outboundReplyPayload(parsed);
+  let payload: ReturnType<typeof outboundReplyPayload>;
+  try {
+    payload = outboundReplyPayload(parsed);
+  } catch {
+    await failRelayAttempt(job, env, "reply_plaintext_required");
+    return ACK;
+  }
   try {
     assertWithinRelayLimit(payload, config);
   } catch {
@@ -216,7 +275,7 @@ async function processInboxReply(
     .run();
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "inbox_reply_authorized",
     { attemptId: job.attemptId, relayId: job.relayId, fromIdentity: relay.reply_identity },
     `${job.attemptId}:inbox_reply_authorized`,
@@ -238,6 +297,7 @@ async function processInboxReply(
     headers,
     attachments: payload.attachments,
     requestedIdentity: relay.reply_identity,
+    policySha256: activePolicy.sha256,
     relayAttemptId: job.attemptId,
     relaySpoolKey: job.rawR2Key,
     queuedAt: job.receivedAt,
@@ -291,13 +351,17 @@ async function recordQueueEvent(
   if (job.kind === "inbox_reply_received") {
     return processInboxReply(job, env, attempt);
   }
+  if (job.kind === "inbound_delivery_result") {
+    await projectInboundDeliveryResult(job, env);
+    return ACK;
+  }
   const base = dedupeBase(job);
 
   const claimed = await recordAuditEvent(
     env,
     "system",
     job.kind,
-    auditDetailForJob(job, env),
+    await auditDetailForJob(job, env),
     base ? `${base}:${job.kind}` : undefined,
     jobThreadId(job),
   );
@@ -311,11 +375,17 @@ async function recordQueueEvent(
   // expose an equivalent key, so an interrupted transition is surfaced for
   // deliberate recovery instead of risking a duplicate send.
   if (!claimed) {
-    const terminalAction = await auditActionForDedupeKey(
+    const terminal = await terminalSendRecordForDedupeKey(
       env,
       `${job.messageId}:outbound_reply_result`,
     );
-    if (terminalAction) return ACK;
+    if (terminal) {
+      // The provider transition is already terminal. Resume only the
+      // idempotent D1 projections and spool cleanup that may have been
+      // interrupted after the terminal audit was committed.
+      await finalizeTerminalSendState(job, env, terminal.action, terminal.result);
+      return ACK;
+    }
 
     const currentMode = configuredOutboundMode(env);
     const claimedMode = await auditOutboundModeForClaim(
@@ -338,7 +408,7 @@ async function recordQueueEvent(
 
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "outbound_reply_authorized",
     {
       messageId: job.messageId,
@@ -352,7 +422,7 @@ async function recordQueueEvent(
 
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     "outbound_reply_send_attempted",
     {
       messageId: job.messageId,
@@ -381,7 +451,7 @@ async function recordQueueEvent(
     const delaySeconds = retryDelaySeconds(attempt);
     await recordAuditEvent(
       env,
-      job.operator,
+      await auditOperator(env, job.operator),
       "outbound_reply_retry_scheduled",
       {
         messageId: job.messageId,
@@ -400,7 +470,231 @@ async function recordQueueEvent(
   }
 
   await recordTerminalSendEvent(job, env, "outbound_reply_failed", sendResult);
-  return ACK;
+  // With the production consumer's max_retries = 5, requesting retry on the
+  // sixth total attempt transfers this already-recorded terminal failure to
+  // the configured DLQ. Definitive non-retryable failures are complete and can
+  // be acknowledged without entering recovery triage.
+  return sendResult.retryable ? { kind: "retry", delaySeconds: 0 } : ACK;
+}
+
+async function projectInboundDeliveryResult(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const claimed = await loadClaimedInboundResult(job, env);
+  if (!claimed) {
+    if (await inboundCleanupAlreadyComplete(job, env)) return;
+    throw new Error("inbound result does not match its durable delivery claim");
+  }
+  const acceptedCount = job.results.filter((result) => result.ok).length;
+  const providerMessageIds = job.results.flatMap((result) =>
+    result.providerMessageId ? [result.providerMessageId] : []
+  );
+  const projected = await env.DB.prepare(
+    "UPDATE route_health SET inbound_status = CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END, last_inbound_provider_accepted_at = CASE WHEN ?2 > 0 THEN CURRENT_TIMESTAMP ELSE last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ?2 > 0 THEN ?3 ELSE last_inbound_provider_message_ids_json END, last_error_code = ?4, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?5 AND policy_sha256 = ?6 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?6)",
+  )
+    .bind(
+      job.status,
+      acceptedCount,
+      JSON.stringify(providerMessageIds),
+      job.status === "provider_accepted" ? null : job.status,
+      job.routeId,
+      job.policySha256,
+    )
+    .run();
+  if (Number(projected.meta?.changes ?? 0) === 0) {
+    const runtime = await env.DB.prepare(
+      "SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1",
+    ).first<{ active_policy_sha256: string }>();
+    if (!runtime?.active_policy_sha256 || runtime.active_policy_sha256 === job.policySha256) {
+      throw new Error("active route health revision is unavailable for inbound result projection");
+    }
+    await recordAuditEvent(
+      env,
+      "system",
+      "operator_delivery_result_superseded",
+      {
+        deliveryId: job.deliveryId,
+        relayId: job.relayId,
+        routeId: job.routeId,
+        policySha256: job.policySha256,
+        acceptedCount,
+        failedCount: job.results.length - acceptedCount,
+        providerMessageIds,
+      },
+      `${job.deliveryId}:operator_delivery_result_superseded`,
+      job.threadId,
+    );
+    await persistInboundDeliveryProjection(job, env);
+    await deleteAcceptedInboundPayloads(claimed.acceptedPayloadKeys, env);
+    if (job.status === "provider_accepted") {
+      if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+      await env.RELAY_SPOOL.delete(claimed.rawR2Key);
+      await recordInboundCleanupComplete(job, env);
+      await clearInboundCleanupAuthority(job, env);
+    }
+    return;
+  }
+  for (const [index, result] of job.results.entries()) {
+    await recordAuditEvent(
+      env,
+      "system",
+      result.ok ? "operator_delivery_recipient_provider_accepted" : "operator_delivery_recipient_recovery_required",
+      {
+        deliveryId: job.deliveryId,
+        relayId: job.relayId,
+        operatorRef: result.operatorRef,
+        providerMessageId: result.providerMessageId,
+        errorCode: result.errorCode,
+      },
+      `${job.deliveryId}:operator_delivery:${index}`,
+      job.threadId,
+    );
+  }
+  await recordAuditEvent(
+    env,
+    "system",
+    job.status === "provider_accepted" ? "operator_delivery_provider_accepted" : job.status,
+    {
+      deliveryId: job.deliveryId,
+      relayId: job.relayId,
+      acceptedCount,
+      failedCount: job.results.length - acceptedCount,
+      providerMessageIds,
+      recoverySpool: true,
+    },
+    `${job.deliveryId}:operator_delivery_result`,
+    job.threadId,
+  );
+  await persistInboundDeliveryProjection(job, env);
+  await deleteAcceptedInboundPayloads(claimed.acceptedPayloadKeys, env);
+  if (job.status === "provider_accepted") {
+    if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+    await env.RELAY_SPOOL.delete(claimed.rawR2Key);
+    await recordInboundCleanupComplete(job, env);
+    await clearInboundCleanupAuthority(job, env);
+  }
+}
+
+async function persistInboundDeliveryProjection(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const projected = await env.DB.prepare(PERSIST_INBOUND_DELIVERY_PROJECTION_SQL)
+    .bind(job.status, job.deliveryId, job.policySha256).run();
+  if (Number(projected.meta?.changes ?? 0) !== 1) {
+    throw new Error("inbound result delivery projection lost its durable claim");
+  }
+}
+
+async function clearInboundCleanupAuthority(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const cleared = await env.DB.prepare(CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL)
+    .bind(job.deliveryId, job.policySha256, job.relaySpoolKey).run();
+  if (Number(cleared.meta?.changes ?? 0) !== 1) {
+    throw new Error("inbound result cleanup authority could not be retired");
+  }
+}
+
+async function recordInboundCleanupComplete(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const inserted = await recordAuditEvent(
+    env,
+    "system",
+    "operator_delivery_cleanup_complete",
+    { deliveryId: job.deliveryId, resultSha256: await inboundResultSha256(job) },
+    `${job.deliveryId}:operator_delivery_cleanup_complete`,
+    job.threadId,
+  );
+  if (!inserted && !(await inboundCleanupAlreadyComplete(job, env))) {
+    throw new Error("inbound result cleanup receipt conflicts with durable state");
+  }
+}
+
+async function inboundCleanupAlreadyComplete(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT action, detail_json FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+  ).bind(`${job.deliveryId}:operator_delivery_cleanup_complete`).first<{
+    action: string;
+    detail_json: string;
+  }>();
+  if (row?.action !== "operator_delivery_cleanup_complete") return false;
+  try {
+    const detail = JSON.parse(row.detail_json) as Record<string, unknown>;
+    return detail.deliveryId === job.deliveryId &&
+      detail.resultSha256 === await inboundResultSha256(job);
+  } catch {
+    return false;
+  }
+}
+
+async function inboundResultSha256(job: InboundDeliveryResultJob): Promise<string> {
+  const results = job.results.map((result) => ({
+    operatorRef: result.operatorRef,
+    deliveryPayloadR2Key: result.deliveryPayloadR2Key,
+    ok: result.ok,
+    providerMessageId: result.providerMessageId ?? null,
+    errorCode: result.errorCode ?? null,
+  })).sort((left, right) =>
+    left.operatorRef.localeCompare(right.operatorRef) ||
+    left.deliveryPayloadR2Key.localeCompare(right.deliveryPayloadR2Key)
+  );
+  return sha256Hex(JSON.stringify({
+    deliveryId: job.deliveryId,
+    relayId: job.relayId,
+    threadId: job.threadId,
+    routeId: job.routeId,
+    policySha256: job.policySha256,
+    status: job.status,
+    results,
+    relaySpoolKey: job.relaySpoolKey,
+    receivedAt: job.receivedAt,
+  }));
+}
+
+async function deleteAcceptedInboundPayloads(
+  keys: string[],
+  env: Env,
+): Promise<void> {
+  if (keys.length === 0) return;
+  if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+  for (const key of keys) await env.RELAY_SPOOL.delete(key);
+}
+
+async function loadClaimedInboundResult(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<{ rawR2Key: string; acceptedPayloadKeys: string[] } | null> {
+  const resultsJson = JSON.stringify(job.results);
+  const row = await env.DB.prepare(CLAIMED_INBOUND_RESULT_SQL)
+    .bind(
+      job.deliveryId,
+      job.relayId,
+      job.threadId,
+      job.routeId,
+      job.policySha256,
+      job.relaySpoolKey,
+      resultsJson,
+      job.receivedAt,
+      job.status,
+    )
+    .first<{ raw_r2_key: string; accepted_payload_keys_json: string }>();
+  if (!row?.raw_r2_key) return null;
+  let keys: unknown;
+  try {
+    keys = JSON.parse(row.accepted_payload_keys_json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(keys) || !keys.every((key) => typeof key === "string")) return null;
+  return { rawR2Key: row.raw_r2_key, acceptedPayloadKeys: keys };
 }
 
 async function recordTerminalSendEvent(
@@ -411,7 +705,7 @@ async function recordTerminalSendEvent(
 ): Promise<void> {
   await recordAuditEvent(
     env,
-    job.operator,
+    await auditOperator(env, job.operator),
     action,
     {
       messageId: job.messageId,
@@ -423,7 +717,17 @@ async function recordTerminalSendEvent(
     `${job.messageId}:outbound_reply_result`,
     job.threadId,
   );
+  await finalizeTerminalSendState(job, env, action, result);
+}
+
+async function finalizeTerminalSendState(
+  job: OutboundReplyRequestedJob,
+  env: Env,
+  action: TerminalSendAction,
+  result: OutboundSendResult,
+): Promise<void> {
   if (job.relayAttemptId) {
+    if (!job.policySha256) throw new Error("relay terminal result is missing policy authority");
     const status = action === "outbound_reply_delivered"
       ? "provider_accepted"
       : action === "outbound_reply_recovery_required"
@@ -434,13 +738,50 @@ async function recordTerminalSendEvent(
     )
       .bind(status, result.providerMessageId ?? null, result.error ? status : null, job.relayAttemptId)
       .run();
-    await env.DB.prepare(
-      "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_error_code = ?2, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?3)",
+    const projected = await env.DB.prepare(
+      "UPDATE route_health SET reply_status = CASE WHEN ?1 = 'provider_accepted' AND reply_status = 'reply_verified' THEN reply_status ELSE ?1 END, last_reply_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_at END, last_reply_provider_accepted_at = CASE WHEN ?1 = 'provider_accepted' THEN CURRENT_TIMESTAMP ELSE last_reply_provider_accepted_at END, last_reply_provider_message_id = CASE WHEN ?1 = 'provider_accepted' THEN ?2 ELSE last_reply_provider_message_id END, last_error_code = ?3, updated_at = CURRENT_TIMESTAMP WHERE route_id = (SELECT rr.route_id FROM relay_attempts ra JOIN reply_relays rr ON rr.id = ra.relay_id WHERE ra.id = ?4) AND policy_sha256 = ?5 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?5)",
     )
-      .bind(status, result.error ? status : null, job.relayAttemptId)
+      .bind(
+        status,
+        result.providerMessageId ?? null,
+        result.error ? status : null,
+        job.relayAttemptId,
+        job.policySha256,
+      )
       .run();
+    if (Number(projected.meta?.changes ?? 0) === 0) {
+      const runtime = await env.DB.prepare(
+        "SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1",
+      ).first<{ active_policy_sha256: string }>();
+      if (!runtime?.active_policy_sha256 || runtime.active_policy_sha256 === job.policySha256) {
+        throw new Error("active route health revision is unavailable for terminal reply projection");
+      }
+      await recordAuditEvent(
+        env,
+        "system",
+        "outbound_reply_result_superseded",
+        {
+          messageId: job.messageId,
+          threadId: job.threadId,
+          relayAttemptId: job.relayAttemptId,
+          policySha256: job.policySha256,
+          result: auditSendResult(result),
+        },
+        `${job.messageId}:outbound_reply_result_superseded`,
+        job.threadId,
+      );
+      if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
+        if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+        await env.RELAY_SPOOL.delete(job.relaySpoolKey);
+        await env.DB.prepare(
+          "UPDATE relay_attempts SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        ).bind(job.relayAttemptId).run();
+      }
+      return;
+    }
     if (action === "outbound_reply_delivered" && job.relaySpoolKey) {
-      await env.RAW_MAIL.delete(job.relaySpoolKey);
+      if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
+      await env.RELAY_SPOOL.delete(job.relaySpoolKey);
       await env.DB.prepare(
         "UPDATE relay_attempts SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
       )
@@ -450,13 +791,53 @@ async function recordTerminalSendEvent(
   }
 }
 
-async function auditActionForDedupeKey(env: Env, dedupeKey: string): Promise<string | null> {
+async function terminalSendRecordForDedupeKey(
+  env: Env,
+  dedupeKey: string,
+): Promise<{ action: TerminalSendAction; result: OutboundSendResult } | null> {
   const row = await env.DB.prepare(
-    "SELECT action FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+    "SELECT action, detail_json FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
   )
     .bind(dedupeKey)
-    .first<{ action: string }>();
-  return row?.action ?? null;
+    .first<{ action: string; detail_json: string }>();
+  if (!row) return null;
+  if (!isTerminalSendAction(row.action)) {
+    throw new Error("outbound terminal audit action is invalid");
+  }
+  let detail: unknown;
+  try {
+    detail = JSON.parse(row.detail_json);
+  } catch {
+    throw new Error("outbound terminal audit detail is invalid");
+  }
+  if (!detail || typeof detail !== "object" || !("result" in detail)) {
+    throw new Error("outbound terminal audit result is missing");
+  }
+  const result = (detail as { result: unknown }).result;
+  if (!isStoredOutboundSendResult(result)) {
+    throw new Error("outbound terminal audit result is invalid");
+  }
+  return { action: row.action, result };
+}
+
+function isTerminalSendAction(value: string): value is TerminalSendAction {
+  return value === "outbound_reply_delivered" ||
+    value === "outbound_reply_failed" ||
+    value === "outbound_reply_recovery_required";
+}
+
+function isStoredOutboundSendResult(value: unknown): value is OutboundSendResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.ok === "boolean" &&
+    typeof result.provider === "string" &&
+    (result.providerMessageId === undefined || typeof result.providerMessageId === "string") &&
+    (result.error === undefined || typeof result.error === "string") &&
+    (result.status === undefined || typeof result.status === "number") &&
+    (result.retryable === undefined || typeof result.retryable === "boolean") &&
+    (result.ambiguous === undefined || typeof result.ambiguous === "boolean")
+  );
 }
 
 async function auditOutboundModeForClaim(env: Env, dedupeKey: string): Promise<string | null> {
@@ -497,13 +878,16 @@ function jobThreadId(job: MailJob): string | undefined {
   return undefined;
 }
 
-function auditDetailForJob(job: MailJob, env: Env): unknown {
+async function auditDetailForJob(job: MailJob, env: Env): Promise<unknown> {
+  const operator = "operator" in job
+    ? await auditOperator(env, job.operator)
+    : undefined;
   if (job.kind === "inbox_reply_received") {
     return {
       kind: job.kind,
       attemptId: job.attemptId,
       relayId: job.relayId,
-      operator: job.operator,
+      operator,
       operatorMessageId: job.operatorMessageId,
       receivedAt: job.receivedAt,
     };
@@ -514,7 +898,7 @@ function auditDetailForJob(job: MailJob, env: Env): unknown {
     kind: job.kind,
     messageId: job.messageId,
     threadId: job.threadId,
-    operator: job.operator,
+    operator,
     envelopeTo: job.envelopeTo,
     fromIdentity: job.fromIdentity,
     to: job.to,
@@ -593,21 +977,7 @@ function isAttachmentArray(value: unknown): boolean {
 }
 
 async function loadPolicy(env: Env): Promise<RouterPolicy | null> {
-  const policyJson = env.MAILDESK_POLICY_JSON ?? (await loadPolicyFromR2(env));
-  if (!policyJson) return null;
-  // Malformed policy JSON must not 500; return null so callers emit a clean
-  // 503 policy_unavailable (mirrors the router's fail-closed handling).
-  try {
-    return JSON.parse(policyJson) as RouterPolicy;
-  } catch {
-    return null;
-  }
-}
-
-async function loadPolicyFromR2(env: Env): Promise<string | null> {
-  if (!env.MAILDESK_POLICY_R2_KEY) return null;
-  const policyObject = await env.RAW_MAIL.get(env.MAILDESK_POLICY_R2_KEY);
-  return policyObject?.text() ?? null;
+  return (await loadActivePolicy(env))?.policy ?? null;
 }
 
 async function sendOutboundReply(
@@ -627,6 +997,20 @@ async function sendOutboundReply(
   const verifiedDomain = senderDomain(job.fromIdentity);
   if (!isVerifiedSenderDomain(verifiedDomain, env)) {
     return { ok: false, provider: mode, error: "sender domain is not verified" };
+  }
+
+  if (operatorDeliveryConfig(env).mode === "inbox_relay") {
+    const activePolicy = await loadActivePolicy(env);
+    if (!activePolicy) {
+      return { ok: false, provider: mode, error: "active policy is unavailable" };
+    }
+    if (job.relayAttemptId && activePolicy.sha256 !== job.policySha256) {
+      return { ok: false, provider: mode, error: "relay policy revision is no longer active" };
+    }
+    const privacyFailure = outboundPrivacyFailure(job, activePolicy.policy);
+    if (privacyFailure) {
+      return { ok: false, provider: mode, error: privacyFailure };
+    }
   }
 
   if (mode === "cloudflare_email_service") {
@@ -750,6 +1134,68 @@ function senderDomain(address: string): string {
   return parsed?.domain ?? "";
 }
 
+function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPolicy): string | null {
+  // Opaque outbound attachments cannot be proven free of operator identities:
+  // an address may be compressed, embedded in document structure, image metadata,
+  // or encoded in a format that a byte/text scan cannot interpret. Fail closed
+  // until a format-aware attachment policy exists.
+  if ((job.attachments?.length ?? 0) > 0) {
+    return "outbound attachments are disabled until format-aware privacy inspection is configured";
+  }
+  const operators = new Set<string>();
+  for (const domain of Object.values(policy.domains)) {
+    for (const route of Object.values(domain.role_aliases)) {
+      for (const operator of route.operators) operators.add(normalizeMailbox(operator));
+    }
+    for (const route of Object.values(domain.personal_aliases)) operators.add(normalizeMailbox(route.operator));
+    for (const operator of domain.catch_all?.operators ?? []) operators.add(normalizeMailbox(operator));
+  }
+  const outwardHeaders = canonicalConversationHeaders(job);
+  const visible = [
+    job.fromIdentity,
+    job.replyTo ?? job.fromIdentity,
+    ...job.to,
+    ...(job.cc ?? []),
+    ...(job.bcc ?? []),
+    job.subject,
+    job.text ?? "",
+    job.html ?? "",
+    htmlVisibleText(job.html ?? ""),
+    ...Object.entries(outwardHeaders).flat(),
+  ].map(normalizedVisibleValue);
+  return [...operators].some((operator) => {
+    const protectedIdentity = normalizedVisibleValue(operator);
+    return protectedIdentity && visible.some((value) => value.includes(protectedIdentity));
+  })
+    ? "outbound content contains a private operator identity"
+    : null;
+}
+
+function htmlVisibleText(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
+    .replace(/<[^>]*>/g, "");
+}
+
+function normalizedVisibleValue(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&commat;/gi, "@")
+    .replace(/&period;/gi, ".")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+}
+
+async function auditOperator(env: Env, operator: string): Promise<string> {
+  return operatorDeliveryConfig(env).mode === "inbox_relay"
+    ? `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`
+    : operator;
+}
+
 function parseMailbox(address: string): ParsedMailbox | null {
   const normalized = normalizeMailbox(address);
   const atIndex = normalized.lastIndexOf("@");
@@ -841,6 +1287,11 @@ interface OutboundSendResult {
   ambiguous?: boolean;
   response?: unknown;
 }
+
+type TerminalSendAction =
+  | "outbound_reply_delivered"
+  | "outbound_reply_failed"
+  | "outbound_reply_recovery_required";
 
 type QueueDisposition = { kind: "ack" } | { kind: "retry"; delaySeconds: number };
 type OutboundMode = "disabled" | "cloudflare_email_service" | "resend" | "invalid";

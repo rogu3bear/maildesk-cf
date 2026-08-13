@@ -1,0 +1,89 @@
+import { expect, test } from "bun:test";
+
+import { loadActivePolicy } from "../../workers/shared/policy-store";
+
+const policyJson = JSON.stringify({
+  default_reply_mode: "role_first",
+  domains: {
+    "example.com": {
+      role_aliases: {
+        founders: {
+          operators: ["operator@example.com"],
+          reply_identity: "founders@example.com",
+        },
+      },
+      personal_aliases: {},
+    },
+  },
+});
+
+test("inbox relay loads only the exact D1-selected immutable policy", async () => {
+  const digest = await sha256(policyJson);
+  const key = `config/policy/${digest}.json`;
+  const env = policyEnv({ digest, key, policyJson, projectedRoutes: 1, expectedRoutes: 1 });
+
+  const active = await loadActivePolicy(env as never);
+
+  expect(active?.sha256).toBe(digest);
+  expect(active?.r2ObjectKey).toBe(key);
+  expect(Object.keys(active?.policy.domains ?? {})).toEqual(["example.com"]);
+});
+
+test("inbox relay fails closed on D1, projection, key, or R2 digest drift", async () => {
+  const digest = await sha256(policyJson);
+  const key = `config/policy/${digest}.json`;
+  const cases = [
+    policyEnv({ digest, key: "config/policy/wrong.json", policyJson, projectedRoutes: 1, expectedRoutes: 1 }),
+    policyEnv({ digest, key, policyJson, projectedRoutes: 0, expectedRoutes: 1 }),
+    policyEnv({ digest, key, policyJson, projectedRoutes: 2, expectedRoutes: 2 }),
+    policyEnv({ digest, key, policyJson: `${policyJson} `, projectedRoutes: 1, expectedRoutes: 1 }),
+  ];
+
+  for (const env of cases) {
+    expect(await loadActivePolicy(env as never)).toBeNull();
+  }
+});
+
+test("inline policy is never accepted in inbox relay mode", async () => {
+  expect(await loadActivePolicy({
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+    MAILDESK_POLICY_JSON: policyJson,
+    DB: {} as D1Database,
+  } as never)).toBeNull();
+});
+
+function policyEnv(input: {
+  digest: string;
+  key: string;
+  policyJson: string;
+  projectedRoutes: number;
+  expectedRoutes: number;
+}) {
+  return {
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+    DB: {
+      prepare: () => ({
+        first: async () => ({
+          active_policy_sha256: input.digest,
+          active_policy_r2_key: input.key,
+          revision_sha256: input.digest,
+          revision_r2_key: input.key,
+          expected_domain_count: 1,
+          expected_route_count: input.expectedRoutes,
+          projected_route_count: input.projectedRoutes,
+          projected_domain_count: 1,
+        }),
+      }),
+    },
+    POLICY_STORE: {
+      get: async (key: string) => key === input.key
+        ? { arrayBuffer: async () => new TextEncoder().encode(input.policyJson).buffer }
+        : null,
+    },
+  };
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}

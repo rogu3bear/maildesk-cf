@@ -102,27 +102,27 @@ Domain-consistent replies are covered in
 - R2
 - Queues
 
-The HTTP API Worker uses `wrangler.toml`. The inbound Email Worker uses
-`deploy/mail-router/wrangler.toml`. The Leptos operator experience uses
-`deploy/ui/wrangler.toml`, with public explanatory routes and Cloudflare
-Access-protected `/desk` and `/desk/api` routes. Production resource creation
-should still be driven by `cfctl`; these files document and typecheck the
-app-side bindings.
+The generic legacy web-desk Worker remains available through `wrangler.toml`.
+Inbox relay uses three isolated deployment targets: the Email router at
+`deploy/mail-router/wrangler.toml`, the queue-only outbound consumer at
+`deploy/mail-outbound/wrangler.toml`, and the D1-plus-assets routing-health UI
+at `deploy/routing-health/wrangler.toml`. Production resource creation remains
+governed by `cfctl`; these files document and typecheck the app-side binding
+boundary.
 
 The routing-health dashboard exposes declared provider state and proof status,
 never subjects, message bodies, attachments, thread history, or a composer.
 When `MAILDESK_OPERATOR_DELIVERY_MODE=inbox_relay`, `/desk/thread/:id` and web
 reply submission fail closed. The legacy shared-token `POST /api/replies` surface is disabled by default with
-`MAILDESK_REPLY_API_MODE=disabled`. The Access-protected Leptos desk is the
-normal human reply path. Enable `token` mode only for an explicitly
-service-bound integration and provision one of the documented API tokens.
+`MAILDESK_REPLY_API_MODE=disabled`. The existing Google-hosted operator inbox
+is the normal human reading and reply path. Enable `token` mode only for an
+explicitly service-bound generic web-desk integration.
 
-For a dark deployment, keep `MAILDESK_RELAY_PROCESSING_MODE=disabled`. The
-Email Worker then rejects both new inbox-relay deliveries and opaque-token
-replies without forwarding, persisting, or enqueueing them. Enable it only in
-the separately reviewed canary transaction after the candidate Worker is bound
-to the intended route and its D1, R2, Queue, Email Service, and sender-domain
-readbacks are exact.
+For a dark deployment, keep both `MAILDESK_INBOUND_RELAY_MODE=disabled` and
+`MAILDESK_REPLY_RELAY_MODE=disabled`. This allows bindings and route-health
+state to be proven before the separately reviewed canary first enables inbound
+processing and later enables reply processing. The deprecated single switch is
+accepted only when neither split switch is supplied.
 
 Optional fallback sender adapters can be added later. The default path should
 remain Cloudflare-first.
@@ -148,6 +148,7 @@ CFCTL_BIN=/path/to/cfctl bun run receipt:maildesk -- --summary var/maildesk-rece
 CFCTL_BIN=/path/to/cfctl bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 bun run verify:maildesk
 bun run check:cfctl-provisioning
+bun run plan:dark
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
 bun run check:maildesk-closeout -- --env-file .dev.vars --summary var/maildesk-receipt-summary.json --redact-sensitive --json
 bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
@@ -163,14 +164,17 @@ Cloudflare account state.
 For a local edge-rendered preview of the public site and empty operator state:
 
 ```bash
-bunx wrangler dev --config deploy/ui/wrangler.toml --local --port 8788 \
+bunx wrangler dev --config deploy/routing-health/wrangler.toml --local --port 8788 \
   --var MAILDESK_UI_AUTH_MODE:preview
 ```
 
-Preview mode is local-only. Production must keep `workers_dev = false`, protect
-`/desk*` with Cloudflare Access, retain `MAILDESK_UI_AUTH_MODE = "access"`, and
-provide `MAILDESK_ACCESS_TEAM_DOMAIN` plus `MAILDESK_ACCESS_AUD` so the Worker
-can validate the Access JWT signature, issuer, audience, and expiry.
+Preview mode is local-only. Production must keep `workers_dev = false`, retain
+`MAILDESK_UI_AUTH_MODE = "access"`, and provide
+`MAILDESK_ACCESS_TEAM_DOMAIN` plus `MAILDESK_ACCESS_AUD` so the Worker can
+validate the Access JWT signature, issuer, audience, and expiry. Generic public
+deployments may select `MAILDESK_UI_ACCESS_SCOPE=desk_only`; private routing
+instances select `all_routes`, which protects the entire hostname including
+static assets in both the edge adapter and Rust server.
 
 The Worker gates build the Rust router automatically. Generated WASM stays
 ignored under `generated/router-wasm/`; both Wrangler targets run the same
@@ -186,6 +190,10 @@ against the `cfctl maildesk-cf` schema and emits the non-mutating
 plan/ack/verify handoff. It proves this checkout has a provisioning lane input;
 it does not install `cfctl`, supply account credentials, acknowledge a preview,
 or mutate Cloudflare.
+`bun run plan:dark` emits the two-stage, source-hash-bound dark-deployment
+blueprint described in
+[docs/operations/dark-deployment.md](docs/operations/dark-deployment.md). It
+does not create child operation IDs or perform any Cloudflare action.
 `bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
 workflow and writes the receipt artifacts under `var/`. Pass
 `--summary <path>` to persist the compact readiness handoff JSON. Pass

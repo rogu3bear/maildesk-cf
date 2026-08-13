@@ -1,6 +1,8 @@
 export interface MaildeskEnv {
   DB: D1Database;
   RAW_MAIL: R2Bucket;
+  POLICY_STORE?: R2Bucket;
+  RELAY_SPOOL?: R2Bucket;
   MAIL_JOBS: Queue<MailJob>;
   EMAIL?: SendEmail;
   RESEND_API_KEY?: string;
@@ -9,10 +11,12 @@ export interface MaildeskEnv {
   MAILDESK_REPLY_API_MODE?: "disabled" | "token";
   MAILDESK_OUTBOUND_MODE?: "disabled" | "cloudflare_email_service" | "resend";
   MAILDESK_POLICY_JSON?: string;
-  MAILDESK_POLICY_R2_KEY?: string;
   MAILDESK_VERIFIED_SENDER_DOMAINS?: string;
   MAILDESK_OPERATOR_DELIVERY_MODE?: "web_desk" | "inbox_relay";
+  /** @deprecated Compatibility input. Do not combine with either split switch. */
   MAILDESK_RELAY_PROCESSING_MODE?: "disabled" | "enabled";
+  MAILDESK_INBOUND_RELAY_MODE?: "disabled" | "enabled";
+  MAILDESK_REPLY_RELAY_MODE?: "disabled" | "enabled";
   MAILDESK_REPLY_DOMAIN?: string;
   MAILDESK_REPLY_TOKEN_TTL_DAYS?: string;
   MAILDESK_SPOOL_RETENTION_DAYS?: string;
@@ -22,6 +26,7 @@ export interface MaildeskEnv {
 export type MailJob =
   | InboundEmailReceivedJob
   | InboundEmailPersistedJob
+  | InboundDeliveryResultJob
   | InboxReplyReceivedJob
   | OutboundReplyRequestedJob;
 
@@ -29,7 +34,8 @@ export type OperatorDeliveryMode = "web_desk" | "inbox_relay" | "invalid";
 
 export interface OperatorDeliveryConfig {
   mode: OperatorDeliveryMode;
-  processingMode: "disabled" | "enabled" | "invalid";
+  inboundProcessingMode: "disabled" | "enabled" | "invalid";
+  replyProcessingMode: "disabled" | "enabled" | "invalid";
   replyDomain: string | null;
   replyTokenTtlDays: number;
   spoolRetentionDays: number;
@@ -57,6 +63,7 @@ export interface RouteHealthSummary {
   observedProvider?: string;
   operatorCount: number;
   replyIdentity: string;
+  policySha256?: string;
   inboundStatus: RouteProofStatus;
   replyStatus: RouteProofStatus;
   lastInboundAt?: string;
@@ -66,6 +73,16 @@ export interface RouteHealthSummary {
   lastReplyProviderAcceptedAt?: string;
   lastReplyVerifiedAt?: string;
   lastErrorCode?: string;
+}
+
+export interface OperatorAuthenticationResult {
+  status: "verified" | "rejected" | "indeterminate";
+  method: "dkim";
+  signingDomain?: string;
+  selectorHash?: string;
+  alignedOperatorId?: string;
+  boundedErrorCode?: string;
+  verifiedAt: string;
 }
 
 export interface InboundEmailReceivedJob {
@@ -98,6 +115,26 @@ export interface InboundEmailPersistedJob {
   queuedAt: string;
 }
 
+export interface InboundDeliveryResultJob {
+  kind: "inbound_delivery_result";
+  deliveryId: string;
+  relayId: string;
+  threadId: string;
+  routeId: string;
+  /** Immutable policy revision that authorized the provider delivery. */
+  policySha256: string;
+  status: "provider_accepted" | "partial_delivery" | "recovery_required" | "failed";
+  results: Array<{
+    operatorRef: string;
+    deliveryPayloadR2Key: string;
+    ok: boolean;
+    providerMessageId?: string;
+    errorCode?: string;
+  }>;
+  relaySpoolKey: string;
+  receivedAt: string;
+}
+
 export interface InboxReplyReceivedJob {
   kind: "inbox_reply_received";
   attemptId: string;
@@ -105,6 +142,8 @@ export interface InboxReplyReceivedJob {
   operator: string;
   operatorMessageId: string;
   rawR2Key: string;
+  /** SHA-256 of the exact RFC 822 bytes authenticated before spooling. */
+  rawSha256: string;
   receivedAt: string;
 }
 
@@ -141,6 +180,8 @@ export interface OutboundReplyRequestedJob {
   headers?: Record<string, string>;
   attachments?: MailAttachmentPayload[];
   requestedIdentity?: string;
+  /** Active policy revision that authorized an inbox-relay provider send. */
+  policySha256?: string;
   relayAttemptId?: string;
   relaySpoolKey?: string;
   queuedAt: string;
@@ -192,12 +233,15 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
       ? "inbox_relay"
       : "invalid";
   const replyDomain = normalizeDomain(env.MAILDESK_REPLY_DOMAIN);
-  const configuredProcessingMode = env.MAILDESK_RELAY_PROCESSING_MODE as string | undefined;
-  const processingMode = configuredProcessingMode === undefined || configuredProcessingMode === "disabled"
-    ? "disabled"
-    : configuredProcessingMode === "enabled"
-      ? "enabled"
-      : "invalid";
+  const legacyMode = env.MAILDESK_RELAY_PROCESSING_MODE as string | undefined;
+  const hasSplitMode = env.MAILDESK_INBOUND_RELAY_MODE !== undefined || env.MAILDESK_REPLY_RELAY_MODE !== undefined;
+  const mixedModes = legacyMode !== undefined && hasSplitMode;
+  const inboundProcessingMode = relayMode(
+    mixedModes ? "invalid" : env.MAILDESK_INBOUND_RELAY_MODE ?? legacyMode,
+  );
+  const replyProcessingMode = relayMode(
+    mixedModes ? "invalid" : env.MAILDESK_REPLY_RELAY_MODE ?? legacyMode,
+  );
   const replyTokenTtlDays = boundedPositiveInteger(env.MAILDESK_REPLY_TOKEN_TTL_DAYS, 90, 1, 365);
   const spoolRetentionDays = boundedPositiveInteger(env.MAILDESK_SPOOL_RETENTION_DAYS, 7, 1, 30);
   const maxEncodedMessageBytes = boundedPositiveInteger(
@@ -209,7 +253,8 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
 
   return {
     mode,
-    processingMode,
+    inboundProcessingMode,
+    replyProcessingMode,
     replyDomain,
     replyTokenTtlDays,
     spoolRetentionDays,
@@ -233,8 +278,8 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     },
     {
       name: "policy_config",
-      ok: Boolean(env.MAILDESK_POLICY_JSON || env.MAILDESK_POLICY_R2_KEY),
-      detail: "optional in template",
+      ok: Boolean(env.MAILDESK_POLICY_JSON || env.POLICY_STORE),
+      detail: env.POLICY_STORE ? "active_revision" : "optional inline development policy",
     },
   ];
 
@@ -246,9 +291,24 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
   });
   if (delivery.mode === "inbox_relay") {
     checks.push({
-      name: "relay_processing_mode",
-      ok: delivery.processingMode !== "invalid",
-      detail: delivery.processingMode,
+      name: "policy_store_binding",
+      ok: Boolean(env.POLICY_STORE),
+      detail: "immutable_policy_revisions",
+    });
+    checks.push({
+      name: "relay_spool_binding",
+      ok: Boolean(env.RELAY_SPOOL),
+      detail: "temporary_mime_only",
+    });
+    checks.push({
+      name: "inbound_relay_mode",
+      ok: delivery.inboundProcessingMode !== "invalid",
+      detail: delivery.inboundProcessingMode,
+    });
+    checks.push({
+      name: "reply_relay_mode",
+      ok: delivery.replyProcessingMode !== "invalid",
+      detail: delivery.replyProcessingMode,
     });
     checks.push({
       name: "reply_domain",
@@ -302,6 +362,11 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     ok: checks.every((check) => check.ok || check.name === "policy_config"),
     checks,
   };
+}
+
+function relayMode(value: string | undefined): "disabled" | "enabled" | "invalid" {
+  if (value === undefined || value === "disabled") return "disabled";
+  return value === "enabled" ? "enabled" : "invalid";
 }
 
 export function errorDetail(error: unknown): string {

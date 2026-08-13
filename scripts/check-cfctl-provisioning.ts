@@ -17,21 +17,22 @@ interface DesiredState {
   };
   domains: DesiredDomain[];
   workers: {
-    mail_api: DesiredWorker;
-    mail_router: DesiredWorker;
-    ui: DesiredWorker;
+    relay_router: DesiredWorker;
+    relay_outbound: DesiredWorker;
+    routing_health: DesiredWorker;
   };
   storage: {
     d1_database: string;
     d1_preview_database: string;
-    r2_raw_mail_bucket: string;
-    r2_raw_mail_preview_bucket: string;
+    r2_policy_bucket: string;
+    r2_spool_bucket: string;
     queue: string;
+    dead_letter_queue: string;
   };
   operator_delivery: OperatorDeliveryConfig;
   sender: {
     mode: SenderMode;
-    authenticated_domains: string[];
+    candidate_domains: string[];
   };
   verification: {
     allow_broad_live_sends: boolean;
@@ -49,7 +50,9 @@ interface DesiredDomain {
 
 interface OperatorDeliveryConfig {
   mode: "inbox_relay" | "web_desk";
-  processing_mode: "disabled" | "enabled";
+  processing_mode?: "disabled" | "enabled";
+  inbound_processing_mode?: "disabled" | "enabled";
+  reply_processing_mode?: "disabled" | "enabled";
   reply_domain: string;
   reply_token_ttl_days: number;
   spool_retention_days: number;
@@ -187,24 +190,25 @@ function validateDesiredState(value: DesiredState) {
 
   const workers = requireObject(rootObject, "workers");
   if (workers) {
-    validateWorker(requireObject(workers, "workers.mail_api"), "workers.mail_api");
-    validateWorker(requireObject(workers, "workers.mail_router"), "workers.mail_router");
-    validateWorker(requireObject(workers, "workers.ui"), "workers.ui");
+    validateWorker(requireObject(workers, "workers.relay_router"), "workers.relay_router");
+    validateWorker(requireObject(workers, "workers.relay_outbound"), "workers.relay_outbound");
+    validateWorker(requireObject(workers, "workers.routing_health"), "workers.routing_health");
   }
 
   const storage = requireObject(rootObject, "storage");
   if (storage) {
     requireString(storage, "storage.d1_database");
     requireString(storage, "storage.d1_preview_database");
-    requireString(storage, "storage.r2_raw_mail_bucket");
-    requireString(storage, "storage.r2_raw_mail_preview_bucket");
+    requireString(storage, "storage.r2_policy_bucket");
+    requireString(storage, "storage.r2_spool_bucket");
     requireString(storage, "storage.queue");
+    requireString(storage, "storage.dead_letter_queue");
   }
 
   const operatorDelivery = requireObject(rootObject, "operator_delivery");
   if (operatorDelivery) {
     const mode = requireEnum(operatorDelivery, "operator_delivery.mode", ["inbox_relay", "web_desk"]);
-    requireEnum(operatorDelivery, "operator_delivery.processing_mode", ["disabled", "enabled"]);
+    validateProcessingModes(operatorDelivery);
     const replyDomain = requireString(operatorDelivery, "operator_delivery.reply_domain");
     if (replyDomain && !validDomain(replyDomain)) {
       failures.push("operator_delivery.reply_domain must be a valid domain");
@@ -225,19 +229,19 @@ function validateDesiredState(value: DesiredState) {
       "cloudflare_email_service",
       "resend",
     ]);
-    const authenticatedDomains = requireStringArray(sender, "sender.authenticated_domains");
-    if (mode === "disabled" && authenticatedDomains.length > 0) {
-      failures.push("sender.authenticated_domains must be empty when sender.mode is disabled");
+    const candidateDomains = requireStringArray(sender, "sender.candidate_domains");
+    if (mode === "disabled" && candidateDomains.length > 0) {
+      failures.push("sender.candidate_domains must be empty when sender.mode is disabled");
     }
-    if (mode && mode !== "disabled" && authenticatedDomains.length === 0) {
-      failures.push("sender.authenticated_domains is required when sender.mode sends mail");
+    if (mode && mode !== "disabled" && candidateDomains.length === 0) {
+      failures.push("sender.candidate_domains is required when sender.mode sends mail");
     }
-    for (const domain of authenticatedDomains) {
+    for (const domain of candidateDomains) {
       if (!validDomain(domain)) {
-        failures.push("sender.authenticated_domains entries must be valid domains");
+        failures.push("sender.candidate_domains entries must be valid domains");
       }
       if (!domainNames.includes(domain)) {
-        failures.push("sender.authenticated_domains entries must also appear in domains[].name");
+        failures.push("sender.candidate_domains entries must also appear in domains[].name");
       }
     }
   }
@@ -250,6 +254,23 @@ function validateDesiredState(value: DesiredState) {
       failures.push("verification.allow_broad_live_sends must remain false in template-safe desired state");
     }
   }
+}
+
+function validateProcessingModes(operatorDelivery: Record<string, unknown>): void {
+  const legacy = operatorDelivery["processing_mode"];
+  const inbound = operatorDelivery["inbound_processing_mode"];
+  const reply = operatorDelivery["reply_processing_mode"];
+  const hasSplit = inbound !== undefined || reply !== undefined;
+  if (legacy !== undefined && hasSplit) {
+    failures.push("operator_delivery must not combine processing_mode with split processing modes");
+    return;
+  }
+  if (legacy !== undefined) {
+    requireEnum(operatorDelivery, "operator_delivery.processing_mode", ["disabled", "enabled"]);
+    return;
+  }
+  requireEnum(operatorDelivery, "operator_delivery.inbound_processing_mode", ["disabled", "enabled"]);
+  requireEnum(operatorDelivery, "operator_delivery.reply_processing_mode", ["disabled", "enabled"]);
 }
 
 function validateWorker(worker: Record<string, unknown> | null, prefix: string) {
@@ -307,27 +328,28 @@ function resourceSummary(desired: DesiredState) {
   return {
     domains: desired.domains.map((domain) => domain.name).sort(),
     workers: [
-      desired.workers.mail_api.script_name,
-      desired.workers.mail_router.script_name,
-      desired.workers.ui.script_name,
+      desired.workers.relay_router.script_name,
+      desired.workers.relay_outbound.script_name,
+      desired.workers.routing_health.script_name,
     ].sort(),
     worker_configs: [
-      desired.workers.mail_api.config,
-      desired.workers.mail_router.config,
-      desired.workers.ui.config,
+      desired.workers.relay_router.config,
+      desired.workers.relay_outbound.config,
+      desired.workers.routing_health.config,
     ].sort(),
     storage: [
       `d1:${desired.storage.d1_database}`,
       `d1-preview:${desired.storage.d1_preview_database}`,
-      `r2:${desired.storage.r2_raw_mail_bucket}`,
-      `r2-preview:${desired.storage.r2_raw_mail_preview_bucket}`,
+      `r2-policy:${desired.storage.r2_policy_bucket}`,
+      `r2-spool:${desired.storage.r2_spool_bucket}`,
       `queue:${desired.storage.queue}`,
+      `queue-dlq:${desired.storage.dead_letter_queue}`,
     ],
     operator_delivery: desired.operator_delivery,
     email_routing_aliases: emailRoutingAliases(desired),
     sender: {
       mode: senderModeOrDefault(desired.sender.mode),
-      authenticated_domains: [...desired.sender.authenticated_domains].sort(),
+      candidate_domains: [...desired.sender.candidate_domains].sort(),
     },
     verification: {
       allow_broad_live_sends: desired.verification.allow_broad_live_sends,

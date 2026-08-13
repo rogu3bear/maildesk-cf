@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,6 +8,112 @@ import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dir, "../..");
 
 describe("maildesk verifier", () => {
+  test("the tracked canonical desired state verifies local policy without inferring edge readiness", () => {
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { local_truth_ok: boolean; edge_ready: boolean; mail_ready: boolean };
+    };
+    expect(receipt.status).toEqual({
+      local_truth_ok: true,
+      edge_ready: false,
+      mail_ready: false,
+      live_evidence_present: false,
+    });
+  });
+
+  test("policy bucket existence and a matching legacy local digest cannot stand in for active R2 readback", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
+    const evidencePath = join(dir, "evidence.json");
+    writeJson(evidencePath, {
+      generated_at: "2026-07-01T00:00:00.000Z",
+      r2_policy_sha256: fileSha256(resolve(root, "config/policy.example.json")),
+      cfctl_maildesk: {
+        storage: { r2_policy_bucket: "ok" },
+      },
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { edge_ready: boolean };
+      rows: Array<{ r2_policy: string }>;
+    };
+    expect(receipt.status.edge_ready).toBe(false);
+    expect(receipt.rows.every((row) => row.r2_policy === "not_checked")).toBe(true);
+  });
+
+  test("self-consistent remote counts cannot impersonate the selected local projection", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
+    const evidencePath = join(dir, "evidence.json");
+    const policyPath = resolve(root, "config/policy.example.json");
+    const desiredPath = resolve(root, "config/desired-state.example.json");
+    const activePolicy = activePolicyEvidence(policyPath, desiredPath);
+    writeJson(evidencePath, {
+      generated_at: "2026-07-01T00:00:00.000Z",
+      active_policy: {
+        ...activePolicy,
+        expected_route_count: 1,
+        projected_route_count: 1,
+      },
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        policyPath,
+        "--desired-state",
+        desiredPath,
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { edge_ready: boolean };
+      rows: Array<{ r2_policy: string }>;
+    };
+    expect(receipt.status.edge_ready).toBe(false);
+    expect(receipt.rows.every((row) => row.r2_policy === "drift")).toBe(true);
+  });
+
   test("uses cfctl lifecycle evidence for edge readiness without hiding sender drift", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const policyPath = join(dir, "policy.json");
@@ -28,6 +135,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "example.com",
@@ -38,11 +146,12 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "cloudflare_email_service",
-        authenticated_domains: ["example.com"],
+        candidate_domains: ["example.com"],
       },
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -55,13 +164,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
         sender_domains: {
           "example.com": "missing",
@@ -72,10 +184,12 @@ describe("maildesk verifier", () => {
           status: "ok",
           envelope_to: "founders@example.com",
           route_kind: "role_alias",
-          forwarded_to: ["operator@example.com"],
-          forward_errors: [],
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["provider-inbound-example"],
+          provider_accepted_at: "2026-07-01T00:00:00.000Z",
+          inbox_verified_at: "2026-07-01T00:01:00.000Z",
           default_reply_identity: "founders@example.com",
-          raw_r2_key: "raw/example",
         },
       },
     });
@@ -141,6 +255,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "tenant.example.com",
@@ -151,11 +266,12 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "disabled",
-        authenticated_domains: [],
+        candidate_domains: [],
       },
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: true,
@@ -168,13 +284,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
       },
       inbound_proofs: {
@@ -182,10 +301,12 @@ describe("maildesk verifier", () => {
           status: "ok",
           envelope_to: "founders@tenant.example.com",
           route_kind: "role_alias",
-          forwarded_to: ["operator@tenant.example.com"],
-          forward_errors: [],
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["provider-inbound-tenant"],
+          provider_accepted_at: "2026-07-01T00:00:00.000Z",
+          inbox_verified_at: "2026-07-01T00:01:00.000Z",
           default_reply_identity: "founders@tenant.example.com",
-          raw_r2_key: "raw/example",
         },
       },
     });
@@ -252,6 +373,7 @@ describe("maildesk verifier", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "tenant.example.com",
@@ -262,11 +384,12 @@ describe("maildesk verifier", () => {
       ],
       sender: {
         mode: "resend",
-        authenticated_domains: ["tenant.example.com"],
+        candidate_domains: ["tenant.example.com"],
       },
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: true,
@@ -279,13 +402,16 @@ describe("maildesk verifier", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
         sender_domains: {
           "tenant.example.com": "missing",
@@ -299,10 +425,12 @@ describe("maildesk verifier", () => {
           status: "ok",
           envelope_to: "founders@tenant.example.com",
           route_kind: "role_alias",
-          forwarded_to: ["operator@tenant.example.com"],
-          forward_errors: [],
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["provider-inbound-tenant"],
+          provider_accepted_at: "2026-07-01T00:00:00.000Z",
+          inbox_verified_at: "2026-07-01T00:01:00.000Z",
           default_reply_identity: "founders@tenant.example.com",
-          raw_r2_key: "raw/example",
         },
       },
       outbound_proofs: {
@@ -352,4 +480,60 @@ describe("maildesk verifier", () => {
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function fileSha256(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function activePolicyEvidence(policyPath: string, desiredPath: string) {
+  const digest = fileSha256(policyPath);
+  const key = `config/policy/${digest}.json`;
+  const projection = projectionSummary(policyPath, desiredPath);
+  return {
+    active_policy_sha256: digest,
+    active_policy_r2_key: key,
+    revision_r2_key: key,
+    object_key: key,
+    object_sha256: digest,
+    projection_policy_sha256: digest,
+    expected_domain_count: projection.domains,
+    expected_route_count: projection.routes,
+    projected_domain_count: projection.domains,
+    projected_route_count: projection.routes,
+    active_desired_state_sha256: projection.desired_state_sha256,
+    active_projection_sha256: projection.projection_sha256,
+  };
+}
+
+function projectionSummary(policyPath: string, desiredPath: string) {
+  const result = spawnSync(
+    "bun",
+    ["run", "scripts/sync-route-policy.ts", "--", "--policy", policyPath, "--desired-state", desiredPath],
+    { cwd: root, encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  return JSON.parse(result.stdout) as {
+    domains: number;
+    routes: number;
+    desired_state_sha256: string;
+    projection_sha256: string;
+  };
+}
+
+function canonicalTopology() {
+  return {
+    workers: {
+      relay_router: { script_name: "maildesk-cf-router", config: "deploy/mail-router/wrangler.toml" },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "deploy/mail-outbound/wrangler.toml" },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: "deploy/routing-health/wrangler.toml" },
+    },
+    storage: {
+      d1_database: "maildesk-cf-relay-db",
+      r2_policy_bucket: "maildesk-cf-policy",
+      r2_spool_bucket: "maildesk-cf-relay-spool",
+      queue: "maildesk-cf-relay-jobs",
+      dead_letter_queue: "maildesk-cf-relay-dlq",
+    },
+  };
 }

@@ -25,50 +25,56 @@ It should not own policy. If policy logic appears in TypeScript, move it back
 into `crates/maildesk-router`.
 
 The template deploy target for this Worker is `deploy/mail-router/wrangler.toml`.
-`MAILDESK_RELAY_PROCESSING_MODE` defaults to `disabled`; while disabled, the
-Worker fails closed before routing, D1/R2 writes, Queue work, operator delivery,
-or opaque-token reply processing. A dark candidate remains unattached to live
-Email Routing rules, and a separately reviewed canary changes this mode to
-`enabled` only when the intended route is attached.
+Dark deployment requires both `MAILDESK_INBOUND_RELAY_MODE=disabled` and
+`MAILDESK_REPLY_RELAY_MODE=disabled`. A separately reviewed receipt canary first
+enables inbound processing while replies remain disabled; reply processing is
+enabled only through a later exact Worker plan after inbox receipt is proven.
+The deprecated combined `MAILDESK_RELAY_PROCESSING_MODE` input exists only for
+compatibility when neither split switch is supplied and must not be used for a
+dark deployment or staged canary.
 
 The reserved reply-domain path runs before ordinary alias lookup. It requires a
-live, unexpired relay; matching envelope and visible operator identity; aligned
-Cloudflare SPF or DKIM results; and a fresh Rust `authorize_reply` decision.
+live, unexpired relay; matching envelope and visible operator identity; an
+aligned cryptographically verified DKIM signature whose signed headers include
+`From`; and a fresh Rust `authorize_reply` decision.
 The external destination is always loaded from D1, never from reply headers.
 
-### API Worker
+### Queue-only outbound Worker
 
-The API Worker powers the operator desk. It should:
+The outbound Worker consumes durable reply jobs. It should:
 
-- enforce authentication before thread, message, or reply access;
-- read body-free route-health and audit data from D1;
-- create outbound reply intents only after router authorization;
-- enqueue outbound send jobs instead of sending inline;
-- expose health and readiness endpoints that do not leak private config.
+- have no public HTTP route or `workers.dev` origin;
+- load only the exact active policy revision;
+- send only after cryptographic operator and Rust policy authorization;
+- preserve idempotency and bounded recovery state;
+- delete temporary MIME after terminal provider acceptance.
 
 In `inbox_relay`, its Queue consumer parses the temporary operator-reply spool,
-constructs a public-identity outbound job, records body-free state, and removes
-the spool on terminal provider acceptance. The template deploy target for this
-Worker is `wrangler.toml`.
-Its legacy shared-token `POST /api/replies` route is disabled unless
-`MAILDESK_REPLY_API_MODE=token` is set explicitly. Human replies should use the
-Access-authenticated Leptos server-function path. Token mode is appropriate
-only behind a service boundary that binds the credential to one integration;
-the token itself is not an operator identity.
+requires a plaintext MIME alternative, constructs both outbound text and fresh
+escaped HTML from that verified plaintext, records body-free state, and removes
+the spool on terminal provider acceptance. Original operator-authored HTML is
+never forwarded because renderer-dependent hidden content cannot be proven free
+of private operator identity leakage. The inbox-relay deploy target is
+`deploy/mail-outbound/wrangler.toml`. The generic `wrangler.toml` web-desk
+target may retain its legacy shared-token `POST /api/replies` route, disabled
+unless `MAILDESK_REPLY_API_MODE=token` is set explicitly. Private inbox-relay
+deployments do not expose that surface.
 
 ### Leptos UI Worker
 
-The Cargo-Leptos Worker serves public explanatory routes and the operator desk.
-For `/desk*` in production it must validate the Cloudflare Access application
+The Cargo-Leptos Worker serves routing health. For every protected path it must
+validate the Cloudflare Access application
 JWT signature, issuer, audience, and expiry against the account JWKS before the
 Rust server trusts the email claim. Header presence alone is not
 authentication. `MAILDESK_ACCESS_TEAM_DOMAIN` and `MAILDESK_ACCESS_AUD` are
 required production inputs; local template preview bypasses Access only when
 `MAILDESK_UI_AUTH_MODE=preview` is set explicitly.
 
-The template deploy target for this Worker is `deploy/ui/wrangler.toml`, which keeps
-`workers_dev = false` so an alternate public origin cannot bypass the Access
-application on the production hostname.
+The inbox-relay deploy target is `deploy/routing-health/wrangler.toml`, which
+binds only D1 and static assets and keeps `workers_dev = false`. `desk_only`
+remains a generic template option; private instances select `all_routes` so the
+application verifies Access on `/`, `/architecture`, `/desk`, APIs, and static
+assets rather than relying only on edge policy.
 
 ### Rust Router
 
@@ -84,30 +90,33 @@ Generated WASM is rebuilt before each Worker bundle and is not committed.
 ### Storage
 
 D1 stores queryable route, relay, idempotency, health, and body-free audit state.
-R2 stores temporary relay/recovery MIME only in `inbox_relay`; successful
-processing deletes it early and lifecycle policy provides a seven-day ceiling.
+R2 stores temporary relay/recovery content only in `inbox_relay`: original MIME,
+generated per-recipient operator-delivery payloads, and operator-reply MIME.
+Every operator-reply spool key is paired with the SHA-256 of the exact
+DKIM-authenticated bytes in D1 and the Queue job; the outbound consumer verifies
+that digest before parsing.
+Successful processing deletes each object early and lifecycle policy provides a
+seven-day ceiling.
 Queues own async delivery and redelivery; provider retry policy must remain explicit.
 
 ## Required Bindings
 
 | Binding | Kind | Purpose |
 | --- | --- | --- |
-| `DB` | D1 | domains, identities, routes, threads, messages, audit events |
-| `RAW_MAIL` | R2 | raw MIME bodies and attachment blobs |
-| `MAIL_JOBS` | Queue | parsing, notification, indexing, and outbound attempt delivery |
+| `DB` | D1 | policy projection, relays, route health, proofs, and body-free audit events |
+| `POLICY_STORE` | R2 | immutable digest-addressed private policy revisions |
+| `RELAY_SPOOL` | R2 | bounded temporary inbound MIME, generated operator-delivery recovery payloads, and operator-reply MIME |
+| `MAIL_JOBS` | Queue | durable outbound relay jobs from router to outbound Worker |
 | `EMAIL` | Email Service | operator delivery and authenticated public-identity replies |
-| policy config | secret or versioned config | deployable router policy |
 
-The template ships placeholder `wrangler.toml` values. Production provisioning
-must replace them through `cfctl` before `preflight:production` can pass.
-Private instances should provision both production and preview D1/R2 resources
-so Wrangler preview and targeted checks do not reuse production mail storage.
-Top-level Worker configs should bind production resources only; preview resources
-belong in explicit preview/dev flows, not in the production deploy path.
-Runtime policy may be supplied inline through `MAILDESK_POLICY_JSON` for small
-fixtures, but production instances should store policy JSON in R2 at
-`MAILDESK_POLICY_R2_KEY` so larger multi-domain policies do not hit Worker text
-binding limits.
+The template ships placeholder D1 identifiers. Production provisioning must
+replace them through `cfctl` before `preflight:production` can pass. Preview
+resources belong in explicit preview/dev flows, not in the production deploy
+path. Inbox-relay production policy is an immutable
+`config/policy/<sha256>.json` object selected by the active D1 policy pointer;
+the Worker fails closed when the pointer, revision metadata, object key, bytes,
+or expected counts disagree. Inline `MAILDESK_POLICY_JSON` remains only a
+legacy non-inbox development input.
 
 ## Mail Flow
 
@@ -155,3 +164,22 @@ binding limits.
   provider responses, or credentials into D1 audit JSON.
 
 Fail closed first. Add manual recovery paths after the invariant is clear.
+
+Inbound operator delivery has its own pre-provider idempotency boundary. The
+exact raw MIME plus normalized envelope produces one stable fingerprint, and
+D1 stores a unique recipient state for each hashed operator destination before
+Email Service is called. Redelivery may repair body-free result projection and
+may resume a recipient that is still durably `pending`, because its provider
+claim never occurred. The resume must load the exact generated recovery payload
+and repeat the active policy, enabled route, immutable spool generation, and
+`pending -> sending` claim. It must not resend a recipient in `sending`,
+`provider_accepted`, or `recovery_required`; Cloudflare Email Service does not
+expose a provider idempotency key for safely replaying those transitions.
+
+Policy supersession is the one safe automatic retirement case: D1 may remove
+an old fingerprint and relay only when the active revision differs and every
+recipient is still `pending`. The conditional delete serializes against the
+policy-bound `pending -> sending` claim. One conditional relay deletion cascades
+through the inbound fingerprint and recipient rows, so the token generation is
+retired as a unit. R2 cleanup follows confirmed D1 retirement, and every attempt
+uses a distinct spool key so stale cleanup cannot erase a replacement attempt.

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   accessConfiguration,
+  isAccessProtectedPath,
   isDeskPath,
   verifiedAccessRequest,
 } from "../../workers/ui/access";
@@ -17,6 +18,15 @@ describe("Leptos UI Cloudflare Access adapter", () => {
     expect(isDeskPath("/desk/api/load")).toBe(true);
     expect(isDeskPath("/desktop")).toBe(false);
     expect(isDeskPath("/desk-preview")).toBe(false);
+  });
+
+  test("supports fail-closed whole-host protection for private deployments", () => {
+    expect(isAccessProtectedPath("/", "all_routes")).toBe(true);
+    expect(isAccessProtectedPath("/architecture", "all_routes")).toBe(true);
+    expect(isAccessProtectedPath("/favicon.svg", "all_routes")).toBe(true);
+    expect(isAccessProtectedPath("/architecture", "desk_only")).toBe(false);
+    expect(isAccessProtectedPath("/desk", "desk_only")).toBe(true);
+    expect(isAccessProtectedPath("/", "invalid" as "desk_only")).toBe(true);
   });
 
   test("accepts only an HTTPS Cloudflare Access team origin", () => {

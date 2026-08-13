@@ -114,10 +114,13 @@ export function outboundReplyPayload(parsed: ParsedRelayEmail): {
   html?: string;
   attachments?: MailAttachmentPayload[];
 } {
+  if (!parsed.text.trim()) {
+    throw new Error("operator replies require a plaintext MIME alternative");
+  }
   return {
     subject: parsed.subject,
-    text: parsed.text || undefined,
-    html: parsed.html,
+    text: parsed.text,
+    html: `<pre style="white-space:pre-wrap">${escapeHtml(parsed.text)}</pre>`,
     attachments: parsed.attachments.length > 0 ? parsed.attachments : undefined,
   };
 }
@@ -131,16 +134,26 @@ export function encodedMessageUpperBound(input: {
 }): number {
   const encoder = new TextEncoder();
   let size = MIME_OVERHEAD_BYTES;
-  size += encoder.encode(input.subject).byteLength;
-  size += encoder.encode(input.text ?? "").byteLength;
-  size += encoder.encode(input.html ?? "").byteLength;
+  // Quoted-printable can expand an arbitrary UTF-8 byte to three bytes and
+  // also inserts soft line breaks. Four times the source byte length is a
+  // deliberately conservative ceiling for every provider-selected text/header
+  // transfer encoding, including CRLF normalization.
+  const encodedTextCeiling = (value: string) => encoder.encode(value).byteLength * 4;
+  size += encodedTextCeiling(input.subject);
+  size += encodedTextCeiling(input.text ?? "");
+  size += encodedTextCeiling(input.html ?? "");
   for (const [name, value] of Object.entries(input.headers ?? {})) {
-    size += encoder.encode(name).byteLength + encoder.encode(value).byteLength + 4;
+    size += encoder.encode(name).byteLength + encodedTextCeiling(value) + 4;
   }
   for (const attachment of input.attachments ?? []) {
     const bytes = attachment.content.byteLength;
-    size += Math.ceil(bytes / 3) * 4;
-    size += encoder.encode(attachment.filename).byteLength + encoder.encode(attachment.type).byteLength + 1024;
+    const base64Bytes = Math.ceil(bytes / 3) * 4;
+    const base64LineBreaks = Math.ceil(base64Bytes / 76) * 2;
+    size += base64Bytes + base64LineBreaks;
+    size += encodedTextCeiling(attachment.filename);
+    size += encodedTextCeiling(attachment.type);
+    size += encodedTextCeiling(attachment.contentId ?? "");
+    size += 1024;
   }
   return size;
 }
@@ -212,49 +225,6 @@ export function normalizeMailbox(value: string): string {
     return "";
   }
   return mailbox;
-}
-
-export function operatorAuthenticationPassed(headers: Headers, operator: string): boolean {
-  const mailbox = normalizeMailbox(operator);
-  const domain = mailbox.split("@")[1];
-  if (!domain) return false;
-  const results = headers.get("authentication-results")?.toLowerCase() ?? "";
-  // The Fetch Headers implementation combines duplicate fields with a comma.
-  // A sender-controlled Authentication-Results field must never be allowed to
-  // contribute a later pass result alongside Cloudflare's trusted field.
-  if (!results || results.includes(",")) return false;
-  const authservId = results.split(";", 1)[0]?.trim() ?? "";
-  if (authservId !== "mx.cloudflare.net") return false;
-
-  const sections = results.split(";").map(parseAuthenticationResultSection);
-  const spfPass = sections.some((section) => {
-    const resultPassed = section.get("spf")?.includes("pass") === true;
-    const senderAligned = section.get("smtp.mailfrom")
-      ?.some((value) => value === mailbox || value === domain) === true;
-    return resultPassed && senderAligned;
-  });
-  const dkimPass = sections.some((section) => {
-    const resultPassed = section.get("dkim")?.includes("pass") === true;
-    const signingDomainAligned = section.get("header.d")?.includes(domain) === true;
-    const identityAligned = section.get("header.i")
-      ?.some((value) => value === `@${domain}` || value === mailbox) === true;
-    return resultPassed && (signingDomainAligned || identityAligned);
-  });
-  return spfPass || dkimPass;
-}
-
-function parseAuthenticationResultSection(section: string): Map<string, string[]> {
-  const properties = new Map<string, string[]>();
-  const propertyPattern = /(?:^|\s)([a-z][a-z0-9._-]*)\s*=\s*(?:"([^"]*)"|([^\s;]+))/g;
-  for (const match of section.trim().matchAll(propertyPattern)) {
-    const name = match[1];
-    const value = match[2] ?? match[3];
-    if (!name || value === undefined) continue;
-    const values = properties.get(name) ?? [];
-    values.push(value);
-    properties.set(name, values);
-  }
-  return properties;
 }
 
 export function safeConversationHeaders(parsed: ParsedRelayEmail): Record<string, string> {

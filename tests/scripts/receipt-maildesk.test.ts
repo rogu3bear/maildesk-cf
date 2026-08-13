@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,6 +33,7 @@ describe("maildesk receipt workflow", () => {
       },
     });
     writeJson(desiredPath, {
+      ...canonicalTopology(),
       domains: [
         {
           name: "tenant.example.com",
@@ -42,11 +44,12 @@ describe("maildesk receipt workflow", () => {
       ],
       sender: {
         mode: "cloudflare_email_service",
-        authenticated_domains: ["tenant.example.com"],
+        candidate_domains: ["tenant.example.com"],
       },
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
         mail_ready: false,
@@ -59,13 +62,16 @@ describe("maildesk receipt workflow", () => {
           },
         },
         workers: {
-          mail_api: "ok",
-          mail_router: "ok",
+          relay_router: "ok",
+          relay_outbound: "ok",
+          routing_health: "ok",
         },
         storage: {
           d1_database: "ok",
           queue: "ok",
-          r2_raw_mail_bucket: "ok",
+          dead_letter_queue: "ok",
+          r2_policy_bucket: "ok",
+          r2_spool_bucket: "ok",
         },
         sender_domains: {
           "tenant.example.com": "missing",
@@ -76,10 +82,12 @@ describe("maildesk receipt workflow", () => {
           status: "ok",
           envelope_to: "founders@tenant.example.com",
           route_kind: "role_alias",
-          forwarded_to: ["operator@tenant.example.com"],
-          forward_errors: [],
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["provider-inbound-tenant"],
+          provider_accepted_at: "2026-07-01T00:00:00.000Z",
+          inbox_verified_at: "2026-07-01T00:01:00.000Z",
           default_reply_identity: "founders@tenant.example.com",
-          raw_r2_key: "raw/example",
         },
       },
       outbound_proofs: {
@@ -173,7 +181,7 @@ describe("maildesk receipt workflow", () => {
       sender_domain_ack_ready_count: 1,
       sender_domain_ack_missing_count: 0,
     });
-    expect(plan.actions[0]).toMatchObject({
+    expect(plan.actions.find((action) => action.operation_id)).toMatchObject({
       operation_id: "20260701T000000Z-00000-tenant",
       ack_command:
         "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
@@ -183,4 +191,60 @@ describe("maildesk receipt workflow", () => {
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function fileSha256(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function activePolicyEvidence(policyPath: string, desiredPath: string) {
+  const digest = fileSha256(policyPath);
+  const key = `config/policy/${digest}.json`;
+  const projection = projectionSummary(policyPath, desiredPath);
+  return {
+    active_policy_sha256: digest,
+    active_policy_r2_key: key,
+    revision_r2_key: key,
+    object_key: key,
+    object_sha256: digest,
+    projection_policy_sha256: digest,
+    expected_domain_count: projection.domains,
+    expected_route_count: projection.routes,
+    projected_domain_count: projection.domains,
+    projected_route_count: projection.routes,
+    active_desired_state_sha256: projection.desired_state_sha256,
+    active_projection_sha256: projection.projection_sha256,
+  };
+}
+
+function projectionSummary(policyPath: string, desiredPath: string) {
+  const result = spawnSync(
+    "bun",
+    ["run", "scripts/sync-route-policy.ts", "--", "--policy", policyPath, "--desired-state", desiredPath],
+    { cwd: root, encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  return JSON.parse(result.stdout) as {
+    domains: number;
+    routes: number;
+    desired_state_sha256: string;
+    projection_sha256: string;
+  };
+}
+
+function canonicalTopology() {
+  return {
+    workers: {
+      relay_router: { script_name: "maildesk-cf-router", config: "deploy/mail-router/wrangler.toml" },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "deploy/mail-outbound/wrangler.toml" },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: "deploy/routing-health/wrangler.toml" },
+    },
+    storage: {
+      d1_database: "maildesk-cf-relay-db",
+      r2_policy_bucket: "maildesk-cf-policy",
+      r2_spool_bucket: "maildesk-cf-relay-spool",
+      queue: "maildesk-cf-relay-jobs",
+      dead_letter_queue: "maildesk-cf-relay-dlq",
+    },
+  };
 }

@@ -3,19 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
+import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
-interface DesiredState {
+interface DesiredState extends CanonicalDesiredTopology {
   domains: Array<{ name: string; inbound_mx_provider?: string }>;
   sender?: {
     mode?: string;
-  };
-  workers?: {
-    mail_router?: {
-      script_name?: string;
-    };
-  };
-  storage?: {
-    d1_database?: string;
   };
 }
 
@@ -24,7 +17,7 @@ interface Evidence {
   zones?: string[];
   email_routing?: Record<string, { role_aliases: string[]; personal_aliases: string[] }>;
   dns_mx?: Record<string, string[]>;
-  r2_policy_sha256?: string;
+  active_policy?: ActivePolicyEvidence;
   readyz?: unknown;
   d1?: {
     tables?: string[];
@@ -34,6 +27,21 @@ interface Evidence {
   inbound_proofs?: Record<string, InboundProof>;
   outbound_proofs?: Record<string, OutboundProof>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
+}
+
+interface ActivePolicyEvidence {
+  active_policy_sha256: string;
+  active_policy_r2_key: string;
+  revision_r2_key: string;
+  object_key: string;
+  object_sha256: string;
+  expected_domain_count: number;
+  expected_route_count: number;
+  projected_domain_count: number;
+  projected_route_count: number;
+  active_desired_state_sha256: string;
+  active_projection_sha256: string;
+  projection_policy_sha256: string;
 }
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
@@ -57,8 +65,13 @@ interface InboundProof {
   status: "ok";
   envelope_to: string;
   route_kind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  forwarded_to: string[];
-  forward_errors: Array<{ recipient?: string; error?: string }>;
+  operator_count?: number;
+  policy_sha256?: string;
+  provider_message_ids?: string[];
+  provider_accepted_at?: string;
+  inbox_verified_at?: string;
+  forwarded_to?: string[];
+  forward_errors?: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
   raw_r2_key?: string;
   provider?: string;
@@ -80,14 +93,15 @@ const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDes
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const outputPath = resolve(root, argValue("--out") ?? "var/maildesk-live-evidence.json");
 const cfctlBin = process.env.CFCTL_BIN ?? argValue("--cfctl") ?? "cfctl";
+const wranglerBin = process.env.WRANGLER_BIN ?? argValue("--wrangler") ?? "wrangler";
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
-const r2PolicyPath = process.env.MAILDESK_R2_POLICY_PATH ?? argValue("--r2-policy-path");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
 const desiredState = readJson<DesiredState>(desiredStatePath);
+requireCanonicalDesiredTopology(desiredState);
 const senderMode = senderModeOrDefault(desiredState.sender?.mode);
 const useResend = senderMode === "resend" && !args.includes("--no-resend");
-const routerService = desiredState.workers?.mail_router?.script_name;
+const routerService = desiredState.workers.relay_router.script_name;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
@@ -140,12 +154,6 @@ if (Object.keys(dnsMx).length > 0) {
   evidence.dns_mx = { ...(evidence.dns_mx ?? {}), ...dnsMx };
 }
 
-if (r2PolicyPath) {
-  evidence.r2_policy_sha256 = sha256(readFileSync(resolve(root, r2PolicyPath), "utf8"));
-} else if (process.env.MAILDESK_ASSUME_LOCAL_POLICY_IN_R2 === "1") {
-  evidence.r2_policy_sha256 = sha256(readFileSync(policyPath, "utf8"));
-}
-
 if (readyzUrl) {
   const readyz = fetchJson(["-fsS", readyzUrl]);
   if (readyz.ok) evidence.readyz = readyz.value;
@@ -153,6 +161,8 @@ if (readyzUrl) {
 
 const d1Name = desiredState.storage?.d1_database ?? d1Database;
 if (d1Name) {
+  const activePolicy = collectActivePolicyEvidence(d1Name, desiredState.storage.r2_policy_bucket);
+  if (activePolicy) evidence.active_policy = activePolicy;
   evidence.d1 = collectD1Evidence(d1Name);
   const inboundProofs = collectInboundProofs(d1Name);
   if (Object.keys(inboundProofs).length > 0) {
@@ -162,6 +172,50 @@ if (d1Name) {
   if (Object.keys(outboundProofs).length > 0) {
     evidence.outbound_proofs = outboundProofs;
   }
+}
+
+function collectActivePolicyEvidence(
+  databaseName: string,
+  policyBucket: string,
+): ActivePolicyEvidence | null {
+  const [row] = wranglerD1Results(
+    databaseName,
+    "SELECT rs.active_policy_sha256, rs.active_policy_r2_key, pr.r2_object_key AS revision_r2_key, pr.expected_domain_count, pr.expected_route_count, (SELECT COUNT(*) FROM domains d WHERE EXISTS (SELECT 1 FROM alias_routes ar WHERE ar.domain_id = d.id AND ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256)) AS projected_domain_count, (SELECT COUNT(*) FROM alias_routes ar WHERE ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256) AS projected_route_count, (SELECT value FROM policy_projection_state WHERE key = 'active_policy_sha256') AS projection_policy_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_desired_state_sha256') AS active_desired_state_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_projection_sha256') AS active_projection_sha256 FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1;",
+  );
+  if (
+    typeof row?.active_policy_sha256 !== "string" ||
+    typeof row.active_policy_r2_key !== "string" ||
+    typeof row.revision_r2_key !== "string" ||
+    typeof row.expected_domain_count !== "number" ||
+    typeof row.expected_route_count !== "number" ||
+    typeof row.projected_domain_count !== "number" ||
+    typeof row.projected_route_count !== "number" ||
+    typeof row.projection_policy_sha256 !== "string" ||
+    typeof row.active_desired_state_sha256 !== "string" ||
+    typeof row.active_projection_sha256 !== "string"
+  ) return null;
+
+  const object = spawnSync(
+    wranglerBin,
+    ["r2", "object", "get", `${policyBucket}/${row.active_policy_r2_key}`, "--remote", "--pipe"],
+    { cwd: root, encoding: null, maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (object.status !== 0 || !object.stdout) return null;
+
+  return {
+    active_policy_sha256: row.active_policy_sha256,
+    active_policy_r2_key: row.active_policy_r2_key,
+    revision_r2_key: row.revision_r2_key,
+    object_key: row.active_policy_r2_key,
+    object_sha256: createHash("sha256").update(object.stdout).digest("hex"),
+    expected_domain_count: row.expected_domain_count,
+    expected_route_count: row.expected_route_count,
+    projected_domain_count: row.projected_domain_count,
+    projected_route_count: row.projected_route_count,
+    projection_policy_sha256: row.projection_policy_sha256,
+    active_desired_state_sha256: row.active_desired_state_sha256,
+    active_projection_sha256: row.active_projection_sha256,
+  };
 }
 
 if (useResend) {
@@ -376,28 +430,38 @@ function collectD1Evidence(databaseName: string): Evidence["d1"] {
 function collectInboundProofs(databaseName: string): Record<string, InboundProof> {
   const rows = wranglerD1Results(
     databaseName,
-    "SELECT detail_json, created_at FROM audit_events WHERE action = 'inbound_email_received' ORDER BY created_at DESC LIMIT 200;",
+    "SELECT rh.route_address, rh.decision_kind AS route_kind, rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.last_inbound_provider_accepted_at, rh.last_inbound_provider_message_ids_json, rh.last_inbox_verified_at FROM route_health rh JOIN alias_routes ar ON ar.id = rh.route_id AND ar.enabled = 1 AND ar.policy_sha256 = rh.policy_sha256 JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = rh.policy_sha256 WHERE rh.inbound_status IN ('inbox_verified', 'reply_verified') AND rh.last_inbound_provider_accepted_at IS NOT NULL AND rh.last_inbox_verified_at IS NOT NULL ORDER BY rh.last_inbox_verified_at DESC LIMIT 200;",
   );
   const proofs: Record<string, InboundProof> = {};
 
   for (const row of rows) {
-    if (typeof row.detail_json !== "string") continue;
-    const detail = parseJson<InboundAuditDetail>(row.detail_json);
-    if (!detail?.envelopeTo || proofs[domainPart(detail.envelopeTo)]) continue;
-    if (!detail.rawR2Key || detail.storageError) continue;
-    if (detail.forwardErrors && detail.forwardErrors.length > 0) continue;
-
-    const domain = domainPart(detail.envelopeTo);
+    if (
+      typeof row.route_address !== "string" ||
+      typeof row.route_kind !== "string" ||
+      typeof row.operator_count !== "number" ||
+      typeof row.reply_identity !== "string" ||
+      typeof row.policy_sha256 !== "string" ||
+      typeof row.last_inbound_provider_accepted_at !== "string" ||
+      typeof row.last_inbox_verified_at !== "string"
+    ) continue;
+    const providerMessageIds = typeof row.last_inbound_provider_message_ids_json === "string"
+      ? parseJson<unknown>(row.last_inbound_provider_message_ids_json)
+      : null;
+    if (!Array.isArray(providerMessageIds) || providerMessageIds.some((value) => typeof value !== "string")) continue;
+    const domain = domainPart(row.route_address);
     if (!domain) continue;
+    if (proofs[domain]) continue;
     proofs[domain] = {
       status: "ok",
-      envelope_to: detail.envelopeTo,
-      route_kind: detail.routeKind,
-      forwarded_to: detail.forwardedTo ?? [],
-      forward_errors: detail.forwardErrors ?? [],
-      default_reply_identity: detail.defaultReplyIdentity,
-      raw_r2_key: detail.rawR2Key,
-      audit_event_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      envelope_to: row.route_address,
+      route_kind: row.route_kind as InboundProof["route_kind"],
+      operator_count: row.operator_count,
+      policy_sha256: row.policy_sha256,
+      provider_message_ids: providerMessageIds as string[],
+      provider_accepted_at: row.last_inbound_provider_accepted_at,
+      inbox_verified_at: row.last_inbox_verified_at,
+      default_reply_identity: row.reply_identity,
+      provider: "cloudflare_email_service",
     };
   }
 
@@ -431,7 +495,7 @@ function collectOutboundProofs(databaseName: string): Record<string, OutboundPro
 }
 
 function wranglerD1Results(databaseName: string, sql: string): Array<Record<string, unknown>> {
-  const result = spawnSync("wrangler", ["d1", "execute", databaseName, "--remote", "--command", sql], {
+  const result = spawnSync(wranglerBin, ["d1", "execute", databaseName, "--remote", "--command", sql], {
     cwd: root,
     encoding: "utf8",
   });
@@ -561,16 +625,6 @@ interface DnsRecord {
   name?: string;
   type?: string;
   content?: string;
-}
-
-interface InboundAuditDetail {
-  envelopeTo?: string;
-  routeKind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
-  forwardedTo?: string[];
-  forwardErrors?: Array<{ recipient?: string; error?: string }>;
-  defaultReplyIdentity?: string;
-  rawR2Key?: string;
-  storageError?: string;
 }
 
 interface GoogleResourceSearch {

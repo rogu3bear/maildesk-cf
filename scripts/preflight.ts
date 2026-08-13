@@ -20,11 +20,13 @@ interface DesiredState {
   };
   sender?: {
     mode?: unknown;
-    authenticated_domains?: unknown;
+    candidate_domains?: unknown;
   };
   operator_delivery?: {
     mode?: unknown;
     processing_mode?: unknown;
+    inbound_processing_mode?: unknown;
+    reply_processing_mode?: unknown;
     reply_domain?: unknown;
     reply_token_ttl_days?: unknown;
     spool_retention_days?: unknown;
@@ -54,6 +56,8 @@ checkCommand(process.env.CFCTL_BIN ?? "cfctl", ["--help"], mode === "production"
 checkFile("Cargo.toml");
 checkFile("wrangler.toml");
 checkFile("deploy/mail-router/wrangler.toml");
+checkFile("deploy/mail-outbound/wrangler.toml");
+checkFile("deploy/routing-health/wrangler.toml");
 checkFile("config/policy.example.json");
 checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
@@ -66,6 +70,7 @@ const desiredStatePath =
 const desiredState = checkJson<DesiredState>(desiredStatePath);
 checkDesiredSenderMode(desiredState);
 checkDesiredOperatorDelivery(desiredState);
+checkRelayTopology(desiredStatePath);
 
 const policyPath =
   process.env.MAILDESK_POLICY_PATH ??
@@ -144,6 +149,16 @@ function checkPolicy(path: string) {
   );
 }
 
+function checkRelayTopology(desiredStatePath: string) {
+  const result = spawnSync("bun", ["run", "scripts/check-relay-topology.ts", desiredStatePath], {
+    cwd: root,
+    encoding: "utf8",
+    env: process.env,
+  });
+  if (result.status === 0) return;
+  failures.push(`relay topology validation failed: ${result.stderr.trim() || result.stdout.trim()}`);
+}
+
 function checkJson<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(resolve(root, path), "utf8")) as T;
@@ -206,9 +221,9 @@ function checkDesiredSenderMode(desiredState: DesiredState | null) {
   if (!isSenderMode(mode)) {
     failures.push(`desired-state sender.mode must be ${senderModeList()}`);
   }
-  const authenticatedDomains = desiredState?.sender?.authenticated_domains;
-  if (authenticatedDomains !== undefined && !isStringArray(authenticatedDomains)) {
-    failures.push("desired-state sender.authenticated_domains must be an array of domains");
+  const candidateDomains = desiredState?.sender?.candidate_domains;
+  if (candidateDomains !== undefined && !isStringArray(candidateDomains)) {
+    failures.push("desired-state sender.candidate_domains must be an array of domains");
   }
 }
 
@@ -225,8 +240,23 @@ function checkDesiredOperatorDelivery(desiredState: DesiredState | null) {
   if (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk") {
     failures.push("desired-state operator_delivery.mode must be inbox_relay or web_desk");
   }
-  if (delivery.processing_mode !== "disabled" && delivery.processing_mode !== "enabled") {
-    failures.push("desired-state operator_delivery.processing_mode must be disabled or enabled");
+  const legacy = delivery.processing_mode;
+  const hasSplit = delivery.inbound_processing_mode !== undefined || delivery.reply_processing_mode !== undefined;
+  if (legacy !== undefined && hasSplit) {
+    failures.push("desired-state operator_delivery must not combine processing_mode with split processing modes");
+  } else if (legacy !== undefined) {
+    if (legacy !== "disabled" && legacy !== "enabled") {
+      failures.push("desired-state operator_delivery.processing_mode must be disabled or enabled");
+    }
+  } else {
+    for (const [name, value] of [
+      ["inbound_processing_mode", delivery.inbound_processing_mode],
+      ["reply_processing_mode", delivery.reply_processing_mode],
+    ] as const) {
+      if (value !== "disabled" && value !== "enabled") {
+        failures.push(`desired-state operator_delivery.${name} must be disabled or enabled`);
+      }
+    }
   }
   if (!isUsableValue(delivery.reply_domain)) {
     failures.push("desired-state operator_delivery.reply_domain is required");
@@ -256,14 +286,7 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   }
   if (delivery.mode !== "inbox_relay") return;
 
-  const relayProcessingMode = process.env.MAILDESK_RELAY_PROCESSING_MODE?.trim() || "disabled";
-  if (relayProcessingMode !== "disabled" && relayProcessingMode !== "enabled") {
-    failures.push("MAILDESK_RELAY_PROCESSING_MODE must be disabled or enabled");
-  } else if (relayProcessingMode !== delivery.processing_mode) {
-    failures.push(
-      `MAILDESK_RELAY_PROCESSING_MODE (${relayProcessingMode}) must match desired-state operator_delivery.processing_mode (${delivery.processing_mode})`,
-    );
-  }
+  checkRelayActivationEnv(delivery);
 
   const replyDomain = process.env.MAILDESK_REPLY_DOMAIN?.trim();
   if (replyDomain !== delivery.reply_domain) {
@@ -273,12 +296,39 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   checkRuntimeInteger("MAILDESK_SPOOL_RETENTION_DAYS", delivery.spool_retention_days);
   checkRuntimeInteger("MAILDESK_MAX_ENCODED_MESSAGE_BYTES", delivery.max_encoded_message_bytes);
   checkSendEmailBinding("deploy/mail-router/wrangler.toml");
+  checkSendEmailBinding("deploy/mail-outbound/wrangler.toml");
 }
 
 function checkRuntimeInteger(name: string, desired: unknown) {
   const runtime = process.env[name]?.trim();
   if (typeof desired !== "number" || runtime !== String(desired)) {
     failures.push(`${name} must match desired-state operator delivery configuration`);
+  }
+}
+
+function checkRelayActivationEnv(delivery: NonNullable<DesiredState["operator_delivery"]>) {
+  const legacyRuntime = process.env.MAILDESK_RELAY_PROCESSING_MODE?.trim();
+  const inboundRuntime = process.env.MAILDESK_INBOUND_RELAY_MODE?.trim();
+  const replyRuntime = process.env.MAILDESK_REPLY_RELAY_MODE?.trim();
+  const hasSplitRuntime = inboundRuntime !== undefined || replyRuntime !== undefined;
+  if (legacyRuntime !== undefined && hasSplitRuntime) {
+    failures.push("runtime must not combine MAILDESK_RELAY_PROCESSING_MODE with split relay modes");
+    return;
+  }
+  const desiredLegacy = delivery.processing_mode;
+  const desiredInbound = delivery.inbound_processing_mode ?? desiredLegacy;
+  const desiredReply = delivery.reply_processing_mode ?? desiredLegacy;
+  const actualInbound = inboundRuntime ?? legacyRuntime ?? "disabled";
+  const actualReply = replyRuntime ?? legacyRuntime ?? "disabled";
+  for (const [name, actual, desired] of [
+    ["MAILDESK_INBOUND_RELAY_MODE", actualInbound, desiredInbound],
+    ["MAILDESK_REPLY_RELAY_MODE", actualReply, desiredReply],
+  ] as const) {
+    if (actual !== "disabled" && actual !== "enabled") {
+      failures.push(`${name} must be disabled or enabled`);
+    } else if (actual !== desired) {
+      failures.push(`${name} (${actual}) must match desired-state split operator delivery configuration (${desired})`);
+    }
   }
 }
 
@@ -332,6 +382,10 @@ function checkRequiredEnvAny(names: string[]) {
 function checkAccessValidationEnv() {
   checkRequiredEnv("MAILDESK_ACCESS_TEAM_DOMAIN");
   checkRequiredEnv("MAILDESK_ACCESS_AUD");
+  const scope = process.env.MAILDESK_UI_ACCESS_SCOPE?.trim() || "desk_only";
+  if (scope !== "desk_only" && scope !== "all_routes") {
+    failures.push("MAILDESK_UI_ACCESS_SCOPE must be desk_only or all_routes");
+  }
 
   const configuredDomain = process.env.MAILDESK_ACCESS_TEAM_DOMAIN?.trim();
   if (!configuredDomain || !isUsableValue(configuredDomain)) return;
@@ -355,7 +409,11 @@ function checkAccessValidationEnv() {
 }
 
 function checkWranglerPlaceholders() {
-  for (const file of ["wrangler.toml", "deploy/mail-router/wrangler.toml", "deploy/ui/wrangler.toml"]) {
+  for (const file of [
+    "deploy/mail-router/wrangler.toml",
+    "deploy/mail-outbound/wrangler.toml",
+    "deploy/routing-health/wrangler.toml",
+  ]) {
     const wrangler = readFileSync(resolve(root, file), "utf8");
     if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
       failures.push(`${file} still contains placeholder Cloudflare resource IDs`);

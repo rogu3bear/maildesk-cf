@@ -28,11 +28,11 @@
     "workers": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mail_api", "mail_router", "ui"],
+      "required": ["relay_router", "relay_outbound", "routing_health"],
       "properties": {
-        "mail_api": { "$ref": "#/$defs/worker" },
-        "mail_router": { "$ref": "#/$defs/worker" },
-        "ui": { "$ref": "#/$defs/worker" }
+        "relay_router": { "$ref": "#/$defs/worker" },
+        "relay_outbound": { "$ref": "#/$defs/worker" },
+        "routing_health": { "$ref": "#/$defs/worker" }
       }
     },
     "storage": {
@@ -41,16 +41,18 @@
       "required": [
         "d1_database",
         "d1_preview_database",
-        "r2_raw_mail_bucket",
-        "r2_raw_mail_preview_bucket",
-        "queue"
+        "r2_policy_bucket",
+        "r2_spool_bucket",
+        "queue",
+        "dead_letter_queue"
       ],
       "properties": {
         "d1_database": { "$ref": "#/$defs/non_empty_string" },
         "d1_preview_database": { "$ref": "#/$defs/non_empty_string" },
-        "r2_raw_mail_bucket": { "$ref": "#/$defs/non_empty_string" },
-        "r2_raw_mail_preview_bucket": { "$ref": "#/$defs/non_empty_string" },
-        "queue": { "$ref": "#/$defs/non_empty_string" }
+        "r2_policy_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "r2_spool_bucket": { "$ref": "#/$defs/non_empty_string" },
+        "queue": { "$ref": "#/$defs/non_empty_string" },
+        "dead_letter_queue": { "$ref": "#/$defs/non_empty_string" }
       }
     },
     "operator_delivery": {
@@ -58,16 +60,32 @@
       "additionalProperties": false,
       "required": [
         "mode",
-        "processing_mode",
         "reply_domain",
         "reply_token_ttl_days",
         "spool_retention_days",
         "max_encoded_message_bytes",
         "banner_mode"
       ],
+      "oneOf": [
+        {
+          "required": ["inbound_processing_mode", "reply_processing_mode"],
+          "not": { "required": ["processing_mode"] }
+        },
+        {
+          "required": ["processing_mode"],
+          "not": {
+            "anyOf": [
+              { "required": ["inbound_processing_mode"] },
+              { "required": ["reply_processing_mode"] }
+            ]
+          }
+        }
+      ],
       "properties": {
         "mode": { "type": "string", "enum": ["inbox_relay", "web_desk"] },
         "processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
+        "inbound_processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
+        "reply_processing_mode": { "type": "string", "enum": ["disabled", "enabled"] },
         "reply_domain": { "$ref": "#/$defs/domain_name" },
         "reply_token_ttl_days": { "type": "integer", "minimum": 1, "maximum": 365 },
         "spool_retention_days": { "type": "integer", "minimum": 1, "maximum": 30 },
@@ -78,13 +96,13 @@
     "sender": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "authenticated_domains"],
+      "required": ["mode", "candidate_domains"],
       "properties": {
         "mode": {
           "type": "string",
           "enum": ["disabled", "cloudflare_email_service", "resend"]
         },
-        "authenticated_domains": {
+        "candidate_domains": {
           "type": "array",
           "items": { "$ref": "#/$defs/domain_name" },
           "uniqueItems": true

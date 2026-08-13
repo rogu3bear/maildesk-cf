@@ -522,7 +522,8 @@ function writeDesiredState(mode: "disabled" | "cloudflare_email_service" | "rese
         domains: [],
         operator_delivery: {
           mode: "web_desk",
-          processing_mode: "disabled",
+          inbound_processing_mode: "disabled",
+          reply_processing_mode: "disabled",
           reply_domain: "reply.maildesk.example.com",
           reply_token_ttl_days: 90,
           spool_retention_days: 7,
@@ -531,7 +532,7 @@ function writeDesiredState(mode: "disabled" | "cloudflare_email_service" | "rese
         },
         sender: {
           mode,
-          authenticated_domains: mode === "disabled" ? [] : ["example.com"],
+          candidate_domains: mode === "disabled" ? [] : ["example.com"],
         },
       },
       null,
