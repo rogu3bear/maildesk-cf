@@ -42,6 +42,7 @@ export async function verifyOperatorDkim(
   if (signatures.length === 0) return rejected("dkim_missing", verifiedAt);
 
   let sawIndeterminate = false;
+  let lastRejection: OperatorAuthenticationResult | null = null;
   for (const signature of signatures) {
     const result = await verifySignature(parsed.headers, parsed.body, signature, mailbox, operatorDomain, {
       fetcher: options.fetcher ?? fetch,
@@ -50,10 +51,11 @@ export async function verifyOperatorDkim(
     });
     if (result.status === "verified") return result;
     if (result.status === "indeterminate") sawIndeterminate = true;
+    if (result.status === "rejected") lastRejection = result;
   }
   return sawIndeterminate
     ? indeterminate("dkim_key_unavailable", verifiedAt)
-    : rejected("dkim_verification_failed", verifiedAt);
+    : lastRejection ?? rejected("dkim_verification_failed", verifiedAt);
 }
 
 async function verifySignature(
@@ -105,6 +107,10 @@ async function verifySignature(
       false,
       ["verify"],
     );
+    const modulusLength = (key.algorithm as { name: string; modulusLength?: number }).modulusLength;
+    if (!Number.isSafeInteger(modulusLength) || (modulusLength ?? 0) < 2048) {
+      return rejected("dkim_key_weak", options.verifiedAt);
+    }
     const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signatureBytes, signedData);
     if (!ok) return rejected("dkim_signature_invalid", options.verifiedAt);
     return {

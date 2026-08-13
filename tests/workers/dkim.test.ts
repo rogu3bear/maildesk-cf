@@ -61,7 +61,23 @@ test("DNS failure is indeterminate and therefore fail closed", async () => {
   expect(result.boundedErrorCode).toBe("dkim_key_unavailable");
 });
 
-async function signedMessage(selector = "test"): Promise<ArrayBuffer> {
+test("a cryptographically valid 1024-bit RSA signature is rejected as weak", async () => {
+  const pair = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const weakPublicKey = base64(await crypto.subtle.exportKey("spki", pair.publicKey));
+  const raw = await signedMessage("weak", pair.privateKey);
+  const result = await verifyOperatorDkim(raw, "operator@example.com", {
+    fetcher: dnsFetcher(weakPublicKey),
+  });
+
+  expect(result.status).toBe("rejected");
+  expect(result.boundedErrorCode).toBe("dkim_key_weak");
+});
+
+async function signedMessage(selector = "test", signingKey = privateKey): Promise<ArrayBuffer> {
   const headers = [
     "From: operator@example.com",
     "To: relay@example.net",
@@ -78,14 +94,14 @@ async function signedMessage(selector = "test"): Promise<ArrayBuffer> {
     "date:Wed, 12 Aug 2026 12:00:00 +0000\r\n",
     `dkim-signature:${value}`,
   ].join("");
-  const signature = base64(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", privateKey, encode(canonical)));
+  const signature = base64(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", signingKey, encode(canonical)));
   return encode([`DKIM-Signature: ${value}${signature}`, ...headers, "", body].join("\r\n"));
 }
 
-function dnsFetcher(): typeof fetch {
+function dnsFetcher(key = publicKeyBase64): typeof fetch {
   return (async () => Response.json({
     Status: 0,
-    Answer: [{ type: 16, TTL: 60, data: `"v=DKIM1; k=rsa; p=${publicKeyBase64}"` }],
+    Answer: [{ type: 16, TTL: 60, data: `"v=DKIM1; k=rsa; p=${key}"` }],
   })) as typeof fetch;
 }
 
