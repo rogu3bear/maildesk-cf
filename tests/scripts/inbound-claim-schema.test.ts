@@ -8,8 +8,10 @@ import {
   DISCARD_SUPERSEDED_UNSENT_RELAY_SQL,
 } from "../../workers/mail-router/src/index";
 import {
+  CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL,
   CLAIMED_INBOUND_RESULT_SQL,
   CLAIMED_REPLY_SPOOL_SQL,
+  PERSIST_INBOUND_DELIVERY_PROJECTION_SQL,
 } from "../../workers/mail-api/src/index";
 
 const root = resolve(import.meta.dir, "../..");
@@ -180,6 +182,65 @@ test("inbound Queue results must match the complete durable D1 claim", () => {
       receivedAt,
       "provider_accepted",
     )).toBeNull();
+  } finally {
+    database.close();
+  }
+});
+
+test("terminal inbound projection preserves cleanup authority until R2 cleanup succeeds", () => {
+  const database = migratedDatabase();
+  try {
+    seedSupersededClaim(database);
+    database.exec(`
+      UPDATE inbound_recipient_deliveries
+      SET status = 'provider_accepted', provider_message_id =
+        CASE operator_ref WHEN '${"e".repeat(64)}' THEN 'provider-a' ELSE 'provider-b' END;
+    `);
+    const results = [
+      {
+        operatorRef: "e".repeat(64),
+        deliveryPayloadR2Key: "relay-spool/message.a.json",
+        ok: true,
+        providerMessageId: "provider-a",
+      },
+      {
+        operatorRef: "f".repeat(64),
+        deliveryPayloadR2Key: "relay-spool/message.b.json",
+        ok: true,
+        providerMessageId: "provider-b",
+      },
+    ];
+    const binds = [
+      "inbound:message",
+      "relay:message",
+      "thread:message",
+      "route:security",
+      OLD_POLICY,
+      "relay-spool/message.eml",
+      JSON.stringify(results),
+      "2026-08-13T00:00:00.000Z",
+      "provider_accepted",
+    ] as const;
+
+    expect(database.query(PERSIST_INBOUND_DELIVERY_PROJECTION_SQL).run(
+      "provider_accepted",
+      "inbound:message",
+      OLD_POLICY,
+    ).changes).toBe(1);
+    expect(database.query(CLAIMED_INBOUND_RESULT_SQL).get(...binds)).not.toBeNull();
+    expect(database.query(
+      "SELECT status, raw_r2_key FROM inbound_deliveries WHERE id = ?1",
+    ).get("inbound:message")).toEqual({
+      status: "provider_accepted",
+      raw_r2_key: "relay-spool/message.eml",
+    });
+
+    expect(database.query(CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL).run(
+      "inbound:message",
+      OLD_POLICY,
+      "relay-spool/message.eml",
+    ).changes).toBe(1);
+    expect(database.query(CLAIMED_INBOUND_RESULT_SQL).get(...binds)).toBeNull();
   } finally {
     database.close();
   }

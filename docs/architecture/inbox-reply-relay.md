@@ -33,7 +33,12 @@ Before it can advance route health or delete recovery data, the consumer
 requires its delivery, relay, thread, route, policy, raw-spool key, complete
 recipient set, per-recipient payload keys, durable states, provider IDs, and
 bounded errors to match the D1 claim exactly. Cleanup keys are then derived from
-D1 and are deleted only after the durable delivery projection succeeds.
+D1 and are deleted only after the durable delivery projection succeeds. The
+raw-spool pointer remains durable cleanup authority until every idempotent R2
+deletion succeeds. A body-free digest receipt is recorded before that pointer
+is cleared, so Queue redelivery can either complete cleanup after a transient
+storage failure or recognize an exact terminal replay without repeating a
+provider send.
 
 An all-`pending` claim may be retired automatically only when its policy
 revision is no longer active and D1 atomically proves that no recipient crossed

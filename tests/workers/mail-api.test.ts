@@ -52,12 +52,94 @@ describe("mail API outbound sender modes", () => {
     expect(healthUpdate?.sql).toContain("rs.active_policy_sha256 = ?6");
     expect(healthUpdate?.binds[5]).toBe("a".repeat(64));
     const deliveryUpdate = db.statements.find((entry) => entry.sql.includes("UPDATE inbound_deliveries SET status"));
-    expect(deliveryUpdate?.sql).toContain("raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL");
+    expect(deliveryUpdate?.sql).not.toContain("raw_r2_key");
     expect(deliveryUpdate?.binds).toEqual([
       "provider_accepted",
       "delivery-recovery",
       "a".repeat(64),
     ]);
+    const cleanupUpdate = db.statements.find((entry) =>
+      entry.sql.includes("UPDATE inbound_deliveries SET raw_r2_key = NULL")
+    );
+    expect(cleanupUpdate?.binds).toEqual([
+      "delivery-recovery",
+      "a".repeat(64),
+      "relay-spool/delivery-recovery.eml",
+    ]);
+  });
+
+  test("inbound result redelivery completes D1-authorized cleanup after a transient R2 deletion failure", async () => {
+    const db = new D1Recorder();
+    const email = new SendEmailRecorder("must-not-send");
+    const deleteAttempts: string[] = [];
+    let failedOnce = false;
+    const job: MailJob = {
+      kind: "inbound_delivery_result",
+      deliveryId: "delivery-cleanup-retry",
+      relayId: "relay-cleanup-retry",
+      threadId: "thread-cleanup-retry",
+      routeId: "route:tenant.example.com:security",
+      policySha256: "a".repeat(64),
+      status: "provider_accepted",
+      results: [
+        { operatorRef: "operator-ref-a", deliveryPayloadR2Key: "relay-spool/delivery-cleanup-retry.a.json", ok: true, providerMessageId: "provider-a" },
+        { operatorRef: "operator-ref-b", deliveryPayloadR2Key: "relay-spool/delivery-cleanup-retry.b.json", ok: true, providerMessageId: "provider-b" },
+      ],
+      relaySpoolKey: "relay-spool/delivery-cleanup-retry.eml",
+      receivedAt: "2026-08-12T00:00:00.000Z",
+    };
+    const env = {
+      DB: db,
+      RAW_MAIL: {},
+      RELAY_SPOOL: {
+        delete: async (key: string) => {
+          deleteAttempts.push(key);
+          if (!failedOnce) {
+            failedOnce = true;
+            throw new Error("transient R2 deletion failure");
+          }
+        },
+      },
+      MAIL_JOBS: {},
+      EMAIL: email,
+      MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+      MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    } as unknown as Env;
+
+    const first = new MessageBatchRecorder([job]);
+    await expect(mailApiWorker.queue(first as unknown as MessageBatch<MailJob>, env))
+      .rejects.toThrow("transient R2 deletion failure");
+    expect(first.ackCount).toBe(0);
+    expect(email.messages).toHaveLength(0);
+    expect(db.statements.some((entry) =>
+      entry.sql.includes("UPDATE inbound_deliveries SET raw_r2_key = NULL")
+    )).toBe(false);
+
+    const redelivery = new MessageBatchRecorder([job], 2);
+    await mailApiWorker.queue(redelivery as unknown as MessageBatch<MailJob>, env);
+
+    expect(redelivery.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(deleteAttempts).toEqual([
+      "relay-spool/delivery-cleanup-retry.a.json",
+      "relay-spool/delivery-cleanup-retry.a.json",
+      "relay-spool/delivery-cleanup-retry.b.json",
+      "relay-spool/delivery-cleanup-retry.eml",
+    ]);
+    const cleanupUpdate = db.statements.find((entry) =>
+      entry.sql.includes("UPDATE inbound_deliveries SET raw_r2_key = NULL")
+    );
+    expect(cleanupUpdate?.binds).toEqual([
+      "delivery-cleanup-retry",
+      "a".repeat(64),
+      "relay-spool/delivery-cleanup-retry.eml",
+    ]);
+
+    const terminalRedelivery = new MessageBatchRecorder([job], 3);
+    await mailApiWorker.queue(terminalRedelivery as unknown as MessageBatch<MailJob>, env);
+    expect(terminalRedelivery.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(deleteAttempts).toHaveLength(4);
   });
 
   test("a counterfeit inbound result cannot project health or delete Queue-selected spool keys", async () => {
@@ -176,9 +258,7 @@ describe("mail API outbound sender modes", () => {
       entry.sql.includes("UPDATE inbound_deliveries SET status") &&
       entry.binds[0] === "recovery_required"
     );
-    expect(deliveryUpdate?.sql).toContain(
-      "raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL ELSE raw_r2_key END",
-    );
+    expect(deliveryUpdate?.sql).not.toContain("raw_r2_key");
   });
 
   test("a missing active-revision health row retains recovery state for retry", async () => {
@@ -1412,6 +1492,7 @@ class MessageBatchRecorder {
 class D1Recorder {
   readonly statements: RecordedStatement[] = [];
   private failedOnce = false;
+  private inboundCleanupCleared = false;
 
   constructor(
     private readonly relayRow?: Record<string, unknown>,
@@ -1456,6 +1537,9 @@ class D1Recorder {
           return { success: true, meta: { changes: 0 } };
         }
         statements.push(record);
+        if (sql.includes("UPDATE inbound_deliveries SET raw_r2_key = NULL")) {
+          recorder.inboundCleanupCleared = true;
+        }
         return { success: true, meta: { changes: 1 } };
       },
       async first() {
@@ -1479,7 +1563,7 @@ class D1Recorder {
           };
         }
         if (record.sql.includes("SELECT d.raw_r2_key") && record.sql.includes("accepted_payload_keys_json")) {
-          if (recorder.rejectInboundResultClaim) return null;
+          if (recorder.rejectInboundResultClaim || recorder.inboundCleanupCleared) return null;
           const results = JSON.parse(String(record.binds[6])) as Array<{
             deliveryPayloadR2Key: string;
             ok: boolean;

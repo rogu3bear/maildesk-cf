@@ -31,6 +31,12 @@ export const CLAIMED_REPLY_SPOOL_SQL =
 export const CLAIMED_INBOUND_RESULT_SQL =
   "SELECT d.raw_r2_key, (SELECT json_group_array(rd.delivery_payload_r2_key) FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AS accepted_payload_keys_json FROM inbound_deliveries d WHERE d.id = ?1 AND d.relay_id = ?2 AND d.thread_id = ?3 AND d.route_id = ?4 AND d.policy_sha256 = ?5 AND d.raw_r2_key = ?6 AND d.received_at = ?8 AND (SELECT COUNT(*) FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id) = json_array_length(?7) AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND NOT EXISTS (SELECT 1 FROM json_each(?7) queued WHERE json_extract(queued.value, '$.operatorRef') = rd.operator_ref AND json_extract(queued.value, '$.deliveryPayloadR2Key') = rd.delivery_payload_r2_key AND ((json_extract(queued.value, '$.ok') = 1 AND rd.status = 'provider_accepted' AND COALESCE(json_extract(queued.value, '$.providerMessageId'), '') = COALESCE(rd.provider_message_id, '')) OR (json_extract(queued.value, '$.ok') = 0 AND rd.status IN ('recovery_required', 'failed') AND COALESCE(json_extract(queued.value, '$.errorCode'), '') = COALESCE(rd.error_code, ''))))) AND NOT EXISTS (SELECT 1 FROM json_each(?7) queued WHERE NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.operator_ref = json_extract(queued.value, '$.operatorRef') AND rd.delivery_payload_r2_key = json_extract(queued.value, '$.deliveryPayloadR2Key'))) AND ((?9 = 'provider_accepted' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'provider_accepted')) OR (?9 = 'partial_delivery' AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'provider_accepted')) OR (?9 = 'recovery_required' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'provider_accepted') AND EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status = 'recovery_required')) OR (?9 = 'failed' AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = d.id AND rd.status != 'failed'))) LIMIT 1";
 
+export const PERSIST_INBOUND_DELIVERY_PROJECTION_SQL =
+  "UPDATE inbound_deliveries SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3";
+
+export const CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL =
+  "UPDATE inbound_deliveries SET raw_r2_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND policy_sha256 = ?2 AND status = 'provider_accepted' AND raw_r2_key = ?3";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -476,7 +482,10 @@ async function projectInboundDeliveryResult(
   env: Env,
 ): Promise<void> {
   const claimed = await loadClaimedInboundResult(job, env);
-  if (!claimed) throw new Error("inbound result does not match its durable delivery claim");
+  if (!claimed) {
+    if (await inboundCleanupAlreadyComplete(job, env)) return;
+    throw new Error("inbound result does not match its durable delivery claim");
+  }
   const acceptedCount = job.results.filter((result) => result.ok).length;
   const providerMessageIds = job.results.flatMap((result) =>
     result.providerMessageId ? [result.providerMessageId] : []
@@ -521,6 +530,8 @@ async function projectInboundDeliveryResult(
     if (job.status === "provider_accepted") {
       if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
       await env.RELAY_SPOOL.delete(claimed.rawR2Key);
+      await recordInboundCleanupComplete(job, env);
+      await clearInboundCleanupAuthority(job, env);
     }
     return;
   }
@@ -560,6 +571,8 @@ async function projectInboundDeliveryResult(
   if (job.status === "provider_accepted") {
     if (!env.RELAY_SPOOL) throw new Error("relay spool binding unavailable");
     await env.RELAY_SPOOL.delete(claimed.rawR2Key);
+    await recordInboundCleanupComplete(job, env);
+    await clearInboundCleanupAuthority(job, env);
   }
 }
 
@@ -567,12 +580,70 @@ async function persistInboundDeliveryProjection(
   job: InboundDeliveryResultJob,
   env: Env,
 ): Promise<void> {
-  const projected = await env.DB.prepare(
-    "UPDATE inbound_deliveries SET status = ?1, raw_r2_key = CASE WHEN ?1 = 'provider_accepted' THEN NULL ELSE raw_r2_key END, updated_at = CURRENT_TIMESTAMP WHERE id = ?2 AND policy_sha256 = ?3",
-  ).bind(job.status, job.deliveryId, job.policySha256).run();
+  const projected = await env.DB.prepare(PERSIST_INBOUND_DELIVERY_PROJECTION_SQL)
+    .bind(job.status, job.deliveryId, job.policySha256).run();
   if (Number(projected.meta?.changes ?? 0) !== 1) {
     throw new Error("inbound result delivery projection lost its durable claim");
   }
+}
+
+async function clearInboundCleanupAuthority(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  const cleared = await env.DB.prepare(CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL)
+    .bind(job.deliveryId, job.policySha256, job.relaySpoolKey).run();
+  if (Number(cleared.meta?.changes ?? 0) !== 1) {
+    throw new Error("inbound result cleanup authority could not be retired");
+  }
+}
+
+async function recordInboundCleanupComplete(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<void> {
+  await recordAuditEvent(
+    env,
+    "system",
+    "operator_delivery_cleanup_complete",
+    { deliveryId: job.deliveryId, resultSha256: await inboundResultSha256(job) },
+    `${job.deliveryId}:operator_delivery_cleanup_complete`,
+    job.threadId,
+  );
+}
+
+async function inboundCleanupAlreadyComplete(
+  job: InboundDeliveryResultJob,
+  env: Env,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT action, detail_json FROM audit_events WHERE dedupe_key = ?1 LIMIT 1",
+  ).bind(`${job.deliveryId}:operator_delivery_cleanup_complete`).first<{
+    action: string;
+    detail_json: string;
+  }>();
+  if (row?.action !== "operator_delivery_cleanup_complete") return false;
+  try {
+    const detail = JSON.parse(row.detail_json) as Record<string, unknown>;
+    return detail.deliveryId === job.deliveryId &&
+      detail.resultSha256 === await inboundResultSha256(job);
+  } catch {
+    return false;
+  }
+}
+
+async function inboundResultSha256(job: InboundDeliveryResultJob): Promise<string> {
+  return sha256Hex(JSON.stringify({
+    deliveryId: job.deliveryId,
+    relayId: job.relayId,
+    threadId: job.threadId,
+    routeId: job.routeId,
+    policySha256: job.policySha256,
+    status: job.status,
+    results: job.results,
+    relaySpoolKey: job.relaySpoolKey,
+    receivedAt: job.receivedAt,
+  }));
 }
 
 async function deleteAcceptedInboundPayloads(
