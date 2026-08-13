@@ -167,3 +167,10 @@ Email Service is called. Redelivery may repair body-free result projection, but
 it must not resend a recipient in `sending`, `provider_accepted`, or
 `recovery_required`; Cloudflare Email Service does not expose a provider
 idempotency key for safely replaying that transition.
+
+Policy supersession is the one safe automatic retirement case: D1 may remove
+an old fingerprint and relay only when the active revision differs and every
+recipient is still `pending`. The conditional delete serializes against the
+policy-bound `pending -> sending` claim. R2 cleanup follows confirmed D1
+retirement, and every attempt uses a distinct spool key so stale cleanup cannot
+erase a replacement attempt.

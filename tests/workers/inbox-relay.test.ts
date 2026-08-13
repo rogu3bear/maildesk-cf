@@ -313,6 +313,55 @@ test("ambiguous recipient projection is never replayed on identical inbound rede
   });
 });
 
+test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
+  const supersedingPolicy = {
+    default_reply_mode: "role_first",
+    domains: {
+      "example.com": {
+        role_aliases: {
+          security: {
+            operators: ["operator-a@example.com", "operator-b@example.com"],
+            reply_identity: "security@example.com",
+            allowed_reply_identities: ["security@example.com"],
+          },
+          abuse: {
+            operators: ["operator-a@example.com"],
+            reply_identity: "abuse@example.com",
+            allowed_reply_identities: ["abuse@example.com"],
+          },
+        },
+        personal_aliases: {},
+      },
+    },
+  } as RouterPolicy;
+  const db = new RelayD1(undefined, false, supersedingPolicy);
+  const deliveries: EmailMessageBuilder[] = [];
+  const spoolObjects = new Set<string>();
+  const spoolPuts: string[] = [];
+  const env = relayEnv(db, deliveries);
+  env.RELAY_SPOOL = {
+    put: async (key: string) => { spoolPuts.push(key); spoolObjects.add(key); },
+    delete: async (key: string) => { spoolObjects.delete(key); },
+  } as unknown as R2Bucket;
+  const raw = mime({ from: "sender@example.net", messageId: "<superseded-pending@example.net>" });
+
+  const first = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(first, env, {} as ExecutionContext);
+  expect(first.rejected).toContain("policy changed before operator delivery");
+  expect(deliveries).toHaveLength(0);
+  expect(db.inboundDelivery).toBeUndefined();
+  expect(spoolObjects.size).toBe(0);
+
+  const redelivery = inboundMessage("sender@example.net", "security@example.com", raw);
+  await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
+  expect(redelivery.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(2);
+  expect(spoolPuts).toHaveLength(2);
+  expect(spoolPuts[0]).not.toBe(spoolPuts[1]);
+  expect(spoolObjects.size).toBe(0);
+  expect(db.inboundDelivery?.status).toBe("provider_accepted");
+});
+
 test("a policy revision change during persistence rejects without rewriting route authority", async () => {
   const db = new RelayD1(undefined, true);
   const deliveries: EmailMessageBuilder[] = [];
@@ -553,8 +602,8 @@ function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: R
     RAW_MAIL: relaySpool,
     RELAY_SPOOL: relaySpool,
     POLICY_STORE: {
-      get: async (key: string) => key === `config/policy/${policySha256}.json`
-        ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer }
+      get: async (key: string) => db.activePolicy && key === `config/policy/${db.activePolicy.sha256}.json`
+        ? { arrayBuffer: async () => new TextEncoder().encode(db.activePolicy!.json).buffer }
         : null,
     } as unknown as R2Bucket,
     MAIL_JOBS: { send: async () => undefined } as unknown as Queue,
@@ -632,6 +681,7 @@ class RelayD1 {
   constructor(
     private readonly failOnceSql?: string,
     private readonly rejectPolicyBoundPersistence = false,
+    private readonly supersedingPolicy?: RouterPolicy,
   ) {}
 
   prepare(sql: string): D1PreparedStatement {
@@ -646,7 +696,8 @@ class RelayD1 {
         }
         if (sql.includes("UPDATE inbound_recipient_deliveries SET status = 'sending'")) {
           const recipient = this.recipientDeliveries.find((row) =>
-            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending"
+            row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1] && row.status === "pending" &&
+            this.inboundDelivery?.policy_sha256 === call.bindings[2]
           );
           if (!recipient) return { success: true, meta: { changes: 0 } };
           recipient.status = "sending";
@@ -697,6 +748,27 @@ class RelayD1 {
   }
 
   async batch(statements: D1PreparedStatement[]) {
+    const calls = statements.flatMap((statement) => {
+      const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
+      return call ? [call] : [];
+    });
+    const discardingInbound = calls.find((call) => call.sql.startsWith("DELETE FROM inbound_deliveries"));
+    if (discardingInbound) {
+      const canDiscard = this.inboundDelivery?.id === discardingInbound.bindings[0] &&
+        this.inboundDelivery.policy_sha256 === discardingInbound.bindings[1] &&
+        this.activePolicy?.sha256 !== this.inboundDelivery.policy_sha256 &&
+        this.recipientDeliveries.every((row) => row.status === "pending");
+      if (canDiscard) {
+        const deliveryId = this.inboundDelivery!.id;
+        this.inboundDelivery = undefined;
+        this.recipientDeliveries = this.recipientDeliveries.filter((row) => row.delivery_id !== deliveryId);
+      }
+      return statements.map(() => ({
+        success: true,
+        meta: { changes: canDiscard ? 1 : 0 },
+        results: [],
+      }));
+    }
     for (const statement of this.rejectPolicyBoundPersistence ? [] : statements) {
       const call = (statement as unknown as { __call?: { sql: string; bindings: unknown[] } }).__call;
       if (!call) continue;
@@ -723,6 +795,10 @@ class RelayD1 {
           error_code: null,
         });
       }
+    }
+    if (this.supersedingPolicy && calls.some((call) => call.sql.includes("INSERT INTO inbound_deliveries"))) {
+      const json = JSON.stringify(this.supersedingPolicy);
+      this.activePolicy = { sha256: createHash("sha256").update(json).digest("hex"), json };
     }
     return statements.map((_, index) => ({
       success: true,

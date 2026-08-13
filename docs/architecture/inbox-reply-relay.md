@@ -26,6 +26,14 @@ key, an interrupted `sending` transition is explicitly `recovery_required` and
 requires provider reconciliation or manual recovery; token possession or a
 retained MIME spool never authorizes automatic replay.
 
+An all-`pending` claim may be retired automatically only when its policy
+revision is no longer active and D1 atomically proves that no recipient crossed
+the provider-send boundary. Each attempt has a token-hash-qualified R2 key, so
+delayed cleanup of the retired attempt cannot delete a replacement spool. The
+replacement route is then evaluated under the current policy. Same-policy
+`pending` claims and every `sending` or terminal recipient remain preserved for
+explicit recovery rather than being reset speculatively.
+
 ## Reply invariant
 
 The reply-domain Worker accepts a message only when the relay is active, the

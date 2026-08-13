@@ -130,8 +130,16 @@ async function acceptInboxRelay(
     return;
   }
   if (existingInbound) {
-    await recoverExistingInbound(existingInbound, env);
-    return;
+    const discarded = await discardSupersededUnsentInbound(existingInbound, env).catch(() => false);
+    if (discarded) {
+      if (existingInbound.raw_r2_key) {
+        await env.RELAY_SPOOL.delete(existingInbound.raw_r2_key).catch(() => undefined);
+      }
+      existingInbound = null;
+    } else {
+      await recoverExistingInbound(existingInbound, env);
+      return;
+    }
   }
 
   const deliveryId = `inbound:${fingerprintSha256}`;
@@ -164,7 +172,10 @@ async function acceptInboxRelay(
     return;
   }
 
-  const candidateSpoolKey = relaySpoolKey(deliveryId, receivedAt);
+  // A random token-hash suffix isolates each pre-send attempt. If an entirely
+  // unsent claim is retired after policy supersession, delayed cleanup for the
+  // old claim cannot delete the replacement attempt's spool object.
+  const candidateSpoolKey = relaySpoolKey(`${deliveryId}.${tokenHash.slice(0, 16)}`, receivedAt);
   try {
     await env.RELAY_SPOOL.put(candidateSpoolKey, rawBytes, {
       httpMetadata: { contentType: MIME_CONTENT_TYPE },
@@ -201,8 +212,9 @@ async function acceptInboxRelay(
     const concurrent = await loadInboundDelivery(fingerprintSha256, env).catch(() => null);
     if (concurrent) {
       // A simultaneous provider delivery may have won the unique fingerprint
-      // claim after our initial read. Both invocations use the same immutable
-      // spool key and bytes, so the losing invocation must not delete it.
+      // claim after our initial read. Delete only this invocation's unique
+      // spool below; the winning claim points at a different immutable key.
+      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
       await recoverExistingInbound(concurrent, env);
       return;
     }
@@ -213,11 +225,27 @@ async function acceptInboxRelay(
 
   const currentPolicy = await loadActivePolicy(env);
   if (!currentPolicy || currentPolicy.sha256 !== policySha256) {
-    await env.DB.prepare(
-      "UPDATE reply_relays SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?1 AND revoked_at IS NULL",
-    ).bind(relayId).run().catch(() => undefined);
-    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
-    message.setReject("maildesk policy changed before operator delivery");
+    const inbound: InboundDeliveryRow = {
+      id: deliveryId,
+      relay_id: relayId,
+      thread_id: persisted.threadId,
+      route_id: persisted.routeId,
+      policy_sha256: policySha256,
+      raw_r2_key: candidateSpoolKey,
+      received_at: receivedAt,
+      status: "pending",
+    };
+    const discarded = currentPolicy
+      ? await discardSupersededUnsentInbound(inbound, env).catch(() => false)
+      : false;
+    if (discarded) {
+      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
+      message.setReject("maildesk policy changed before operator delivery");
+    } else {
+      // If any recipient already crossed into `sending`, provider outcome is
+      // ambiguous. Preserve the claim and spool; never invite SMTP replay.
+      await recoverExistingInbound(inbound, env);
+    }
     return;
   }
 
@@ -227,7 +255,7 @@ async function acceptInboxRelay(
     const operatorRef = operatorRefs[index]!;
     let claimed = false;
     try {
-      claimed = await claimInboundRecipient(deliveryId, operatorRef, env);
+      claimed = await claimInboundRecipient(deliveryId, operatorRef, policySha256, env);
     } catch {
       // No provider call occurred. The durable delivery remains visible for
       // recovery rather than bypassing the recipient claim boundary.
@@ -672,6 +700,24 @@ async function loadInboundDelivery(
   ).bind(fingerprintSha256).first<InboundDeliveryRow>();
 }
 
+async function discardSupersededUnsentInbound(
+  inbound: InboundDeliveryRow,
+  env: Env,
+): Promise<boolean> {
+  const activePolicy = await loadActivePolicy(env);
+  if (!activePolicy || activePolicy.sha256 === inbound.policy_sha256) return false;
+
+  const discarded = await env.DB.batch([
+    env.DB.prepare(
+      "DELETE FROM inbound_deliveries WHERE id = ?1 AND policy_sha256 = ?2 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 != ?2) AND NOT EXISTS (SELECT 1 FROM inbound_recipient_deliveries rd WHERE rd.delivery_id = inbound_deliveries.id AND rd.status != 'pending')",
+    ).bind(inbound.id, inbound.policy_sha256),
+    env.DB.prepare(
+      "DELETE FROM reply_relays WHERE id = ?1 AND policy_sha256 = ?2 AND NOT EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.relay_id = reply_relays.id)",
+    ).bind(inbound.relay_id, inbound.policy_sha256),
+  ]);
+  return discarded.length === 2 && discarded.every((result) => Number(result.meta?.changes ?? 0) === 1);
+}
+
 async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Promise<void> {
   const recipients = await env.DB.prepare(
     "SELECT operator_ref, status, provider_message_id, error_code FROM inbound_recipient_deliveries WHERE delivery_id = ?1 ORDER BY operator_ref",
@@ -721,11 +767,12 @@ async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Pr
 async function claimInboundRecipient(
   deliveryId: string,
   operatorRef: string,
+  policySha256: string,
   env: Env,
 ): Promise<boolean> {
   const claimed = await env.DB.prepare(
-    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending'",
-  ).bind(deliveryId, operatorRef).run();
+    "UPDATE inbound_recipient_deliveries SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE delivery_id = ?1 AND operator_ref = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM inbound_deliveries d WHERE d.id = inbound_recipient_deliveries.delivery_id AND d.policy_sha256 = ?3)",
+  ).bind(deliveryId, operatorRef, policySha256).run();
   return Number(claimed.meta?.changes ?? 0) === 1;
 }
 
