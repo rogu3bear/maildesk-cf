@@ -96,9 +96,12 @@ the shell, then run:
 bun run preflight:production -- --env-file .dev.vars
 ```
 
-Production preflight must fail on placeholder Cloudflare IDs, missing auth,
-missing project name, or invalid policy. Treat that failure as useful. It is
-the system refusing to pretend.
+Production preflight must fail on placeholder Cloudflare IDs in the Worker
+configs selected by desired state, missing auth, missing project name, or
+invalid policy. Keep real resource IDs in ignored production configs and point
+the ignored desired-state file at those exact configs; do not replace the
+tracked template placeholders. Treat a preflight failure as useful. It is the
+system refusing to pretend.
 
 ## 6. Deploy
 

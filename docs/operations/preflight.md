@@ -95,8 +95,15 @@ Production preflight fails if `MAILDESK_OUTBOUND_MODE` disagrees with
 
 `disabled` proves inbound and reply authorization without sending mail and does
 not require sender-domain provider readback. `cloudflare_email_service`
-requires a Worker `send_email` binding named `EMAIL` in `wrangler.toml` and
-`MAILDESK_VERIFIED_SENDER_DOMAINS` built from Cloudflare Email Service readback.
+requires a Worker `send_email` binding named `EMAIL` in the applicable Worker
+configuration and `MAILDESK_VERIFIED_SENDER_DOMAINS` built from Cloudflare
+Email Service readback. In `inbox_relay`, production preflight derives the
+router, outbound, and routing-health configurations from the selected
+desired-state file. Those paths must be repository-relative canonical
+`deploy/<role>/wrangler*.toml` paths; private instances can therefore select
+ignored `wrangler.production.toml` files without putting live resource IDs in
+the tracked public-template configs. Placeholder checks and Email-binding
+checks apply to those selected files.
 `resend` requires a Resend API key from `RESEND_API_KEY` or the local
 compatibility alias `RESEND`, plus `MAILDESK_VERIFIED_SENDER_DOMAINS` built
 from Resend provider readback.

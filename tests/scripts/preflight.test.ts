@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,113 @@ const root = resolve(import.meta.dir, "../..");
 setDefaultTimeout(30_000);
 
 describe("production preflight", () => {
+  test("validates desired-state-selected production configs instead of tracked template placeholders", () => {
+    const topology = writeProductionTopology();
+    try {
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("preflight ok: production");
+      expect(result.stderr).not.toContain("still contains placeholder Cloudflare resource IDs");
+    } finally {
+      topology.cleanup();
+    }
+  });
+
+  test("rejects a placeholder in the selected production config", () => {
+    const topology = writeProductionTopology({ routerPlaceholder: true });
+    try {
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${topology.routerPath} still contains placeholder Cloudflare resource IDs`,
+      );
+      expect(result.stderr).not.toContain(
+        "deploy/mail-outbound/wrangler.toml still contains placeholder Cloudflare resource IDs",
+      );
+    } finally {
+      topology.cleanup();
+    }
+  });
+
+  test("requires the EMAIL binding in the selected inbox-relay outbound config", () => {
+    const topology = writeProductionTopology({ outboundWithoutEmail: true });
+    try {
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `cloudflare_email_service mode requires ${topology.outboundPath} send_email binding named "EMAIL"`,
+      );
+      expect(result.stderr).not.toContain(
+        "cloudflare_email_service mode requires wrangler.toml send_email binding named \"EMAIL\"",
+      );
+    } finally {
+      topology.cleanup();
+    }
+  });
+
+  test("rejects non-canonical desired-state Worker config authority", () => {
+    const desiredPath = writeDesiredState("disabled", {
+      workers: {
+        relay_router: { config: "/tmp/wrangler.toml" },
+        relay_outbound: { config: "deploy/mail-outbound/wrangler.toml" },
+        routing_health: { config: "deploy/routing-health/wrangler.toml" },
+      },
+    });
+    const env = productionEnv(desiredPath, "disabled");
+
+    const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+      cwd: root,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "desired-state workers.relay_router.config must be a repository-relative canonical deploy/mail-router/wrangler*.toml path",
+    );
+  });
+
+  test("reports an absent selected production config without throwing", () => {
+    const topology = writeProductionTopology();
+    try {
+      rmSync(resolve(root, topology.routerPath));
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`missing required file: ${topology.routerPath}`);
+      expect(result.stderr).toContain("relay topology validation failed");
+      expect(result.stderr).not.toContain("at readProductionWorkerConfigs");
+    } finally {
+      topology.cleanup();
+    }
+  });
+
+  test("rejects a canonical selected config whose symlink resolves outside the repository", () => {
+    const topology = writeProductionTopology();
+    const outsideDirectory = mkdtempSync(join(tmpdir(), "maildesk-external-wrangler-"));
+    const outsideConfig = join(outsideDirectory, "wrangler.toml");
+    try {
+      const routerConfig = resolve(root, topology.routerPath);
+      writeFileSync(outsideConfig, readFileSync(routerConfig));
+      rmSync(routerConfig);
+      symlinkSync(outsideConfig, routerConfig);
+
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "desired-state workers.relay_router.config must resolve to a regular file inside the repository",
+      );
+      expect(result.stderr).not.toContain(outsideConfig);
+    } finally {
+      topology.cleanup();
+      rmSync(outsideDirectory, { force: true, recursive: true });
+    }
+  });
+
   test("accepts RESEND as a local compatibility alias for RESEND_API_KEY", () => {
     const desiredPath = writeDesiredState("resend");
     const env = {
@@ -508,7 +615,10 @@ exit 1
   return path;
 }
 
-function writeDesiredState(mode: "disabled" | "cloudflare_email_service" | "resend"): string {
+function writeDesiredState(
+  mode: "disabled" | "cloudflare_email_service" | "resend",
+  additions: Record<string, unknown> = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-desired-"));
   const path = join(dir, "desired-state.json");
   writeFileSync(
@@ -534,10 +644,113 @@ function writeDesiredState(mode: "disabled" | "cloudflare_email_service" | "rese
           mode,
           candidate_domains: mode === "disabled" ? [] : ["example.com"],
         },
+        ...additions,
       },
       null,
       2,
     )}\n`,
   );
   return path;
+}
+
+let productionTopologySequence = 0;
+
+function writeProductionTopology(options: {
+  routerPlaceholder?: boolean;
+  outboundWithoutEmail?: boolean;
+} = {}) {
+  productionTopologySequence += 1;
+  const suffix = `preflight-${process.pid}-${productionTopologySequence}`;
+  const routerPath = `deploy/mail-router/wrangler.${suffix}.toml`;
+  const outboundPath = `deploy/mail-outbound/wrangler.${suffix}.toml`;
+  const healthPath = `deploy/routing-health/wrangler.${suffix}.toml`;
+  const realId = "11111111-1111-4111-8111-111111111111";
+  const placeholder = "00000000-0000-0000-0000-000000000000";
+  const selected = [routerPath, outboundPath, healthPath];
+
+  const router = readFileSync(resolve(root, "deploy/mail-router/wrangler.toml"), "utf8")
+    .replaceAll(placeholder, options.routerPlaceholder ? placeholder : realId);
+  let outbound = readFileSync(resolve(root, "deploy/mail-outbound/wrangler.toml"), "utf8")
+    .replaceAll(placeholder, realId);
+  const health = readFileSync(resolve(root, "deploy/routing-health/wrangler.toml"), "utf8")
+    .replaceAll(placeholder, realId);
+  if (options.outboundWithoutEmail) {
+    outbound = outbound.replace(/send_email = \[\n\s*\{ name = "EMAIL" \}\n\]\n\n/, "");
+  }
+
+  writeFileSync(resolve(root, routerPath), router);
+  writeFileSync(resolve(root, outboundPath), outbound);
+  writeFileSync(resolve(root, healthPath), health);
+
+  const desiredPath = writeDesiredState("cloudflare_email_service", {
+    domains: [{ name: "example.com" }],
+    operator_delivery: {
+      mode: "inbox_relay",
+      inbound_processing_mode: "disabled",
+      reply_processing_mode: "disabled",
+      reply_domain: "reply.maildesk.example.com",
+      reply_token_ttl_days: 90,
+      spool_retention_days: 7,
+      max_encoded_message_bytes: 5_242_880,
+      banner_mode: "inline",
+    },
+    workers: {
+      relay_router: { script_name: "maildesk-cf-router", config: routerPath },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: outboundPath },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: healthPath },
+    },
+    storage: {
+      d1_database: "maildesk-cf-relay-db",
+      d1_preview_database: "maildesk-cf-relay-preview-db",
+      r2_policy_bucket: "maildesk-cf-policy",
+      r2_spool_bucket: "maildesk-cf-relay-spool",
+      queue: "maildesk-cf-relay-jobs",
+      dead_letter_queue: "maildesk-cf-relay-dlq",
+    },
+  });
+
+  return {
+    desiredPath,
+    routerPath,
+    outboundPath,
+    cleanup: () => {
+      for (const path of selected) rmSync(resolve(root, path), { force: true });
+    },
+  };
+}
+
+function productionEnv(
+  desiredPath: string,
+  mode: "disabled" | "cloudflare_email_service" | "resend",
+): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    CFCTL_BIN: fakeCfctlV2Doctor(),
+    CLOUDFLARE_ACCOUNT_ID: "example-account-id",
+    CLOUDFLARE_API_TOKEN: "example-token",
+    MAILDESK_DESIRED_STATE_PATH: desiredPath,
+    MAILDESK_POLICY_PATH: "config/policy.example.json",
+    MAILDESK_PROJECT_NAME: "maildesk-cf",
+    MAILDESK_OUTBOUND_MODE: mode,
+    MAILDESK_VERIFIED_SENDER_DOMAINS: mode === "disabled" ? "" : "example.com",
+    MAILDESK_REPLY_API_MODE: "disabled",
+    MAILDESK_ACCESS_TEAM_DOMAIN: "https://example.cloudflareaccess.com",
+    MAILDESK_ACCESS_AUD: "example-access-audience",
+    MAILDESK_UI_ACCESS_SCOPE: "all_routes",
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+    MAILDESK_INBOUND_RELAY_MODE: "disabled",
+    MAILDESK_REPLY_RELAY_MODE: "disabled",
+    MAILDESK_REPLY_DOMAIN: "reply.maildesk.example.com",
+    MAILDESK_REPLY_TOKEN_TTL_DAYS: "90",
+    MAILDESK_SPOOL_RETENTION_DAYS: "7",
+    MAILDESK_MAX_ENCODED_MESSAGE_BYTES: "5242880",
+  };
+}
+
+function runInboxRelayProductionPreflight(desiredPath: string) {
+  return spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+    cwd: root,
+    encoding: "utf8",
+    env: productionEnv(desiredPath, "cloudflare_email_service"),
+  });
 }
