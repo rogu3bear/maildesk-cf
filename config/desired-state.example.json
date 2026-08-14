@@ -15,15 +15,15 @@
   "workers": {
     "relay_router": {
       "script_name": "maildesk-cf-router",
-      "config": "deploy/mail-router/wrangler.toml"
+      "config": "wrangler.mail-router.toml"
     },
     "relay_outbound": {
       "script_name": "maildesk-cf-relay-outbound",
-      "config": "deploy/mail-outbound/wrangler.toml"
+      "config": "wrangler.mail-outbound.toml"
     },
     "routing_health": {
       "script_name": "maildesk-cf-routing-health",
-      "config": "deploy/routing-health/wrangler.toml"
+      "config": "wrangler.routing-health.toml"
     }
   },
   "storage": {

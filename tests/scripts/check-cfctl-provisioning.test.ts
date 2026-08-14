@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { wranglerBuildCommandFailure } from "../../scripts/wrangler-config";
+import {
+  wranglerArtifactContainmentFailure,
+  wranglerBuildCommandFailure,
+} from "../../scripts/wrangler-config";
 import { isRepositoryRelativePath } from "../../scripts/wrangler-config";
 
 const root = resolve(import.meta.dir, "../..");
@@ -59,9 +62,9 @@ describe("cfctl provisioning contract check", () => {
       "maildesk-cf-routing-health",
     ]);
     expect(receipt.resources.worker_configs).toEqual([
-      "deploy/mail-outbound/wrangler.toml",
-      "deploy/mail-router/wrangler.toml",
-      "deploy/routing-health/wrangler.toml",
+      "wrangler.mail-outbound.toml",
+      "wrangler.mail-router.toml",
+      "wrangler.routing-health.toml",
     ]);
     expect(receipt.resources.storage).toEqual([
       "d1:maildesk-cf-relay-db",
@@ -87,7 +90,7 @@ describe("cfctl provisioning contract check", () => {
     const desired = JSON.parse(
       readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
     ) as { workers: { relay_router: { config: string } } };
-    desired.workers.relay_router.config = "wrangler.mail-router.toml";
+    desired.workers.relay_router.config = "wrangler.toml";
     writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
 
     const result = spawnSync(
@@ -105,32 +108,34 @@ describe("cfctl provisioning contract check", () => {
     rmSync(dir, { force: true, recursive: true });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("workers.relay_router.config must use the canonical wrangler.toml");
+    expect(result.stderr).toContain(
+      "workers.relay_router.config must be a repository-relative canonical wrangler.mail-router*.toml path",
+    );
   });
 
   test("rejects nested Wrangler build commands that assume the config directory is cwd", () => {
     expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd ../.. build:router-wasm"\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run --cwd=../.. build:router-wasm"\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('[build]\ncommand = "cd .. && bun run build:router-wasm"\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure("[build]\ncommand = 'cd .. && bun run build:router-wasm'\n"),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure(
         '[build]\ncommand = "cd $IFS../.. && bun run build:router-wasm"\n',
       ),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure(
         '[build]\ncommand = "cd \\u002e\\u002e && bun run build:router-wasm"\n',
       ),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('[build]\ncommand = "bun run build:router-wasm"\n'),
     ).toBeNull();
@@ -142,13 +147,13 @@ describe("cfctl provisioning contract check", () => {
     ).toBeNull();
     expect(
       wranglerBuildCommandFailure('build.command = "bun run --cwd ../.. build:router-wasm"\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('build = { command = "bun run --cwd ../.. build:router-wasm" }\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('"build"."command" = "bun run --cwd ../.. build:router-wasm"\n'),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure("[build\ncommand = 'bun run build:router-wasm'\n"),
     ).toContain("config must be valid TOML");
@@ -157,13 +162,13 @@ describe("cfctl provisioning contract check", () => {
     ).toBeNull();
     expect(
       wranglerBuildCommandFailure('{"build":{"command":"cd .."}}', "json"),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure(
         '// comment\n{"build":{"command":"bun run --cwd ../.. build:router-wasm",},}',
         "jsonc",
       ),
-    ).toContain("build command runs from the repository invocation directory");
+    ).toContain("build command runs from the Wrangler config parent directory");
     expect(
       wranglerBuildCommandFailure('{"vars":{"command":"cd .."}}', "json"),
     ).toBeNull();
@@ -206,7 +211,7 @@ describe("cfctl provisioning contract check", () => {
     expect(isRepositoryRelativePath("deploy/router/wrangler.toml")).toBe(true);
   });
 
-  test("inspects JSONC build commands through the desired-state config path", () => {
+  test("rejects JSONC configs outside the canonical role-specific TOML family", () => {
     const configPath = join(root, "tests/fixtures/wrangler-jsonc/wrangler.jsonc");
     const desiredDir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-jsonc-"));
     const desiredPath = join(desiredDir, "desired-state.json");
@@ -231,10 +236,10 @@ describe("cfctl provisioning contract check", () => {
     rmSync(desiredDir, { force: true, recursive: true });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("must not traverse to a parent directory");
+    expect(result.stderr).toContain("canonical wrangler.mail-router*.toml path");
   });
 
-  test("inspects dotted TOML build commands through the desired-state config path", () => {
+  test("rejects nested TOML configs outside the canonical root family", () => {
     const configPath = join(root, "tests/fixtures/wrangler-toml-dotted/wrangler.toml");
     const desiredDir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-toml-"));
     const desiredPath = join(desiredDir, "desired-state.json");
@@ -259,7 +264,71 @@ describe("cfctl provisioning contract check", () => {
     rmSync(desiredDir, { force: true, recursive: true });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("must not traverse to a parent directory");
+    expect(result.stderr).toContain("canonical wrangler.mail-router*.toml path");
+  });
+
+  test("confines main and assets to the Wrangler config parent", () => {
+    expect(wranglerArtifactContainmentFailure(
+      'main = "workers/mail-router/src/index.ts"\n',
+      "wrangler.mail-router.toml",
+      root,
+    )).toBeNull();
+    expect(wranglerArtifactContainmentFailure(
+      'main = "../outside.ts"\n',
+      "wrangler.mail-router.toml",
+      root,
+    )).toContain("main must resolve inside the Wrangler config parent directory");
+    expect(wranglerArtifactContainmentFailure(
+      '[assets]\ndirectory = "../outside"\n',
+      "wrangler.routing-health.toml",
+      root,
+    )).toContain("assets.directory must resolve inside the Wrangler config parent directory");
+
+    const repository = mkdtempSync(join(tmpdir(), "maildesk-artifact-boundary-"));
+    const outside = join(tmpdir(), `maildesk-outside-${process.pid}.ts`);
+    try {
+      writeFileSync(outside, "export default {};\n");
+      symlinkSync(outside, join(repository, "linked.ts"));
+      expect(wranglerArtifactContainmentFailure(
+        'main = "linked.ts"\n',
+        "wrangler.mail-router.toml",
+        repository,
+      )).toContain("main must resolve inside the Wrangler config parent directory");
+      const outsideDirectory = mkdtempSync(join(tmpdir(), "maildesk-outside-assets-"));
+      symlinkSync(outsideDirectory, join(repository, "target"));
+      expect(wranglerArtifactContainmentFailure(
+        '[assets]\ndirectory = "target/site"\n',
+        "wrangler.routing-health.toml",
+        repository,
+      )).toContain("assets.directory must resolve inside the Wrangler config parent directory");
+      rmSync(outsideDirectory, { force: true, recursive: true });
+
+      symlinkSync(join(tmpdir(), `maildesk-missing-${process.pid}.ts`), join(repository, "dangling.ts"));
+      expect(wranglerArtifactContainmentFailure(
+        'main = "dangling.ts"\n',
+        "wrangler.mail-router.toml",
+        repository,
+      )).toContain("main must not traverse a dangling or unresolvable symbolic link");
+
+      symlinkSync(
+        join(tmpdir(), `maildesk-missing-assets-${process.pid}`),
+        join(repository, "dangling-assets"),
+      );
+      expect(wranglerArtifactContainmentFailure(
+        '[assets]\ndirectory = "dangling-assets/site"\n',
+        "wrangler.routing-health.toml",
+        repository,
+      )).toContain("assets.directory must not traverse a dangling or unresolvable symbolic link");
+
+      expect(wranglerArtifactContainmentFailure(
+        'main = "ordinary/missing.ts"\n',
+        "wrangler.mail-router.toml",
+        repository,
+      )).toBeNull();
+    } finally {
+      rmSync(repository, { force: true, recursive: true });
+      rmSync(outside, { force: true });
+    }
   });
 
   test("rejects desired state missing storage resources needed for provisioning", () => {
@@ -284,15 +353,15 @@ describe("cfctl provisioning contract check", () => {
           workers: {
             relay_router: {
               script_name: "maildesk-cf-router",
-              config: "deploy/mail-router/wrangler.toml",
+              config: "wrangler.mail-router.toml",
             },
             relay_outbound: {
               script_name: "maildesk-cf-relay-outbound",
-              config: "deploy/mail-outbound/wrangler.toml",
+              config: "wrangler.mail-outbound.toml",
             },
             routing_health: {
               script_name: "maildesk-cf-routing-health",
-              config: "deploy/routing-health/wrangler.toml",
+              config: "wrangler.routing-health.toml",
             },
           },
           storage: {

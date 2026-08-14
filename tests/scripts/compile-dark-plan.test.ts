@@ -20,6 +20,8 @@ describe("dark deployment blueprint", () => {
     expect(plan.activation.required_dark_state).toBe("disabled/disabled");
     expect(plan.plan_sets).toHaveLength(2);
     expect(JSON.stringify(plan)).toContain("maildesk-cf-relay-db");
+    expect(JSON.stringify(plan)).toContain("maildesk-cf-preview-db");
+    expect(JSON.stringify(plan)).toContain("maildesk-cf.d1-preview-migrations-apply");
     expect(JSON.stringify(plan)).toContain("maildesk-cf-relay-dlq");
     expect(JSON.stringify(plan)).toContain("r2-put-bucket-lifecycle-configuration");
     expect(JSON.stringify(plan)).toContain("email-routing-settings-enable-email-routing-dns");
@@ -38,10 +40,52 @@ describe("dark deployment blueprint", () => {
   test("binds every D1 migration to cfctl's prefixed content digest", () => {
     const pack = readFileSync(resolve(root, ".cfctl/operations/d1-migrations.toml"), "utf8");
     const migrations = [...pack.matchAll(/path = "([^"]+)"\nsha256 = "([^"]+)"/g)];
-    expect(migrations).toHaveLength(8);
+    expect(migrations).toHaveLength(16);
     for (const [, path, declared] of migrations) {
       const observed = `sha256:${createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex")}`;
       expect(declared).toBe(observed);
+    }
+    const parsed = Bun.TOML.parse(pack) as { operation: Array<Record<string, any>> };
+    expect(parsed.operation.map((operation) => operation.id)).toEqual([
+      "maildesk-cf.d1-migrations-apply",
+      "maildesk-cf.d1-preview-migrations-apply",
+    ]);
+    for (const operation of parsed.operation) {
+      expect(operation.migration).toHaveLength(8);
+      expect(operation.assertion).toHaveLength(11);
+    }
+  });
+
+  test("keeps the preview migration config D1-only", () => {
+    const config = Bun.TOML.parse(
+      readFileSync(resolve(root, "wrangler.d1-preview.toml"), "utf8"),
+    ) as Record<string, any>;
+    expect(config.main).toBeUndefined();
+    expect(config.assets).toBeUndefined();
+    expect(config.queues).toBeUndefined();
+    expect(config.r2_buckets).toBeUndefined();
+    expect(config.routes).toBeUndefined();
+    expect(config.d1_databases).toHaveLength(1);
+    expect(config.d1_databases[0].binding).toBe("DB");
+    expect(config.d1_databases[0].database_id).toBe(config.d1_databases[0].preview_database_id);
+    expect(config.d1_databases[0].migrations_dir).toBe("migrations");
+  });
+
+  test("keeps the preview D1 distinct from the production D1", () => {
+    const desired = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    desired.storage.d1_preview_database = desired.storage.d1_database;
+    const path = desiredFixturePath("same-preview-d1");
+    try {
+      writeFileSync(resolve(root, path), JSON.stringify(desired));
+      const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("storage.d1_preview_database must differ from storage.d1_database");
+    } finally {
+      rmSync(resolve(root, path), { force: true });
     }
   });
 
@@ -83,20 +127,20 @@ describe("dark deployment blueprint", () => {
       [
         "router role entrypoint",
         "relay_router",
-        (config) => config.replace('../../workers/mail-router/src/index.ts', '../../workers/mail-outbound/src/index.ts'),
-        "main must equal desired value ../../workers/mail-router/src/index.ts",
+        (config) => config.replace('workers/mail-router/src/index.ts', 'workers/mail-outbound/src/index.ts'),
+        "main must equal desired value workers/mail-router/src/index.ts",
       ],
       [
         "outbound role entrypoint",
         "relay_outbound",
-        (config) => config.replace('../../workers/mail-outbound/src/index.ts', '../../workers/mail-router/src/index.ts'),
-        "main must equal desired value ../../workers/mail-outbound/src/index.ts",
+        (config) => config.replace('workers/mail-outbound/src/index.ts', 'workers/mail-router/src/index.ts'),
+        "main must equal desired value workers/mail-outbound/src/index.ts",
       ],
       [
         "health role entrypoint",
         "routing_health",
-        (config) => config.replace('../../build/_worker.js', '../../workers/mail-api/src/index.ts'),
-        "main must equal desired value ../../build/_worker.js",
+        (config) => config.replace('build/_worker.js', 'workers/mail-api/src/index.ts'),
+        "main must equal desired value build/_worker.js",
       ],
       [
         "router workers dev",
@@ -152,6 +196,15 @@ describe("dark deployment blueprint", () => {
         (config) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, "run_worker_first = false"),
         "[assets] must set run_worker_first = true",
       ],
+      [
+        "preview D1 in production Worker",
+        "routing_health",
+        (config) => config.replace(
+          /^database_id\s*=\s*"([^"]+)"$/m,
+          'database_id = "$1"\npreview_database_id = "$1"',
+        ),
+        "must not bind preview_database_id in a production Worker config",
+      ],
     ];
     const directory = mkdtempSync(join(tmpdir(), "maildesk-dark-config-"));
 
@@ -164,7 +217,7 @@ describe("dark deployment blueprint", () => {
           : role === "relay_outbound"
             ? "mail-outbound"
             : "routing-health";
-        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-${name.toLowerCase().replaceAll(" ", "-")}.toml`;
+        const relativePath = `wrangler.${roleDirectory}.review-${process.pid}-${name.toLowerCase().replaceAll(" ", "-")}.toml`;
         const absolutePath = resolve(root, relativePath);
         writeFileSync(absolutePath, mutate(readFileSync(sourcePath, "utf8")));
         desired.workers[role].config = relativePath;
@@ -193,13 +246,13 @@ describe("dark deployment blueprint", () => {
       });
       expect(result.status).not.toBe(0);
       expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("repository-relative canonical deploy/mail-router/wrangler*.toml path");
+      expect(result.stderr).toContain("repository-relative canonical wrangler.mail-router*.toml path");
     } finally {
       rmSync(directory, { recursive: true, force: true });
       cleanupDesiredFixtures();
       for (const directoryName of ["mail-router", "mail-outbound", "routing-health"]) {
-        const directoryPath = resolve(root, "deploy", directoryName);
-        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+        const directoryPath = resolve(root);
+        for (const name of Array.from(new Bun.Glob(`wrangler.${directoryName}.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
           rmSync(resolve(directoryPath, name), { force: true });
         }
       }
@@ -248,7 +301,7 @@ describe("dark deployment blueprint", () => {
         const desired = structuredClone(original);
         const sourcePath = resolve(root, desired.workers[role].config);
         const roleDirectory = role === "relay_router" ? "mail-router" : "mail-outbound";
-        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-swapped-bindings.toml`;
+        const relativePath = `wrangler.${roleDirectory}.review-${process.pid}-swapped-bindings.toml`;
         const config = readFileSync(sourcePath, "utf8")
           .replace('binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-policy"', 'binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-relay-spool"')
           .replace('binding = "RELAY_SPOOL"\nbucket_name = "maildesk-cf-relay-spool"', 'binding = "RELAY_SPOOL"\nbucket_name = "maildesk-cf-policy"');
@@ -271,8 +324,8 @@ describe("dark deployment blueprint", () => {
       rmSync(directory, { recursive: true, force: true });
       cleanupDesiredFixtures();
       for (const directoryName of ["mail-router", "mail-outbound"]) {
-        const directoryPath = resolve(root, "deploy", directoryName);
-        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+        const directoryPath = resolve(root);
+        for (const name of Array.from(new Bun.Glob(`wrangler.${directoryName}.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
           rmSync(resolve(directoryPath, name), { force: true });
         }
       }
@@ -285,7 +338,7 @@ describe("dark deployment blueprint", () => {
       for (const role of ["relay_router", "relay_outbound"] as const) {
         const desired = structuredClone(original);
         const roleDirectory = role === "relay_router" ? "mail-router" : "mail-outbound";
-        const relativePath = `deploy/${roleDirectory}/wrangler.review-${process.pid}-extra-email.toml`;
+        const relativePath = `wrangler.${roleDirectory}.review-${process.pid}-extra-email.toml`;
         const config = readFileSync(resolve(root, desired.workers[role].config), "utf8")
           .replace('{ name = "EMAIL" }', '{ name = "EMAIL" },\n  { name = "UNEXPECTED_EMAIL" }');
         writeFileSync(resolve(root, relativePath), config);
@@ -305,8 +358,8 @@ describe("dark deployment blueprint", () => {
     } finally {
       cleanupDesiredFixtures();
       for (const directoryName of ["mail-router", "mail-outbound"]) {
-        const directoryPath = resolve(root, "deploy", directoryName);
-        for (const name of Array.from(new Bun.Glob(`wrangler.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
+        const directoryPath = resolve(root);
+        for (const name of Array.from(new Bun.Glob(`wrangler.${directoryName}.review-${process.pid}-*.toml`).scanSync(directoryPath))) {
           rmSync(resolve(directoryPath, name), { force: true });
         }
       }
@@ -325,7 +378,7 @@ describe("dark deployment blueprint", () => {
         "extra worker",
         (desired) => (desired.workers.unexpected_fourth_worker = {
           script_name: "unexpected-worker",
-          config: "deploy/routing-health/wrangler.toml",
+          config: "wrangler.routing-health.toml",
         }),
         "must contain exactly the canonical roles",
       ],

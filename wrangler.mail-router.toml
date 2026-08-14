@@ -1,8 +1,7 @@
-name = "maildesk-cf-relay-outbound"
-main = "../../workers/mail-outbound/src/index.ts"
-compatibility_date = "2026-08-12"
+name = "maildesk-cf-router"
+main = "workers/mail-router/src/index.ts"
+compatibility_date = "2026-05-19"
 workers_dev = false
-upload_source_maps = true
 
 send_email = [
   { name = "EMAIL" }
@@ -13,15 +12,18 @@ command = "bun run build:router-wasm"
 
 [vars]
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"
-MAILDESK_OUTBOUND_MODE = "disabled"
-MAILDESK_VERIFIED_SENDER_DOMAINS = ""
+MAILDESK_INBOUND_RELAY_MODE = "disabled"
+MAILDESK_REPLY_RELAY_MODE = "disabled"
+MAILDESK_REPLY_DOMAIN = "reply.maildesk.example.com"
+MAILDESK_REPLY_TOKEN_TTL_DAYS = "90"
+MAILDESK_SPOOL_RETENTION_DAYS = "7"
 MAILDESK_MAX_ENCODED_MESSAGE_BYTES = "5242880"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "maildesk-cf-relay-db"
 database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "../../migrations"
+migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "POLICY_STORE"
@@ -31,9 +33,6 @@ bucket_name = "maildesk-cf-policy"
 binding = "RELAY_SPOOL"
 bucket_name = "maildesk-cf-relay-spool"
 
-[[queues.consumers]]
+[[queues.producers]]
+binding = "MAIL_JOBS"
 queue = "maildesk-cf-relay-jobs"
-max_batch_size = 1
-max_concurrency = 1
-max_retries = 5
-dead_letter_queue = "maildesk-cf-relay-dlq"

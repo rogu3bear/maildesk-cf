@@ -1,5 +1,5 @@
 name = "maildesk-cf-routing-health"
-main = "../../build/_worker.js"
+main = "build/_worker.js"
 compatibility_date = "2026-08-12"
 workers_dev = false
 upload_source_maps = true
@@ -8,7 +8,7 @@ upload_source_maps = true
 command = "bash scripts/build-ui-edge.sh"
 
 [assets]
-directory = "../../target/site"
+directory = "target/site"
 binding = "ASSETS"
 run_worker_first = true
 
@@ -22,5 +22,4 @@ MAILDESK_OUTBOUND_MODE = "disabled"
 binding = "DB"
 database_name = "maildesk-cf-relay-db"
 database_id = "00000000-0000-0000-0000-000000000000"
-preview_database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "../../migrations"
+migrations_dir = "migrations"

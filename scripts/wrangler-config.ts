@@ -1,6 +1,8 @@
-import { isAbsolute } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type WranglerConfigFormat = "toml" | "json" | "jsonc";
+export type WranglerWorkerRole = "mail-router" | "mail-outbound" | "routing-health";
 
 export function isRepositoryRelativePath(path: string): boolean {
   return !isAbsolute(path) &&
@@ -28,6 +30,81 @@ export function wranglerBuildCommandFailure(
   return parsedBuildCommandFailure(root);
 }
 
+export function canonicalWorkerConfigFailure(
+  path: string,
+  role: WranglerWorkerRole,
+): string | null {
+  const pattern = new RegExp(`^wrangler\\.${role}(?:\\.[a-z0-9-]+)?\\.toml$`);
+  return isRepositoryRelativePath(path) && pattern.test(path)
+    ? null
+    : `must be a repository-relative canonical wrangler.${role}*.toml path`;
+}
+
+export function wranglerArtifactContainmentFailure(
+  contents: string,
+  configPath: string,
+  repositoryRoot: string,
+  format: WranglerConfigFormat = "toml",
+): string | null {
+  let root: unknown;
+  try {
+    root = format === "toml"
+      ? Bun.TOML.parse(contents)
+      : format === "json"
+        ? JSON.parse(contents)
+        : Bun.JSONC.parse(contents);
+  } catch {
+    return `config must be valid ${format.toUpperCase()}`;
+  }
+  if (!isRecord(root)) return "config root must be an object";
+
+  const configParent = realpathSync(resolve(repositoryRoot, configPath, ".."));
+  for (const [label, value] of [
+    ["main", root.main],
+    ["assets.directory", isRecord(root.assets) ? root.assets.directory : undefined],
+  ] as const) {
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.length === 0) return `${label} must be a non-empty string`;
+    const resolvedCandidate = resolveThroughExistingAncestor(resolve(configParent, value));
+    if (resolvedCandidate === null) {
+      return `${label} must not traverse a dangling or unresolvable symbolic link`;
+    }
+    const contained = relative(configParent, resolvedCandidate);
+    if (!isRepositoryRelativePath(contained)) {
+      return `${label} must resolve inside the Wrangler config parent directory`;
+    }
+  }
+  return null;
+}
+
+function resolveThroughExistingAncestor(path: string): string | null {
+  let ancestor = path;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      const metadata = lstatSync(ancestor);
+      if (metadata.isSymbolicLink()) {
+        try {
+          return suffix.reduce((current, part) => join(current, part), realpathSync(ancestor));
+        } catch {
+          return null;
+        }
+      }
+      return suffix.reduce((current, part) => join(current, part), realpathSync(ancestor));
+    } catch (error) {
+      if (!isMissingPathError(error)) return null;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      suffix.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
 function parsedBuildCommandFailure(root: unknown): string | null {
   if (!isRecord(root)) return "config root must be an object";
   const build = root.build;
@@ -41,7 +118,7 @@ function parsedBuildCommandFailure(root: unknown): string | null {
 
 function parentTraversalFailure(command: string): string | null {
   return command.includes("..")
-    ? "build command runs from the repository invocation directory and must not traverse to a parent directory"
+    ? "build command runs from the Wrangler config parent directory and must not traverse to a parent directory"
     : null;
 }
 

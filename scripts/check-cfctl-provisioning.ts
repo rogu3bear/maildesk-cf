@@ -1,9 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 import {
   isRepositoryRelativePath,
+  canonicalWorkerConfigFailure,
   type WranglerConfigFormat,
+  type WranglerWorkerRole,
+  wranglerArtifactContainmentFailure,
   wranglerBuildCommandFailure,
 } from "./wrangler-config";
 
@@ -190,9 +193,9 @@ function validateDesiredState(value: DesiredState) {
 
   const workers = requireObject(rootObject, "workers");
   if (workers) {
-    validateWorker(requireObject(workers, "workers.relay_router"), "workers.relay_router");
-    validateWorker(requireObject(workers, "workers.relay_outbound"), "workers.relay_outbound");
-    validateWorker(requireObject(workers, "workers.routing_health"), "workers.routing_health");
+    validateWorker(requireObject(workers, "workers.relay_router"), "workers.relay_router", "mail-router");
+    validateWorker(requireObject(workers, "workers.relay_outbound"), "workers.relay_outbound", "mail-outbound");
+    validateWorker(requireObject(workers, "workers.routing_health"), "workers.routing_health", "routing-health");
   }
 
   const storage = requireObject(rootObject, "storage");
@@ -273,7 +276,11 @@ function validateProcessingModes(operatorDelivery: Record<string, unknown>): voi
   requireEnum(operatorDelivery, "operator_delivery.reply_processing_mode", ["disabled", "enabled"]);
 }
 
-function validateWorker(worker: Record<string, unknown> | null, prefix: string) {
+function validateWorker(
+  worker: Record<string, unknown> | null,
+  prefix: string,
+  role: WranglerWorkerRole,
+) {
   if (!worker) return;
   requireString(worker, `${prefix}.script_name`);
   const config = requireString(worker, `${prefix}.config`);
@@ -283,20 +290,13 @@ function validateWorker(worker: Record<string, unknown> | null, prefix: string) 
     return;
   }
   checkFile(config);
-  const format = wranglerConfigFormat(config);
-  if (!format) {
-    failures.push(`${prefix}.config must use the canonical wrangler.toml, wrangler.json, or wrangler.jsonc basename`);
+  const canonicalFailure = canonicalWorkerConfigFailure(config, role);
+  if (canonicalFailure) {
+    failures.push(`${prefix}.config ${canonicalFailure}`);
     return;
   }
+  const format: WranglerConfigFormat = "toml";
   validateWranglerBuildCommand(config, prefix, format);
-}
-
-function wranglerConfigFormat(path: string): WranglerConfigFormat | null {
-  const name = basename(path).toLowerCase();
-  if (name === "wrangler.toml") return "toml";
-  if (name === "wrangler.json") return "json";
-  if (name === "wrangler.jsonc") return "jsonc";
-  return null;
 }
 
 function validateWranglerBuildCommand(
@@ -312,6 +312,8 @@ function validateWranglerBuildCommand(
   }
   const failure = wranglerBuildCommandFailure(contents, format);
   if (failure) failures.push(`${prefix}.config ${failure}`);
+  const containmentFailure = wranglerArtifactContainmentFailure(contents, path, root, format);
+  if (containmentFailure) failures.push(`${prefix}.config ${containmentFailure}`);
 }
 
 function lifecycleCommands(desiredStatePath: string): string[] {

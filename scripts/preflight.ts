@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
-import { isRepositoryRelativePath } from "./wrangler-config";
+import { canonicalWorkerConfigFailure, isRepositoryRelativePath } from "./wrangler-config";
 import {
   isSenderMode,
   senderModeList,
@@ -67,9 +67,10 @@ checkCommand(process.env.CFCTL_BIN ?? "cfctl", ["--help"], mode === "production"
 
 checkFile("Cargo.toml");
 checkFile("wrangler.toml");
-checkFile("deploy/mail-router/wrangler.toml");
-checkFile("deploy/mail-outbound/wrangler.toml");
-checkFile("deploy/routing-health/wrangler.toml");
+checkFile("wrangler.mail-router.toml");
+checkFile("wrangler.mail-outbound.toml");
+checkFile("wrangler.routing-health.toml");
+checkFile("wrangler.d1-preview.toml");
 checkFile("config/policy.example.json");
 checkFile("config/desired-state.example.json");
 checkFile("scripts/check-template.sh");
@@ -465,12 +466,14 @@ function readProductionWorkerConfigs(
   ] as const;
   const selected: string[] = [];
 
-  for (const [role, directory, value] of roles) {
+  for (const [role, configRole, value] of roles) {
     const path = stringValue(value);
-    const pattern = new RegExp(`^deploy/${directory}/wrangler(?:\\.[a-z0-9-]+)?\\.toml$`);
-    if (!path || !isRepositoryRelativePath(path) || !pattern.test(path)) {
+    const canonicalFailure = path
+      ? canonicalWorkerConfigFailure(path, configRole)
+      : `must be a repository-relative canonical wrangler.${configRole}*.toml path`;
+    if (!path || canonicalFailure) {
       failures.push(
-        `desired-state workers.${role}.config must be a repository-relative canonical deploy/${directory}/wrangler*.toml path`,
+        `desired-state workers.${role}.config ${canonicalFailure}`,
       );
       continue;
     }
