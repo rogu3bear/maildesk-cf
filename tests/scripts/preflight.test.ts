@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -90,6 +90,29 @@ describe("production preflight", () => {
       expect(result.stderr).not.toContain("at readProductionWorkerConfigs");
     } finally {
       topology.cleanup();
+    }
+  });
+
+  test("rejects a canonical selected config whose symlink resolves outside the repository", () => {
+    const topology = writeProductionTopology();
+    const outsideDirectory = mkdtempSync(join(tmpdir(), "maildesk-external-wrangler-"));
+    const outsideConfig = join(outsideDirectory, "wrangler.toml");
+    try {
+      const routerConfig = resolve(root, topology.routerPath);
+      writeFileSync(outsideConfig, readFileSync(routerConfig));
+      rmSync(routerConfig);
+      symlinkSync(outsideConfig, routerConfig);
+
+      const result = runInboxRelayProductionPreflight(topology.desiredPath);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "desired-state workers.relay_router.config must resolve to a regular file inside the repository",
+      );
+      expect(result.stderr).not.toContain(outsideConfig);
+    } finally {
+      topology.cleanup();
+      rmSync(outsideDirectory, { force: true, recursive: true });
     }
   });
 

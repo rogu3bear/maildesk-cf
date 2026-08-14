@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
 import { isRepositoryRelativePath } from "./wrangler-config";
@@ -475,6 +475,12 @@ function readProductionWorkerConfigs(
       continue;
     }
     checkFile(path);
+    if (!isRepositoryContainedFile(path)) {
+      failures.push(
+        `desired-state workers.${role}.config must resolve to a regular file inside the repository`,
+      );
+      continue;
+    }
     selected.push(path);
   }
 
@@ -484,6 +490,17 @@ function readProductionWorkerConfigs(
     relayOutbound: selected[1],
     routingHealth: selected[2],
   };
+}
+
+function isRepositoryContainedFile(path: string): boolean {
+  try {
+    const repositoryRoot = realpathSync(root);
+    const selectedPath = realpathSync(resolve(root, path));
+    const repositoryRelative = relative(repositoryRoot, selectedPath);
+    return statSync(selectedPath).isFile() && isRepositoryRelativePath(repositoryRelative);
+  } catch {
+    return false;
+  }
 }
 
 function checkSendEmailBinding(path: string) {
