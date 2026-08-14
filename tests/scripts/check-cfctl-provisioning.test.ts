@@ -302,6 +302,29 @@ describe("cfctl provisioning contract check", () => {
         repository,
       )).toContain("assets.directory must resolve inside the Wrangler config parent directory");
       rmSync(outsideDirectory, { force: true, recursive: true });
+
+      symlinkSync(join(tmpdir(), `maildesk-missing-${process.pid}.ts`), join(repository, "dangling.ts"));
+      expect(wranglerArtifactContainmentFailure(
+        'main = "dangling.ts"\n',
+        "wrangler.mail-router.toml",
+        repository,
+      )).toContain("main must not traverse a dangling or unresolvable symbolic link");
+
+      symlinkSync(
+        join(tmpdir(), `maildesk-missing-assets-${process.pid}`),
+        join(repository, "dangling-assets"),
+      );
+      expect(wranglerArtifactContainmentFailure(
+        '[assets]\ndirectory = "dangling-assets/site"\n',
+        "wrangler.routing-health.toml",
+        repository,
+      )).toContain("assets.directory must not traverse a dangling or unresolvable symbolic link");
+
+      expect(wranglerArtifactContainmentFailure(
+        'main = "ordinary/missing.ts"\n',
+        "wrangler.mail-router.toml",
+        repository,
+      )).toBeNull();
     } finally {
       rmSync(repository, { force: true, recursive: true });
       rmSync(outside, { force: true });

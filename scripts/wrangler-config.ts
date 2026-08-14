@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type WranglerConfigFormat = "toml" | "json" | "jsonc";
@@ -66,6 +66,9 @@ export function wranglerArtifactContainmentFailure(
     if (value === undefined) continue;
     if (typeof value !== "string" || value.length === 0) return `${label} must be a non-empty string`;
     const resolvedCandidate = resolveThroughExistingAncestor(resolve(configParent, value));
+    if (resolvedCandidate === null) {
+      return `${label} must not traverse a dangling or unresolvable symbolic link`;
+    }
     const contained = relative(configParent, resolvedCandidate);
     if (!isRepositoryRelativePath(contained)) {
       return `${label} must resolve inside the Wrangler config parent directory`;
@@ -74,16 +77,32 @@ export function wranglerArtifactContainmentFailure(
   return null;
 }
 
-function resolveThroughExistingAncestor(path: string): string {
+function resolveThroughExistingAncestor(path: string): string | null {
   let ancestor = path;
   const suffix: string[] = [];
-  while (!existsSync(ancestor)) {
-    const parent = dirname(ancestor);
-    if (parent === ancestor) return path;
-    suffix.unshift(basename(ancestor));
-    ancestor = parent;
+  while (true) {
+    try {
+      const metadata = lstatSync(ancestor);
+      if (metadata.isSymbolicLink()) {
+        try {
+          return suffix.reduce((current, part) => join(current, part), realpathSync(ancestor));
+        } catch {
+          return null;
+        }
+      }
+      return suffix.reduce((current, part) => join(current, part), realpathSync(ancestor));
+    } catch (error) {
+      if (!isMissingPathError(error)) return null;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      suffix.unshift(basename(ancestor));
+      ancestor = parent;
+    }
   }
-  return suffix.reduce((current, part) => join(current, part), realpathSync(ancestor));
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function parsedBuildCommandFailure(root: unknown): string | null {
