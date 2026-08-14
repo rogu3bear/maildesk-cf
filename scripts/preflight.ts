@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
+import { isRepositoryRelativePath } from "./wrangler-config";
 import {
   isSenderMode,
   senderModeList,
@@ -33,6 +34,17 @@ interface DesiredState {
     max_encoded_message_bytes?: unknown;
     banner_mode?: unknown;
   };
+  workers?: {
+    relay_router?: { config?: unknown };
+    relay_outbound?: { config?: unknown };
+    routing_health?: { config?: unknown };
+  };
+}
+
+interface ProductionWorkerConfigs {
+  relayRouter: string;
+  relayOutbound: string;
+  routingHealth: string;
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -68,6 +80,9 @@ const desiredStatePath =
     ? "config/desired-state.local.json"
     : "config/desired-state.example.json");
 const desiredState = checkJson<DesiredState>(desiredStatePath);
+const productionWorkerConfigs = mode === "production"
+  ? readProductionWorkerConfigs(desiredState)
+  : null;
 checkDesiredSenderMode(desiredState);
 checkDesiredOperatorDelivery(desiredState);
 checkRelayTopology(desiredStatePath);
@@ -89,9 +104,9 @@ if (mode === "production") {
   checkProjectName(desiredState);
   checkReplyApiEnv();
   checkAccessValidationEnv();
-  checkOutboundEnv(desiredState);
-  checkOperatorDeliveryEnv(desiredState);
-  checkWranglerPlaceholders();
+  checkOutboundEnv(desiredState, productionWorkerConfigs);
+  checkOperatorDeliveryEnv(desiredState, productionWorkerConfigs);
+  checkWranglerPlaceholders(productionWorkerConfigs);
 } else {
   checkTemplateExamples();
 }
@@ -275,7 +290,10 @@ function checkDesiredInteger(name: string, value: unknown, minimum: number, maxi
   }
 }
 
-function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
+function checkOperatorDeliveryEnv(
+  desiredState: DesiredState | null,
+  workerConfigs: ProductionWorkerConfigs | null,
+) {
   const delivery = desiredState?.operator_delivery;
   if (!delivery || (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk")) return;
   const runtimeMode = process.env.MAILDESK_OPERATOR_DELIVERY_MODE?.trim() || "web_desk";
@@ -295,8 +313,10 @@ function checkOperatorDeliveryEnv(desiredState: DesiredState | null) {
   checkRuntimeInteger("MAILDESK_REPLY_TOKEN_TTL_DAYS", delivery.reply_token_ttl_days);
   checkRuntimeInteger("MAILDESK_SPOOL_RETENTION_DAYS", delivery.spool_retention_days);
   checkRuntimeInteger("MAILDESK_MAX_ENCODED_MESSAGE_BYTES", delivery.max_encoded_message_bytes);
-  checkSendEmailBinding("deploy/mail-router/wrangler.toml");
-  checkSendEmailBinding("deploy/mail-outbound/wrangler.toml");
+  if (workerConfigs) {
+    checkSendEmailBinding(workerConfigs.relayRouter);
+    checkSendEmailBinding(workerConfigs.relayOutbound);
+  }
 }
 
 function checkRuntimeInteger(name: string, desired: unknown) {
@@ -332,7 +352,10 @@ function checkRelayActivationEnv(delivery: NonNullable<DesiredState["operator_de
   }
 }
 
-function checkOutboundEnv(desiredState: DesiredState | null) {
+function checkOutboundEnv(
+  desiredState: DesiredState | null,
+  workerConfigs: ProductionWorkerConfigs | null,
+) {
   const outboundMode = process.env.MAILDESK_OUTBOUND_MODE?.trim() || "disabled";
   if (!isSenderMode(outboundMode)) {
     failures.push(`MAILDESK_OUTBOUND_MODE must be ${senderModeList()}`);
@@ -356,7 +379,12 @@ function checkOutboundEnv(desiredState: DesiredState | null) {
     );
   }
   if (outboundMode === "cloudflare_email_service") {
-    checkSendEmailBinding(process.env.MAILDESK_MAIL_API_WRANGLER_PATH?.trim() || "wrangler.toml");
+    const legacyConfig = process.env.MAILDESK_MAIL_API_WRANGLER_PATH?.trim() || "wrangler.toml";
+    checkSendEmailBinding(
+      desiredState?.operator_delivery?.mode === "inbox_relay" && workerConfigs
+        ? workerConfigs.relayOutbound
+        : legacyConfig,
+    );
   }
   if (outboundMode === "resend") {
     checkRequiredEnvAny(["RESEND_API_KEY", "RESEND"]);
@@ -408,17 +436,54 @@ function checkAccessValidationEnv() {
   }
 }
 
-function checkWranglerPlaceholders() {
+function checkWranglerPlaceholders(workerConfigs: ProductionWorkerConfigs | null) {
+  if (!workerConfigs) return;
   for (const file of [
-    "deploy/mail-router/wrangler.toml",
-    "deploy/mail-outbound/wrangler.toml",
-    "deploy/routing-health/wrangler.toml",
+    workerConfigs.relayRouter,
+    workerConfigs.relayOutbound,
+    workerConfigs.routingHealth,
   ]) {
-    const wrangler = readFileSync(resolve(root, file), "utf8");
+    let wrangler: string;
+    try {
+      wrangler = readFileSync(resolve(root, file), "utf8");
+    } catch {
+      continue;
+    }
     if (wrangler.includes("00000000-0000-0000-0000-000000000000")) {
       failures.push(`${file} still contains placeholder Cloudflare resource IDs`);
     }
   }
+}
+
+function readProductionWorkerConfigs(
+  desiredState: DesiredState | null,
+): ProductionWorkerConfigs | null {
+  const roles = [
+    ["relay_router", "mail-router", desiredState?.workers?.relay_router?.config],
+    ["relay_outbound", "mail-outbound", desiredState?.workers?.relay_outbound?.config],
+    ["routing_health", "routing-health", desiredState?.workers?.routing_health?.config],
+  ] as const;
+  const selected: string[] = [];
+
+  for (const [role, directory, value] of roles) {
+    const path = stringValue(value);
+    const pattern = new RegExp(`^deploy/${directory}/wrangler(?:\\.[a-z0-9-]+)?\\.toml$`);
+    if (!path || !isRepositoryRelativePath(path) || !pattern.test(path)) {
+      failures.push(
+        `desired-state workers.${role}.config must be a repository-relative canonical deploy/${directory}/wrangler*.toml path`,
+      );
+      continue;
+    }
+    checkFile(path);
+    selected.push(path);
+  }
+
+  if (selected.length !== roles.length) return null;
+  return {
+    relayRouter: selected[0],
+    relayOutbound: selected[1],
+    routingHealth: selected[2],
+  };
 }
 
 function checkSendEmailBinding(path: string) {
