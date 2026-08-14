@@ -79,7 +79,7 @@ file. The account target can come from `CLOUDFLARE_ACCOUNT_ID`, a literal
 `project.account_id` in ignored desired state, an env name referenced by
 `project.account_id_env`, or the healthy `cfctl doctor` lane described above.
 
-Production mode also fails if `wrangler.toml`, `deploy/mail-router/wrangler.toml`, or
+Production mode also fails if `wrangler.toml`, `wrangler.mail-router.toml`, or
 `deploy/ui/wrangler.toml` still contains placeholder Cloudflare resource IDs. That is
 intentional. Placeholder IDs are acceptable in the public template and
 unacceptable before real provisioning.
@@ -100,9 +100,11 @@ configuration and `MAILDESK_VERIFIED_SENDER_DOMAINS` built from Cloudflare
 Email Service readback. In `inbox_relay`, production preflight derives the
 router, outbound, and routing-health configurations from the selected
 desired-state file. Those paths must be repository-relative canonical
-`deploy/<role>/wrangler*.toml` paths; private instances can therefore select
-ignored `wrangler.production.toml` files without putting live resource IDs in
-the tracked public-template configs. Placeholder checks and Email-binding
+`wrangler.<role>*.toml` paths at the repository root; private instances can
+therefore select ignored `wrangler.<role>.production.toml` files without putting
+live resource IDs in the tracked public-template configs. Governed deploys run
+from the selected config's parent, so each `main`, assets directory, and build
+command is confined to that same root. Placeholder checks and Email-binding
 checks apply to those selected files.
 `resend` requires a Resend API key from `RESEND_API_KEY` or the local
 compatibility alias `RESEND`, plus `MAILDESK_VERIFIED_SENDER_DOMAINS` built

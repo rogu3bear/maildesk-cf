@@ -9,6 +9,7 @@ interface DesiredState {
   workers: Record<string, { script_name: string; config: string }>;
   storage: {
     d1_database: string;
+    d1_preview_database: string;
     r2_policy_bucket: string;
     r2_spool_bucket: string;
     queue: string;
@@ -38,6 +39,7 @@ const sourceFiles = [
   ".cfctl/operations/d1-migrations.toml",
   ".cfctl/operations/d1-policy-projections.toml",
   "ops/cfctl/relay-spool-lifecycle.example.json",
+  "wrangler.d1-preview.toml",
   ...Object.values(desired.workers).map((worker) => worker.config),
 ];
 
@@ -64,6 +66,7 @@ const plan = {
       purpose: "Create isolated resources whose returned identifiers are required by later exact Worker configs.",
       children: [
         step("d1", "d1-create-database", desired.storage.d1_database, "delete only the newly created database in a separate plan"),
+        step("d1-preview", "d1-create-database", desired.storage.d1_preview_database, "delete only the newly created preview database in a separate plan"),
         step("policy-r2", "r2-create-bucket", desired.storage.r2_policy_bucket, "delete only the empty newly created bucket in a separate plan"),
         step("spool-r2", "r2-create-bucket", desired.storage.r2_spool_bucket, "delete only the empty newly created bucket in a separate plan"),
         step("queue", "queues-create", desired.storage.queue, "delete only the newly created queue in a separate plan"),
@@ -75,6 +78,7 @@ const plan = {
       purpose: "Compile only after bootstrap identifiers and fresh provider snapshots are verified.",
       children: [
         step("spool-lifecycle", "r2-put-bucket-lifecycle-configuration", desired.storage.r2_spool_bucket, "restore the complete prior lifecycle snapshot; expired objects are unrecoverable"),
+        step("d1-preview-migrations", "maildesk-cf.d1-preview-migrations-apply", desired.storage.d1_preview_database, "restore the exact fresh pre-migration preview bookmark in a separate plan"),
         step("d1-migrations", "maildesk-cf.d1-migrations-apply", desired.storage.d1_database, "restore the exact fresh pre-migration bookmark in a separate plan"),
         step("policy-upload", "r2-put-object", `${desired.storage.r2_policy_bucket}/config/policy/<sha256>.json`, "delete only the newly created immutable object in a separate plan"),
         step("policy-projection", "maildesk-cf.d1-policy-project", desired.storage.d1_database, "restore the exact fresh pre-projection bookmark in a separate plan"),
@@ -161,6 +165,9 @@ function assertDarkActivation(operatorDelivery: DesiredState["operator_delivery"
 }
 
 function assertDarkWorkerConfigs(desired: DesiredState): void {
+  if (desired.storage.d1_database === desired.storage.d1_preview_database) {
+    throw new Error("storage.d1_preview_database must differ from storage.d1_database");
+  }
   const expectedRoles = ["relay_outbound", "relay_router", "routing_health"];
   const observedRoles = Object.keys(desired.workers).sort();
   if (observedRoles.length !== expectedRoles.length ||
@@ -179,7 +186,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireWorkersDevOff(router, routerPath);
   requireExactEmailBinding(router, routerPath);
   assertConfigName(router, routerPath, desired.workers.relay_router.script_name);
-  requireConfigValue(router, routerPath, "main", "../../workers/mail-router/src/index.ts");
+  requireConfigValue(router, routerPath, "main", "workers/mail-router/src/index.ts");
   const routerVars = record(router.vars, `${routerPath} [vars]`);
   if ("MAILDESK_RELAY_PROCESSING_MODE" in routerVars) {
     throw new Error(`${routerPath} must not combine the legacy relay processing switch with split activation switches`);
@@ -206,7 +213,7 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   requireWorkersDevOff(outbound, outboundPath);
   requireExactEmailBinding(outbound, outboundPath);
   assertConfigName(outbound, outboundPath, desired.workers.relay_outbound.script_name);
-  requireConfigValue(outbound, outboundPath, "main", "../../workers/mail-outbound/src/index.ts");
+  requireConfigValue(outbound, outboundPath, "main", "workers/mail-outbound/src/index.ts");
   assertStorageBindings(outbound, outboundPath, desired);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "queue", desired.storage.queue);
   requireArrayValue(outbound, outboundPath, "queues.consumers", "dead_letter_queue", desired.storage.dead_letter_queue);
@@ -221,13 +228,14 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   ]);
   requireWorkersDevOff(health, healthPath);
   assertConfigName(health, healthPath, desired.workers.routing_health.script_name);
-  requireConfigValue(health, healthPath, "main", "../../build/_worker.js");
+  requireConfigValue(health, healthPath, "main", "build/_worker.js");
   const healthAssets = record(health.assets, `${healthPath} [assets]`);
   if (healthAssets.run_worker_first !== true) {
     throw new Error(`${healthPath} [assets] must set run_worker_first = true so Access runs before every asset response`);
   }
   requireArrayValue(health, healthPath, "d1_databases", "database_name", desired.storage.d1_database);
   requireExactArrayLength(health, healthPath, "d1_databases", 1);
+  forbidPreviewD1Binding(health, healthPath);
   const healthVars = record(health.vars, `${healthPath} [vars]`);
   if (healthVars.MAILDESK_UI_AUTH_MODE !== "access" || healthVars.MAILDESK_UI_ACCESS_SCOPE !== "all_routes") {
     throw new Error(`${healthPath} must require Cloudflare Access for all_routes`);
@@ -274,6 +282,16 @@ function assertStorageBindings(config: Record<string, unknown>, path: string, de
   requireArrayBindingValue(config, path, "r2_buckets", "binding", "RELAY_SPOOL", "bucket_name", desired.storage.r2_spool_bucket);
   requireExactArrayLength(config, path, "d1_databases", 1);
   requireExactArrayLength(config, path, "r2_buckets", 2);
+  forbidPreviewD1Binding(config, path);
+}
+
+function forbidPreviewD1Binding(config: Record<string, unknown>, path: string): void {
+  const bindings = config.d1_databases;
+  if (Array.isArray(bindings) && bindings.some((binding) =>
+    binding !== null && typeof binding === "object" && !Array.isArray(binding) &&
+    "preview_database_id" in binding)) {
+    throw new Error(`${path} must not bind preview_database_id in a production Worker config`);
+  }
 }
 
 function requireExactArrayLength(
@@ -335,9 +353,9 @@ function requireArrayValue(
 }
 
 function assertWorkerConfigPath(role: string, path: string, directory: string): string {
-  const pattern = new RegExp(`^deploy/${directory}/wrangler(?:\\.[a-z0-9-]+)?\\.toml$`);
+  const pattern = new RegExp(`^wrangler\\.${directory}(?:\\.[a-z0-9-]+)?\\.toml$`);
   if (!isRepositoryRelativePath(path) || !pattern.test(path)) {
-    throw new Error(`${role} config must be a repository-relative canonical deploy/${directory}/wrangler*.toml path`);
+    throw new Error(`${role} config must be a repository-relative canonical wrangler.${directory}*.toml path`);
   }
   return path;
 }

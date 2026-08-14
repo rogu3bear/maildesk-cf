@@ -127,9 +127,9 @@ function fixture(scenario: Scenario, withGoogle = false) {
   writeFileSync(state, JSON.stringify({
     domains,
     workers: {
-      relay_router: { script_name: "maildesk-cf-router", config: "deploy/mail-router/wrangler.toml" },
-      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "deploy/mail-outbound/wrangler.toml" },
-      routing_health: { script_name: "maildesk-cf-routing-health", config: "deploy/routing-health/wrangler.toml" },
+      relay_router: { script_name: "maildesk-cf-router", config: "wrangler.mail-router.toml" },
+      relay_outbound: { script_name: "maildesk-cf-relay-outbound", config: "wrangler.mail-outbound.toml" },
+      routing_health: { script_name: "maildesk-cf-routing-health", config: "wrangler.routing-health.toml" },
     },
     storage: {
       d1_database: "maildesk-cf-relay-db",

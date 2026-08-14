@@ -32,7 +32,7 @@ describe("production preflight", () => {
         `${topology.routerPath} still contains placeholder Cloudflare resource IDs`,
       );
       expect(result.stderr).not.toContain(
-        "deploy/mail-outbound/wrangler.toml still contains placeholder Cloudflare resource IDs",
+        "wrangler.mail-outbound.toml still contains placeholder Cloudflare resource IDs",
       );
     } finally {
       topology.cleanup();
@@ -60,8 +60,8 @@ describe("production preflight", () => {
     const desiredPath = writeDesiredState("disabled", {
       workers: {
         relay_router: { config: "/tmp/wrangler.toml" },
-        relay_outbound: { config: "deploy/mail-outbound/wrangler.toml" },
-        routing_health: { config: "deploy/routing-health/wrangler.toml" },
+        relay_outbound: { config: "wrangler.mail-outbound.toml" },
+        routing_health: { config: "wrangler.routing-health.toml" },
       },
     });
     const env = productionEnv(desiredPath, "disabled");
@@ -74,7 +74,7 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "desired-state workers.relay_router.config must be a repository-relative canonical deploy/mail-router/wrangler*.toml path",
+      "desired-state workers.relay_router.config must be a repository-relative canonical wrangler.mail-router*.toml path",
     );
   });
 
@@ -661,18 +661,18 @@ function writeProductionTopology(options: {
 } = {}) {
   productionTopologySequence += 1;
   const suffix = `preflight-${process.pid}-${productionTopologySequence}`;
-  const routerPath = `deploy/mail-router/wrangler.${suffix}.toml`;
-  const outboundPath = `deploy/mail-outbound/wrangler.${suffix}.toml`;
-  const healthPath = `deploy/routing-health/wrangler.${suffix}.toml`;
+  const routerPath = `wrangler.mail-router.${suffix}.toml`;
+  const outboundPath = `wrangler.mail-outbound.${suffix}.toml`;
+  const healthPath = `wrangler.routing-health.${suffix}.toml`;
   const realId = "11111111-1111-4111-8111-111111111111";
   const placeholder = "00000000-0000-0000-0000-000000000000";
   const selected = [routerPath, outboundPath, healthPath];
 
-  const router = readFileSync(resolve(root, "deploy/mail-router/wrangler.toml"), "utf8")
+  const router = readFileSync(resolve(root, "wrangler.mail-router.toml"), "utf8")
     .replaceAll(placeholder, options.routerPlaceholder ? placeholder : realId);
-  let outbound = readFileSync(resolve(root, "deploy/mail-outbound/wrangler.toml"), "utf8")
+  let outbound = readFileSync(resolve(root, "wrangler.mail-outbound.toml"), "utf8")
     .replaceAll(placeholder, realId);
-  const health = readFileSync(resolve(root, "deploy/routing-health/wrangler.toml"), "utf8")
+  const health = readFileSync(resolve(root, "wrangler.routing-health.toml"), "utf8")
     .replaceAll(placeholder, realId);
   if (options.outboundWithoutEmail) {
     outbound = outbound.replace(/send_email = \[\n\s*\{ name = "EMAIL" \}\n\]\n\n/, "");

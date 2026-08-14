@@ -86,7 +86,7 @@ if (executeLocal) {
   executeLocalProjection(
     projection,
     argValue("--database") ?? desired.storage.d1_database,
-    argValue("--config") ?? "deploy/mail-router/wrangler.toml",
+    argValue("--config") ?? "wrangler.mail-router.toml",
   );
 }
 

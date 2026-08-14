@@ -43,7 +43,7 @@ function checkRouter(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_router.script_name);
-  requireAssignment(config, path, "main", "../../workers/mail-router/src/index.ts");
+  requireAssignment(config, path, "main", "workers/mail-router/src/index.ts");
   requireWorkersDevOff(config, path);
   requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
   requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
@@ -60,6 +60,7 @@ function checkRouter(desired: DesiredState): void {
   ]);
   forbid(config, path, /\[\[queues\.consumers\]\]/, "Queue consumer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
+  forbid(config, path, /^preview_database_id\s*=/m, "preview D1 binding");
   forbid(config, path, /^MAILDESK_RELAY_PROCESSING_MODE\s*=/m, "legacy relay processing switch");
   requireAssignment(config, path, "MAILDESK_INBOUND_RELAY_MODE", desired.operator_delivery.inbound_processing_mode);
   requireAssignment(config, path, "MAILDESK_REPLY_RELAY_MODE", desired.operator_delivery.reply_processing_mode);
@@ -70,7 +71,7 @@ function checkOutbound(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.relay_outbound.script_name);
-  requireAssignment(config, path, "main", "../../workers/mail-outbound/src/index.ts");
+  requireAssignment(config, path, "main", "workers/mail-outbound/src/index.ts");
   requireWorkersDevOff(config, path);
   requireBindingTarget(config, path, "d1_databases", "DB", "database_name", desired.storage.d1_database);
   requireBindingTarget(config, path, "r2_buckets", "POLICY_STORE", "bucket_name", desired.storage.r2_policy_bucket);
@@ -91,6 +92,7 @@ function checkOutbound(desired: DesiredState): void {
   requireNumericValue(config, path, "max_retries", 5);
   forbid(config, path, /\[\[queues\.producers\]\]/, "Queue producer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
+  forbid(config, path, /^preview_database_id\s*=/m, "preview D1 binding");
 }
 
 function checkRoutingHealth(desired: DesiredState): void {
@@ -98,7 +100,7 @@ function checkRoutingHealth(desired: DesiredState): void {
   const config = readConfig(path);
   if (!config) return;
   requireAssignment(config, path, "name", desired.workers.routing_health.script_name);
-  requireAssignment(config, path, "main", "../../build/_worker.js");
+  requireAssignment(config, path, "main", "build/_worker.js");
   requireWorkersDevOff(config, path);
   requireBinding(config, path, "d1_databases", "DB");
   requireValue(config, path, "database_name", desired.storage.d1_database);
@@ -107,6 +109,7 @@ function checkRoutingHealth(desired: DesiredState): void {
   forbid(config, path, /\[\[r2_buckets\]\]/, "R2 binding");
   forbid(config, path, /\[\[queues\./, "Queue binding");
   forbid(config, path, /^send_email\s*=/m, "Email binding");
+  forbid(config, path, /^preview_database_id\s*=/m, "preview D1 binding");
   requireAssignment(config, path, "MAILDESK_UI_AUTH_MODE", "access");
   requireAssignment(config, path, "MAILDESK_UI_ACCESS_SCOPE", "all_routes");
   requireExactTopLevelKeys(config, path, [

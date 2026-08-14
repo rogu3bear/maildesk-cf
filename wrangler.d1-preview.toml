@@ -1,0 +1,9 @@
+name = "maildesk-cf-d1-preview"
+compatibility_date = "2026-08-12"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-preview-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+preview_database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"

@@ -24,7 +24,7 @@ The Email Worker receives Cloudflare Email Routing events. In `inbox_relay` it s
 It should not own policy. If policy logic appears in TypeScript, move it back
 into `crates/maildesk-router`.
 
-The template deploy target for this Worker is `deploy/mail-router/wrangler.toml`.
+The template deploy target for this Worker is `wrangler.mail-router.toml`.
 Dark deployment requires both `MAILDESK_INBOUND_RELAY_MODE=disabled` and
 `MAILDESK_REPLY_RELAY_MODE=disabled`. A separately reviewed receipt canary first
 enables inbound processing while replies remain disabled; reply processing is
@@ -55,7 +55,7 @@ escaped HTML from that verified plaintext, records body-free state, and removes
 the spool on terminal provider acceptance. Original operator-authored HTML is
 never forwarded because renderer-dependent hidden content cannot be proven free
 of private operator identity leakage. The inbox-relay deploy target is
-`deploy/mail-outbound/wrangler.toml`. The generic `wrangler.toml` web-desk
+`wrangler.mail-outbound.toml`. The generic `wrangler.toml` web-desk
 target may retain its legacy shared-token `POST /api/replies` route, disabled
 unless `MAILDESK_REPLY_API_MODE=token` is set explicitly. Private inbox-relay
 deployments do not expose that surface.
@@ -70,7 +70,7 @@ authentication. `MAILDESK_ACCESS_TEAM_DOMAIN` and `MAILDESK_ACCESS_AUD` are
 required production inputs; local template preview bypasses Access only when
 `MAILDESK_UI_AUTH_MODE=preview` is set explicitly.
 
-The inbox-relay deploy target is `deploy/routing-health/wrangler.toml`, which
+The inbox-relay deploy target is `wrangler.routing-health.toml`, which
 binds only D1 and static assets and keeps `workers_dev = false`. `desk_only`
 remains a generic template option; private instances select `all_routes` so the
 application verifies Access on `/`, `/architecture`, `/desk`, APIs, and static

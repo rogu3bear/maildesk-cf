@@ -25,14 +25,14 @@ describe("relay deployment topology", () => {
       string,
       string,
     ]> = [
-      ["relay_router", "mail-router", "../../workers/mail-outbound/src/index.ts", "main = ../../workers/mail-router/src/index.ts"],
-      ["relay_outbound", "mail-outbound", "../../workers/mail-router/src/index.ts", "main = ../../workers/mail-outbound/src/index.ts"],
-      ["routing_health", "routing-health", "../../workers/mail-api/src/index.ts", "main = ../../build/_worker.js"],
+      ["relay_router", "mail-router", "workers/mail-outbound/src/index.ts", "main = workers/mail-router/src/index.ts"],
+      ["relay_outbound", "mail-outbound", "workers/mail-router/src/index.ts", "main = workers/mail-outbound/src/index.ts"],
+      ["routing_health", "routing-health", "workers/mail-api/src/index.ts", "main = build/_worker.js"],
     ];
 
     for (const [role, directory, swappedMain, expected] of cases) {
       const desired = structuredClone(original);
-      const configPath = `deploy/${directory}/wrangler.review-${process.pid}-${role}-entrypoint.toml`;
+      const configPath = `wrangler.${directory}.review-${process.pid}-${role}-entrypoint.toml`;
       const desiredPath = `config/desired-state.review-${process.pid}-${role}-entrypoint.local.json`;
       const config = readFileSync(resolve(root, desired.workers[role].config), "utf8")
         .replace(/^main\s*=\s*"[^"]+"$/m, `main = "${swappedMain}"`);
@@ -56,7 +56,7 @@ describe("relay deployment topology", () => {
 
   test("rejects policy and spool bucket targets swapped across canonical bindings", () => {
     const desired = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
-    const configPath = `deploy/mail-router/wrangler.review-${process.pid}-topology-swap.toml`;
+    const configPath = `wrangler.mail-router.review-${process.pid}-topology-swap.toml`;
     const desiredPath = `config/desired-state.review-${process.pid}-topology-swap.local.json`;
     const swapped = readFileSync(resolve(root, desired.workers.relay_router.config), "utf8")
       .replace('binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-policy"', 'binding = "POLICY_STORE"\nbucket_name = "maildesk-cf-relay-spool"')
@@ -80,7 +80,7 @@ describe("relay deployment topology", () => {
 
   test("rejects an additional Email binding", () => {
     const desired = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
-    const configPath = `deploy/mail-router/wrangler.review-${process.pid}-extra-email.toml`;
+    const configPath = `wrangler.mail-router.review-${process.pid}-extra-email.toml`;
     const desiredPath = `config/desired-state.review-${process.pid}-extra-email.local.json`;
     const config = readFileSync(resolve(root, desired.workers.relay_router.config), "utf8")
       .replace('{ name = "EMAIL" }', '{ name = "EMAIL" },\n  { name = "UNEXPECTED_EMAIL" }');
@@ -107,7 +107,7 @@ describe("relay deployment topology", () => {
       ["false", (config: string) => config.replace(/^run_worker_first\s*=\s*true\s*$/m, "run_worker_first = false")],
     ] as const) {
       const desired = structuredClone(original);
-      const configPath = `deploy/routing-health/wrangler.review-${process.pid}-assets-${name}.toml`;
+      const configPath = `wrangler.routing-health.review-${process.pid}-assets-${name}.toml`;
       const desiredPath = `config/desired-state.review-${process.pid}-assets-${name}.local.json`;
       try {
         writeFileSync(resolve(root, configPath), mutate(readFileSync(resolve(root, desired.workers.routing_health.config), "utf8")));

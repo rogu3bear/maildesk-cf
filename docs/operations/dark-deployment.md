@@ -9,7 +9,8 @@ placeholder identifiers is invalid.
 
 - `.cfctl/operations/d1-migrations.toml` closes the ordered migration directory,
   Wrangler version, schema assertions, bookmark requirement, and recovery
-  capability.
+  capability for two explicit operations: production D1 and isolated preview
+  D1. The preview operation uses the non-deployable `wrangler.d1-preview.toml`.
 - `.cfctl/operations/d1-policy-projections.toml` closes the body-free count and
   digest readback contract. Projection SQL remains a private mode-0600 staged
   file and never enters plan JSON.
@@ -32,10 +33,13 @@ to the exact projection plan.
 2. Resolve, inspect, and guide every capability named by the blueprint.
 3. Perform fresh account and zone reads, preserving exact prior-state snapshots
    and rollback targets.
-4. Create independent child plans for isolated resource creation. Compile the
+4. Create independent child plans for isolated resource creation, including
+   distinct production and preview D1 databases. Compile the
    bootstrap plan set, but do not approve or run it without separate authority.
 5. Only after authorized bootstrap apply and exact identifier readback, generate
-   ignored mode-0600 production Wrangler configs.
+   ignored mode-0600 root configs, including
+   `wrangler.d1-preview.production.toml`. Rehearse all migrations against that
+   D1-only preview target before planning the production migration operation.
 6. Generate the private immutable policy object and projection SQL, then create
    migration, upload, projection, Worker, consumer, Access, lifecycle, and reply
    routing child plans.

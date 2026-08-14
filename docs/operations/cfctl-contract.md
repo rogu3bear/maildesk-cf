@@ -42,7 +42,7 @@ non-mutating and does not replace `cfctl` live readback.
 - Email Worker deployment and bindings.
 - API/UI Worker deployment and bindings.
 - D1 database and migrations.
-- D1 preview database for non-production checks.
+- D1 preview database for the separately identified, D1-only migration rehearsal.
 - R2 bucket for raw MIME and attachments.
 - R2 preview bucket for non-production checks.
 - Queue for async mail jobs.
@@ -53,6 +53,10 @@ non-mutating and does not replace `cfctl` live readback.
 The desired-state fixture may include preview storage resources, but production
 `wrangler.toml` files must bind only production storage. `cfctl` verification
 should catch accidental preview bindings before deploy.
+- `wrangler.d1-preview.toml` is not a Worker deployment configuration: it has
+  exactly one D1 binding and no `main`, assets, routes, R2, or Queue authority.
+  Its ignored production counterpart is used only by
+  `maildesk-cf.d1-preview-migrations-apply`.
 - Worker secrets and identity policy config.
 - Sender-domain authentication and outbound identity verification status.
 

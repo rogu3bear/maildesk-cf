@@ -104,11 +104,13 @@ Domain-consistent replies are covered in
 
 The generic legacy web-desk Worker remains available through `wrangler.toml`.
 Inbox relay uses three isolated deployment targets: the Email router at
-`deploy/mail-router/wrangler.toml`, the queue-only outbound consumer at
-`deploy/mail-outbound/wrangler.toml`, and the D1-plus-assets routing-health UI
-at `deploy/routing-health/wrangler.toml`. Production resource creation remains
+`wrangler.mail-router.toml`, the queue-only outbound consumer at
+`wrangler.mail-outbound.toml`, and the D1-plus-assets routing-health UI
+at `wrangler.routing-health.toml`. Production resource creation remains
 governed by `cfctl`; these files document and typecheck the app-side binding
-boundary.
+boundary. The D1-only `wrangler.d1-preview.toml` is not deployable as a Worker;
+it gives preview migration rehearsal a separate governed config and operation
+identity without binding preview storage to any production Worker.
 
 The routing-health dashboard exposes declared provider state and proof status,
 never subjects, message bodies, attachments, thread history, or a composer.
@@ -164,7 +166,7 @@ Cloudflare account state.
 For a local edge-rendered preview of the public site and empty operator state:
 
 ```bash
-bunx wrangler dev --config deploy/routing-health/wrangler.toml --local --port 8788 \
+bunx wrangler dev --config wrangler.routing-health.toml --local --port 8788 \
   --var MAILDESK_UI_AUTH_MODE:preview
 ```
 
