@@ -864,6 +864,14 @@ describe("mail API outbound sender modes", () => {
       ["double-percent-encoded-leak", '<a href="mailto:operator%2540tenant.example.com">contact</a>'],
       ["encoded-entity-leak", '<a href="mailto:operator%26commat%3Btenant.example.com">contact</a>'],
       [
+        "encoded-semicolonless-decimal-entity-leak",
+        '<a href="mailto:operator%26%2364tenant.example.com">contact</a>',
+      ],
+      [
+        "encoded-semicolonless-hex-entity-leak",
+        '<a href="mailto:operator%26%23x40tenant.example.com">contact</a>',
+      ],
+      [
         "fully-percent-encoded-leak",
         '<a href="mailto:%6f%70%65%72%61%74%6f%72%40%74%65%6e%61%6e%74%2e%65%78%61%6d%70%6c%65%2e%63%6f%6d">contact</a>',
       ],

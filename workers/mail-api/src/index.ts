@@ -1234,11 +1234,12 @@ function normalizedVisibleValue(value: string): NormalizedVisibleValue {
 }
 
 function decodeHtmlEntities(value: string): string {
+  // HTML parsers consume numeric references even when the semicolon is omitted.
   return value
-    .replace(/&#x([0-9a-f]+);/gi, (entity: string, hex: string) =>
+    .replace(/&#x([0-9a-f]+);?/gi, (entity: string, hex: string) =>
       decodeHtmlCodePoint(entity, hex, 16)
     )
-    .replace(/&#([0-9]+);/g, (entity: string, decimal: string) =>
+    .replace(/&#([0-9]+);?/g, (entity: string, decimal: string) =>
       decodeHtmlCodePoint(entity, decimal, 10)
     )
     .replace(/&commat;/gi, "@")
