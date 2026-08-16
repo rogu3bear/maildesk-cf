@@ -1194,10 +1194,13 @@ function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPo
     htmlVisibleText(job.html ?? ""),
     ...Object.entries(outwardHeaders).flat(),
   ].map(normalizedVisibleValue);
-  return [...operators].some((operator) => {
-    const protectedIdentity = normalizedVisibleValue(operator);
-    return protectedIdentity && visible.some((value) => value.includes(protectedIdentity));
-  })
+  const protectedIdentities = [...operators].map(normalizedVisibleValue);
+  if ([...visible, ...protectedIdentities].some((value) => !value.complete)) {
+    return "outbound content encoding exceeds privacy inspection limits";
+  }
+  return protectedIdentities.some((protectedIdentity) =>
+    protectedIdentity.value && visible.some((value) => value.value.includes(protectedIdentity.value))
+  )
     ? "outbound content contains a private operator identity"
     : null;
 }
@@ -1210,12 +1213,65 @@ function htmlVisibleText(html: string): string {
     .replace(/<[^>]*>/g, "");
 }
 
-function normalizedVisibleValue(value: string): string {
+const MAX_PRIVACY_DECODING_ROUNDS = 4;
+const PRIVACY_UTF8_DECODER = new TextDecoder();
+
+interface NormalizedVisibleValue {
+  value: string;
+  complete: boolean;
+}
+
+function normalizedVisibleValue(value: string): NormalizedVisibleValue {
+  let current = canonicalVisibleText(value);
+  for (let round = 0; round < MAX_PRIVACY_DECODING_ROUNDS; round += 1) {
+    const next = canonicalVisibleText(decodePercentEncodedBytes(decodeHtmlEntities(current)));
+    if (next === current) return { value: current, complete: true };
+    current = next;
+  }
+
+  const next = canonicalVisibleText(decodePercentEncodedBytes(decodeHtmlEntities(current)));
+  return { value: current, complete: next === current };
+}
+
+function decodeHtmlEntities(value: string): string {
   return value
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (entity: string, hex: string) =>
+      decodeHtmlCodePoint(entity, hex, 16)
+    )
+    .replace(/&#([0-9]+);/g, (entity: string, decimal: string) =>
+      decodeHtmlCodePoint(entity, decimal, 10)
+    )
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
+    .replace(/&percnt;/gi, "%")
+    .replace(/&amp;/gi, "&");
+}
+
+function decodeHtmlCodePoint(entity: string, digits: string, radix: number): string {
+  const codePoint = Number.parseInt(digits, radix);
+  if (
+    !Number.isSafeInteger(codePoint) ||
+    codePoint <= 0 ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  ) {
+    return entity;
+  }
+  return String.fromCodePoint(codePoint);
+}
+
+function decodePercentEncodedBytes(value: string): string {
+  return value.replace(/(?:%[0-9a-f]{2})+/gi, (encoded: string) => {
+    const bytes = new Uint8Array(encoded.length / 3);
+    for (let offset = 0; offset < encoded.length; offset += 3) {
+      bytes[offset / 3] = Number.parseInt(encoded.slice(offset + 1, offset + 3), 16);
+    }
+    return PRIVACY_UTF8_DECODER.decode(bytes);
+  });
+}
+
+function canonicalVisibleText(value: string): string {
+  return value
     .normalize("NFKC")
     .toLowerCase()
     .replace(/\p{Default_Ignorable_Code_Point}/gu, "");

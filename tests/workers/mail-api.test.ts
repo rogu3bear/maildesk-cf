@@ -858,6 +858,56 @@ describe("mail API outbound sender modes", () => {
     expect(result.result?.error).toBe("outbound content contains a private operator identity");
   });
 
+  test("inbox relay rejects percent-encoded private operator identities before provider send", async () => {
+    const cases = [
+      ["percent-encoded-leak", '<a href="mailto:operator%40tenant.example.com">contact</a>'],
+      ["double-percent-encoded-leak", '<a href="mailto:operator%2540tenant.example.com">contact</a>'],
+      ["encoded-entity-leak", '<a href="mailto:operator%26commat%3Btenant.example.com">contact</a>'],
+      [
+        "fully-percent-encoded-leak",
+        '<a href="mailto:%6f%70%65%72%61%74%6f%72%40%74%65%6e%61%6e%74%2e%65%78%61%6d%70%6c%65%2e%63%6f%6d">contact</a>',
+      ],
+    ] as const;
+
+    for (const [messageId, html] of cases) {
+      const { batch, db, email } = await runInboxRelayHtmlReply(messageId, html);
+
+      expect(batch.ackCount).toBe(1);
+      expect({ messageId, providerCalls: email.messages.length }).toEqual({
+        messageId,
+        providerCalls: 0,
+      });
+      expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+      const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+      expect(result.result?.error).toBe("outbound content contains a private operator identity");
+    }
+  });
+
+  test("inbox relay fails closed when outward encoding exceeds the inspection limit", async () => {
+    const { batch, db, email } = await runInboxRelayHtmlReply(
+      "deeply-encoded-content",
+      '<a href="mailto:operator%2525252540tenant.example.com">contact</a>',
+    );
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+    const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+    expect(result.result?.error).toBe("outbound content encoding exceeds privacy inspection limits");
+  });
+
+  test("inbox relay preserves unrelated percent-encoded outward content", async () => {
+    const { batch, db, email } = await runInboxRelayHtmlReply(
+      "benign-percent-encoding",
+      '<a href="https://example.net/report%202026">report</a>',
+    );
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(1);
+    expect(db.hasAuditAction("outbound_reply_delivered")).toBe(true);
+    expect(db.hasAuditAction("outbound_reply_failed")).toBe(false);
+  });
+
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder([
@@ -1928,6 +1978,38 @@ function inboxRelayPolicyJson(): string {
       },
     },
   });
+}
+
+async function runInboxRelayHtmlReply(messageId: string, html: string) {
+  const policyJson = inboxRelayPolicyJson();
+  const db = new D1Recorder(undefined, policyJson);
+  const email = new SendEmailRecorder("provider-message");
+  const batch = new MessageBatchRecorder([{
+    kind: "outbound_reply_requested",
+    messageId,
+    threadId: `thread-${messageId}`,
+    operator: "operator@tenant.example.com",
+    envelopeTo: "security@tenant.example.com",
+    fromIdentity: "security@tenant.example.com",
+    to: ["correspondent@example.net"],
+    subject: "Reply",
+    text: "Contact the operator",
+    html,
+    queuedAt: "2026-08-12T00:00:00.000Z",
+  }]);
+
+  await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+    DB: db,
+    RAW_MAIL: {},
+    POLICY_STORE: policyStore(policyJson),
+    MAIL_JOBS: {},
+    EMAIL: email,
+    MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+    MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+  } as unknown as Env);
+
+  return { batch, db, email };
 }
 
 class SendEmailRecorder {
