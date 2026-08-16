@@ -1242,6 +1242,8 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&#([0-9]+);?/g, (entity: string, decimal: string) =>
       decodeHtmlCodePoint(entity, decimal, 10)
     )
+    .replace(/&tab;/gi, "\t")
+    .replace(/&newline;/gi, "\n")
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
     .replace(/&percnt;/gi, "%")
@@ -1272,10 +1274,12 @@ function decodePercentEncodedBytes(value: string): string {
 }
 
 function canonicalVisibleText(value: string): string {
+  // WHATWG URL preprocessing removes these controls before interpreting href values.
   return value
     .normalize("NFKC")
     .toLowerCase()
-    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
+    .replace(/[\t\n\r]/g, "");
 }
 
 async function auditOperator(env: Env, operator: string): Promise<string> {

@@ -891,6 +891,39 @@ describe("mail API outbound sender modes", () => {
     }
   });
 
+  test("inbox relay rejects URL-preprocessed control references before provider send", async () => {
+    const cases = [
+      ["numeric-tab-separator", '<a href="mailto:operator&#9;@tenant.example.com">contact</a>'],
+      ["numeric-line-feed-separator", '<a href="mailto:operator&#10;@tenant.example.com">contact</a>'],
+      ["numeric-carriage-return-separator", '<a href="mailto:operator&#13;@tenant.example.com">contact</a>'],
+      ["hexadecimal-tab-separator", '<a href="mailto:operator&#x9;@tenant.example.com">contact</a>'],
+      ["semicolonless-numeric-tab-separator", '<a href="mailto:operator&#9@tenant.example.com">contact</a>'],
+      ["named-tab-separator", '<a href="mailto:operator&Tab;@tenant.example.com">contact</a>'],
+      ["named-line-feed-separator", '<a href="mailto:operator&NewLine;@tenant.example.com">contact</a>'],
+      [
+        "percent-encoded-named-tab-separator",
+        '<a href="mailto:operator%26Tab%3B@tenant.example.com">contact</a>',
+      ],
+      [
+        "percent-encoded-numeric-line-feed-separator",
+        '<a href="mailto:operator%26%2310%3B%40tenant.example.com">contact</a>',
+      ],
+    ] as const;
+
+    for (const [messageId, html] of cases) {
+      const { batch, db, email } = await runInboxRelayHtmlReply(messageId, html);
+
+      expect(batch.ackCount).toBe(1);
+      expect({ messageId, providerCalls: email.messages.length }).toEqual({
+        messageId,
+        providerCalls: 0,
+      });
+      expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+      const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+      expect(result.result?.error).toBe("outbound content contains a private operator identity");
+    }
+  });
+
   test("inbox relay fails closed when outward encoding exceeds the inspection limit", async () => {
     const { batch, db, email } = await runInboxRelayHtmlReply(
       "deeply-encoded-content",
