@@ -56,6 +56,26 @@ describe("production preflight", () => {
     }
   });
 
+  test("rejects a missing runtime operator delivery mode", () => {
+    const topology = writeProductionTopology();
+    try {
+      const env = productionEnv(topology.desiredPath, "cloudflare_email_service");
+      delete env.MAILDESK_OPERATOR_DELIVERY_MODE;
+      const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "MAILDESK_OPERATOR_DELIVERY_MODE (missing) must match desired-state operator_delivery.mode (inbox_relay)",
+      );
+    } finally {
+      topology.cleanup();
+    }
+  });
+
   test("rejects non-canonical desired-state Worker config authority", () => {
     const desiredPath = writeDesiredState("disabled", {
       workers: {

@@ -671,6 +671,25 @@ test("invalid delivery configuration and relay timestamps fail closed", async ()
   expect(relayRecordIsActive("2099-01-01T00:00:00.000Z", null, 0)).toBe(true);
 });
 
+test("omitted delivery configuration fails closed before routing", async () => {
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "sender@example.net", messageId: "<missing-mode@example.net>" }),
+  );
+  const env = relayEnv(new RelayD1(), []);
+  delete (env as Record<string, unknown>).MAILDESK_OPERATOR_DELIVERY_MODE;
+
+  await mailRouterWorker.email(
+    message,
+    env as unknown as Parameters<typeof mailRouterWorker.email>[1],
+    {} as ExecutionContext,
+  );
+
+  expect(message.rejected).toContain("delivery mode is invalid");
+  expect(message.forwarded).toHaveLength(0);
+});
+
 test("reply relay requires cryptographic aligned DKIM before token lookup", async () => {
   const token = "a".repeat(64);
   const message = inboundMessage(

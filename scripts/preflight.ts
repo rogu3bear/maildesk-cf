@@ -297,10 +297,10 @@ function checkOperatorDeliveryEnv(
 ) {
   const delivery = desiredState?.operator_delivery;
   if (!delivery || (delivery.mode !== "inbox_relay" && delivery.mode !== "web_desk")) return;
-  const runtimeMode = process.env.MAILDESK_OPERATOR_DELIVERY_MODE?.trim() || "web_desk";
+  const runtimeMode = process.env.MAILDESK_OPERATOR_DELIVERY_MODE;
   if (runtimeMode !== delivery.mode) {
     failures.push(
-      `MAILDESK_OPERATOR_DELIVERY_MODE (${runtimeMode}) must match desired-state operator_delivery.mode (${delivery.mode})`,
+      `MAILDESK_OPERATOR_DELIVERY_MODE (${runtimeMode ?? "missing"}) must match desired-state operator_delivery.mode (${delivery.mode})`,
     );
   }
   if (delivery.mode !== "inbox_relay") return;

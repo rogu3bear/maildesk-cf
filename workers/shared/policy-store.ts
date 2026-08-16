@@ -24,7 +24,7 @@ export async function loadActivePolicy(
 ): Promise<ActivePolicy | null> {
   // Kept only for generic legacy web-desk development. Inbox relay always
   // requires the active D1 pointer and its exact immutable R2 object.
-  if (env.MAILDESK_OPERATOR_DELIVERY_MODE !== "inbox_relay" && env.MAILDESK_POLICY_JSON) {
+  if (env.MAILDESK_OPERATOR_DELIVERY_MODE === "web_desk" && env.MAILDESK_POLICY_JSON) {
     const policy = parsePolicy(env.MAILDESK_POLICY_JSON);
     return policy
       ? { policy, sha256: await sha256Hex(env.MAILDESK_POLICY_JSON), r2ObjectKey: "inline:development" }

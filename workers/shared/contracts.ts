@@ -227,7 +227,7 @@ export function relaySpoolKey(attemptId: string, receivedAt: string): string {
 
 export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig {
   const configuredMode = env.MAILDESK_OPERATOR_DELIVERY_MODE as string | undefined;
-  const mode: OperatorDeliveryMode = configuredMode === undefined || configuredMode === "web_desk"
+  const mode: OperatorDeliveryMode = configuredMode === "web_desk"
     ? "web_desk"
     : configuredMode === "inbox_relay"
       ? "inbox_relay"

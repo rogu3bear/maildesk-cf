@@ -81,6 +81,14 @@ export async function processQueueBatch(batch: MessageBatch<MailJob>, env: Env):
 }
 
 async function queueReply(request: Request, env: Env): Promise<Response> {
+  const delivery = operatorDeliveryConfig(env);
+  if (delivery.mode === "invalid") {
+    return json({ error: "operator_delivery_mode_invalid" }, { status: 503 });
+  }
+  if (delivery.mode === "inbox_relay") {
+    return notFound();
+  }
+
   if (!isAuthorizedRequest(request, env)) {
     return json({ error: "unauthorized" }, { status: 401 });
   }
@@ -162,6 +170,16 @@ async function processInboxReply(
   env: Env,
   attempt: number,
 ): Promise<QueueDisposition> {
+  const delivery = operatorDeliveryConfig(env);
+  if (delivery.mode !== "inbox_relay") {
+    await failRelayAttempt(
+      job,
+      env,
+      delivery.mode === "invalid" ? "operator_delivery_mode_invalid" : "inbox_relay_disabled",
+    );
+    return ACK;
+  }
+
   if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
     await recoverRelayAttempt(job, env, "relay_storage_unavailable");
     return ACK;
@@ -353,6 +371,14 @@ async function recordQueueEvent(
   }
   if (job.kind === "inbound_delivery_result") {
     await projectInboundDeliveryResult(job, env);
+    return ACK;
+  }
+  if (job.kind === "outbound_reply_requested" && operatorDeliveryConfig(env).mode === "invalid") {
+    await recordTerminalSendEvent(job, env, "outbound_reply_failed", {
+      ok: false,
+      provider: configuredOutboundMode(env),
+      error: "operator delivery mode is invalid",
+    });
     return ACK;
   }
   const base = dedupeBase(job);
@@ -985,6 +1011,11 @@ async function sendOutboundReply(
   env: Env,
 ): Promise<OutboundSendResult> {
   const mode = configuredOutboundMode(env);
+  const delivery = operatorDeliveryConfig(env);
+
+  if (delivery.mode === "invalid") {
+    return { ok: false, provider: mode, error: "operator delivery mode is invalid" };
+  }
 
   if (mode === "disabled") {
     return { ok: false, provider: mode, error: "outbound sending is disabled" };
@@ -999,7 +1030,7 @@ async function sendOutboundReply(
     return { ok: false, provider: mode, error: "sender domain is not verified" };
   }
 
-  if (operatorDeliveryConfig(env).mode === "inbox_relay") {
+  if (delivery.mode === "inbox_relay") {
     const activePolicy = await loadActivePolicy(env);
     if (!activePolicy) {
       return { ok: false, provider: mode, error: "active policy is unavailable" };
@@ -1191,9 +1222,10 @@ function normalizedVisibleValue(value: string): string {
 }
 
 async function auditOperator(env: Env, operator: string): Promise<string> {
-  return operatorDeliveryConfig(env).mode === "inbox_relay"
-    ? `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`
-    : operator;
+  const mode = operatorDeliveryConfig(env).mode;
+  if (mode === "inbox_relay") return `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`;
+  if (mode === "web_desk") return operator;
+  return "operator:invalid";
 }
 
 function parseMailbox(address: string): ParsedMailbox | null {

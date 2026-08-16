@@ -52,6 +52,27 @@ test("inline policy is never accepted in inbox relay mode", async () => {
   } as never)).toBeNull();
 });
 
+test("inline policy is accepted only for explicit web-desk mode", async () => {
+  const active = await loadActivePolicy({
+    MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+    MAILDESK_POLICY_JSON: policyJson,
+    DB: {} as D1Database,
+  } as never);
+
+  expect(active?.r2ObjectKey).toBe("inline:development");
+  expect(active?.policy).toEqual(JSON.parse(policyJson));
+});
+
+test("invalid or omitted delivery modes cannot load inline policy", async () => {
+  for (const mode of [undefined, "inbox-relayy", "legacy_web_desk", "disabled"]) {
+    expect(await loadActivePolicy({
+      MAILDESK_OPERATOR_DELIVERY_MODE: mode,
+      MAILDESK_POLICY_JSON: policyJson,
+      DB: {} as D1Database,
+    } as never)).toBeNull();
+  }
+});
+
 function policyEnv(input: {
   digest: string;
   key: string;
