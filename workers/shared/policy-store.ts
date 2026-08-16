@@ -22,6 +22,13 @@ export interface ActivePolicy {
 export async function loadActivePolicy(
   env: Pick<MaildeskEnv, "DB" | "POLICY_STORE" | "MAILDESK_POLICY_JSON" | "MAILDESK_OPERATOR_DELIVERY_MODE">,
 ): Promise<ActivePolicy | null> {
+  if (
+    env.MAILDESK_OPERATOR_DELIVERY_MODE !== "web_desk" &&
+    env.MAILDESK_OPERATOR_DELIVERY_MODE !== "inbox_relay"
+  ) {
+    return null;
+  }
+
   // Kept only for generic legacy web-desk development. Inbox relay always
   // requires the active D1 pointer and its exact immutable R2 object.
   if (env.MAILDESK_OPERATOR_DELIVERY_MODE === "web_desk" && env.MAILDESK_POLICY_JSON) {
