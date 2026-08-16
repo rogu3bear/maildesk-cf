@@ -13,6 +13,7 @@ binding = "ASSETS"
 
 [vars]
 MAILDESK_UI_AUTH_MODE = "access"
+MAILDESK_OPERATOR_DELIVERY_MODE = "web_desk"
 MAILDESK_RELAY_PROCESSING_MODE = "disabled"
 
 [[d1_databases]]

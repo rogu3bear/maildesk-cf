@@ -9,6 +9,22 @@ const root = resolve(import.meta.dir, "../..");
 setDefaultTimeout(30_000);
 
 describe("production preflight", () => {
+  test("tracked legacy web-desk configs declare an explicit delivery mode", () => {
+    for (const configPath of ["wrangler.toml", "deploy/ui/wrangler.toml"]) {
+      const config = Bun.TOML.parse(readFileSync(resolve(root, configPath), "utf8")) as {
+        vars?: Record<string, unknown>;
+      };
+
+      expect({
+        configPath,
+        mode: config.vars?.MAILDESK_OPERATOR_DELIVERY_MODE,
+      }).toEqual({
+        configPath,
+        mode: "web_desk",
+      });
+    }
+  });
+
   test("validates desired-state-selected production configs instead of tracked template placeholders", () => {
     const topology = writeProductionTopology();
     try {

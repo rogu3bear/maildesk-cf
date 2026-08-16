@@ -11,6 +11,7 @@ send_email = [
 command = "bun run build:router-wasm"
 
 [vars]
+MAILDESK_OPERATOR_DELIVERY_MODE = "web_desk"
 MAILDESK_POLICY_R2_KEY = "config/policy.json"
 MAILDESK_OUTBOUND_MODE = "disabled"
 MAILDESK_REPLY_API_MODE = "disabled"
