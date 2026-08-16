@@ -22,6 +22,7 @@ test("accepted inbound role alias persists D1 metadata", async () => {
       DB: db,
       RAW_MAIL: rawMail,
       MAIL_JOBS: mailJobs,
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       MAILDESK_POLICY_JSON: JSON.stringify({
         default_reply_mode: "role_first",
         domains: {
@@ -83,6 +84,7 @@ test("D1 metadata failure stops follow-up queue work after forwarding", async ()
         DB: db,
         RAW_MAIL: rawMail,
         MAIL_JOBS: mailJobs,
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
         MAILDESK_POLICY_JSON: JSON.stringify({
           default_reply_mode: "role_first",
           domains: {
@@ -116,6 +118,7 @@ test("distinct attacker-controlled Message-IDs cannot collapse to one thread id"
     DB: db,
     RAW_MAIL: new R2Recorder(),
     MAIL_JOBS: new QueueRecorder(),
+    MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     MAILDESK_POLICY_JSON: JSON.stringify({
       default_reply_mode: "role_first",
       domains: {
@@ -173,6 +176,7 @@ test("inbound routing rejects mailbox whitespace through the Rust policy boundar
       DB: new D1Recorder(),
       RAW_MAIL: new R2Recorder(),
       MAIL_JOBS: new QueueRecorder(),
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       MAILDESK_POLICY_JSON: JSON.stringify({
         default_reply_mode: "role_first",
         domains: {

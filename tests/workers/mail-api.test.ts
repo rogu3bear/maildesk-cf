@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 
 import mailApiWorker from "../../workers/mail-api/src/index";
+import { operatorDeliveryConfig } from "../../workers/shared/contracts";
 
 describe("mail API outbound sender modes", () => {
   test("an inbound result recovery job projects provider outcomes and cleans the spool without sending", async () => {
@@ -516,6 +517,7 @@ describe("mail API outbound sender modes", () => {
       EMAIL: email,
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env;
 
     const first = new MessageBatchRecorder([job]);
@@ -594,6 +596,7 @@ describe("mail API outbound sender modes", () => {
       EMAIL: email,
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
     } as unknown as Env);
 
     expect(batch.ackCount).toBe(1);
@@ -696,6 +699,7 @@ describe("mail API outbound sender modes", () => {
       RELAY_SPOOL: { delete: async (key: string) => { deleted.push(key); } },
       MAIL_JOBS: {},
       MAILDESK_OUTBOUND_MODE: "disabled",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
     } as unknown as Env)).rejects.toThrow("active route health revision is unavailable");
 
     expect(batch.ackCount).toBe(0);
@@ -854,6 +858,97 @@ describe("mail API outbound sender modes", () => {
     expect(result.result?.error).toBe("outbound content contains a private operator identity");
   });
 
+  test("inbox relay rejects percent-encoded private operator identities before provider send", async () => {
+    const cases = [
+      ["percent-encoded-leak", '<a href="mailto:operator%40tenant.example.com">contact</a>'],
+      ["double-percent-encoded-leak", '<a href="mailto:operator%2540tenant.example.com">contact</a>'],
+      ["encoded-entity-leak", '<a href="mailto:operator%26commat%3Btenant.example.com">contact</a>'],
+      [
+        "encoded-semicolonless-decimal-entity-leak",
+        '<a href="mailto:operator%26%2364tenant.example.com">contact</a>',
+      ],
+      [
+        "encoded-semicolonless-hex-entity-leak",
+        '<a href="mailto:operator%26%23x40tenant.example.com">contact</a>',
+      ],
+      [
+        "fully-percent-encoded-leak",
+        '<a href="mailto:%6f%70%65%72%61%74%6f%72%40%74%65%6e%61%6e%74%2e%65%78%61%6d%70%6c%65%2e%63%6f%6d">contact</a>',
+      ],
+    ] as const;
+
+    for (const [messageId, html] of cases) {
+      const { batch, db, email } = await runInboxRelayHtmlReply(messageId, html);
+
+      expect(batch.ackCount).toBe(1);
+      expect({ messageId, providerCalls: email.messages.length }).toEqual({
+        messageId,
+        providerCalls: 0,
+      });
+      expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+      const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+      expect(result.result?.error).toBe("outbound content contains a private operator identity");
+    }
+  });
+
+  test("inbox relay rejects URL-preprocessed control references before provider send", async () => {
+    const cases = [
+      ["numeric-tab-separator", '<a href="mailto:operator&#9;@tenant.example.com">contact</a>'],
+      ["numeric-line-feed-separator", '<a href="mailto:operator&#10;@tenant.example.com">contact</a>'],
+      ["numeric-carriage-return-separator", '<a href="mailto:operator&#13;@tenant.example.com">contact</a>'],
+      ["hexadecimal-tab-separator", '<a href="mailto:operator&#x9;@tenant.example.com">contact</a>'],
+      ["semicolonless-numeric-tab-separator", '<a href="mailto:operator&#9@tenant.example.com">contact</a>'],
+      ["named-tab-separator", '<a href="mailto:operator&Tab;@tenant.example.com">contact</a>'],
+      ["named-line-feed-separator", '<a href="mailto:operator&NewLine;@tenant.example.com">contact</a>'],
+      [
+        "percent-encoded-named-tab-separator",
+        '<a href="mailto:operator%26Tab%3B@tenant.example.com">contact</a>',
+      ],
+      [
+        "percent-encoded-numeric-line-feed-separator",
+        '<a href="mailto:operator%26%2310%3B%40tenant.example.com">contact</a>',
+      ],
+    ] as const;
+
+    for (const [messageId, html] of cases) {
+      const { batch, db, email } = await runInboxRelayHtmlReply(messageId, html);
+
+      expect(batch.ackCount).toBe(1);
+      expect({ messageId, providerCalls: email.messages.length }).toEqual({
+        messageId,
+        providerCalls: 0,
+      });
+      expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+      const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+      expect(result.result?.error).toBe("outbound content contains a private operator identity");
+    }
+  });
+
+  test("inbox relay fails closed when outward encoding exceeds the inspection limit", async () => {
+    const { batch, db, email } = await runInboxRelayHtmlReply(
+      "deeply-encoded-content",
+      '<a href="mailto:operator%2525252540tenant.example.com">contact</a>',
+    );
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(0);
+    expect(db.hasAuditAction("outbound_reply_delivered")).toBe(false);
+    const result = db.auditDetail("outbound_reply_failed") as { result?: { error?: string } };
+    expect(result.result?.error).toBe("outbound content encoding exceeds privacy inspection limits");
+  });
+
+  test("inbox relay preserves unrelated percent-encoded outward content", async () => {
+    const { batch, db, email } = await runInboxRelayHtmlReply(
+      "benign-percent-encoding",
+      '<a href="https://example.net/report%202026">report</a>',
+    );
+
+    expect(batch.ackCount).toBe(1);
+    expect(email.messages).toHaveLength(1);
+    expect(db.hasAuditAction("outbound_reply_delivered")).toBe(true);
+    expect(db.hasAuditAction("outbound_reply_failed")).toBe(false);
+  });
+
   test("disabled mode records a disabled send result without requiring sender-domain verification", async () => {
     const db = new D1Recorder();
     const batch = new MessageBatchRecorder([
@@ -876,6 +971,7 @@ describe("mail API outbound sender modes", () => {
       RAW_MAIL: {},
       MAIL_JOBS: {},
       MAILDESK_OUTBOUND_MODE: "disabled",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(batch.ackCount).toBe(1);
@@ -916,6 +1012,7 @@ describe("mail API outbound sender modes", () => {
         EMAIL: email,
         MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env,
     );
 
@@ -960,6 +1057,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "test-resend-key",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1008,6 +1106,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "private-provider-token",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1051,6 +1150,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "test-resend-key",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1100,6 +1200,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "test-resend-key",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1141,6 +1242,7 @@ describe("mail API outbound sender modes", () => {
       EMAIL: email,
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(0);
@@ -1184,6 +1286,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "test-resend-key",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1224,6 +1327,7 @@ describe("mail API outbound sender modes", () => {
       },
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(batch.retryCount).toBe(0);
@@ -1251,6 +1355,139 @@ describe("mail API outbound sender modes", () => {
     expect(response.status).toBe(404);
   });
 
+  test("reply API rejects invalid delivery modes before policy lookup or queueing", async () => {
+    const policyJson = JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {
+            founders: {
+              operators: ["operator@example.com"],
+              reply_identity: "founders@example.com",
+              allowed_reply_identities: [],
+            },
+          },
+          personal_aliases: {},
+        },
+      },
+    });
+    const body = {
+      kind: "outbound_reply_requested",
+      messageId: "message-invalid-delivery-mode",
+      threadId: "thread-invalid-delivery-mode",
+      operator: "operator@example.com",
+      envelopeTo: "founders@example.com",
+      fromIdentity: "founders@example.com",
+      to: ["sender@example.net"],
+      subject: "Invalid delivery mode",
+      text: "must not queue",
+      queuedAt: "2026-08-16T00:00:00.000Z",
+    };
+
+    for (const configuredMode of [undefined, "inbox-relayy", "legacy_web_desk", "disabled"]) {
+      const queued: MailJob[] = [];
+      const env = {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: { async send(job: MailJob) { queued.push(job); } },
+        MAILDESK_API_TOKEN: "test-token",
+        MAILDESK_REPLY_API_MODE: "token",
+        MAILDESK_POLICY_JSON: policyJson,
+        ...(configuredMode === undefined ? {} : { MAILDESK_OPERATOR_DELIVERY_MODE: configuredMode }),
+      };
+
+      const response = await mailApiWorker.fetch(
+        new Request("https://maildesk.example.com/api/replies", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+        env as unknown as Env,
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "operator_delivery_mode_invalid" });
+      expect(queued).toHaveLength(0);
+    }
+  });
+
+  test("reply API preserves explicit web-desk behavior and keeps inbox relay private", async () => {
+    const policyJson = JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {
+            founders: {
+              operators: ["operator@example.com"],
+              reply_identity: "founders@example.com",
+              allowed_reply_identities: [],
+            },
+          },
+          personal_aliases: {},
+        },
+      },
+    });
+    const body = {
+      kind: "outbound_reply_requested",
+      messageId: "message-valid-delivery-mode",
+      threadId: "thread-valid-delivery-mode",
+      operator: "operator@example.com",
+      envelopeTo: "founders@example.com",
+      fromIdentity: "founders@example.com",
+      to: ["sender@example.net"],
+      subject: "Valid delivery mode",
+      text: "queues only in web desk",
+      queuedAt: "2026-08-16T00:00:00.000Z",
+    };
+    const baseEnv = {
+      DB: new D1Recorder(),
+      RAW_MAIL: {},
+      MAILDESK_API_TOKEN: "test-token",
+      MAILDESK_REPLY_API_MODE: "token" as const,
+      MAILDESK_POLICY_JSON: policyJson,
+    };
+    const webDeskQueue: MailJob[] = [];
+    const webDeskResponse = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/api/replies", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+      {
+        ...baseEnv,
+        MAIL_JOBS: { async send(job: MailJob) { webDeskQueue.push(job); } },
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk" as const,
+      } as unknown as Env,
+    );
+    expect(webDeskResponse.status).toBe(202);
+    expect(webDeskQueue).toHaveLength(1);
+
+    const relayQueue: MailJob[] = [];
+    const relayResponse = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/api/replies", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+      {
+        ...baseEnv,
+        MAIL_JOBS: { async send(job: MailJob) { relayQueue.push(job); } },
+        MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay" as const,
+      } as unknown as Env,
+    );
+    expect(relayResponse.status).toBe(404);
+    expect(relayQueue).toHaveLength(0);
+  });
+
   test("readiness rejects an explicit invalid operator delivery mode", async () => {
     const response = await mailApiWorker.fetch(
       new Request("https://maildesk.example.com/readyz"),
@@ -1272,6 +1509,40 @@ describe("mail API outbound sender modes", () => {
       ok: false,
       detail: "invalid",
     });
+  });
+
+  test("readiness rejects an omitted operator delivery mode", async () => {
+    const response = await mailApiWorker.fetch(
+      new Request("https://maildesk.example.com/readyz"),
+      {
+        DB: new D1Recorder(),
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+      } as unknown as Env,
+    );
+
+    expect(response.status).toBe(503);
+    const report = await response.json() as {
+      checks: Array<{ name: string; ok: boolean; detail?: string }>;
+    };
+    expect(report.checks).toContainEqual({
+      name: "operator_delivery_mode",
+      ok: false,
+      detail: "invalid",
+    });
+  });
+
+  test("operator delivery configuration accepts only explicit supported modes", () => {
+    expect(operatorDeliveryConfig({} as Env).mode).toBe("invalid");
+    expect(operatorDeliveryConfig({ MAILDESK_OPERATOR_DELIVERY_MODE: "inbox-relayy" } as unknown as Env).mode)
+      .toBe("invalid");
+    expect(operatorDeliveryConfig({ MAILDESK_OPERATOR_DELIVERY_MODE: "legacy_web_desk" } as unknown as Env).mode)
+      .toBe("invalid");
+    expect(operatorDeliveryConfig({ MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk" } as unknown as Env).mode)
+      .toBe("web_desk");
+    expect(operatorDeliveryConfig({ MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay" } as unknown as Env).mode)
+      .toBe("inbox_relay");
   });
 
   test("readiness rejects an explicit invalid relay processing mode", async () => {
@@ -1355,6 +1626,7 @@ describe("mail API outbound sender modes", () => {
       EMAIL: email,
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(1);
@@ -1370,6 +1642,49 @@ describe("mail API outbound sender modes", () => {
       provider: "cloudflare_email_service",
       providerMessageId: "cf-message-id",
     });
+  });
+
+  test("outbound consumer rejects invalid delivery modes before the send claim or provider", async () => {
+    for (const configuredMode of [undefined, "inbox-relayy", "legacy_web_desk", "disabled"]) {
+      const db = new D1Recorder();
+      const email = new SendEmailRecorder("must-not-send");
+      const job: MailJob = {
+        kind: "outbound_reply_requested",
+        messageId: `message-invalid-delivery-${configuredMode ?? "omitted"}`,
+        threadId: "thread-invalid-delivery",
+        operator: "operator@tenant.example.com",
+        envelopeTo: "founders@tenant.example.com",
+        fromIdentity: "founders@tenant.example.com",
+        to: ["proof@example.net"],
+        subject: "Invalid delivery mode",
+        text: "must not send",
+        queuedAt: "2026-08-16T00:00:00.000Z",
+      };
+      const batch = new MessageBatchRecorder([job]);
+      const env = {
+        DB: db,
+        RAW_MAIL: {},
+        MAIL_JOBS: {},
+        EMAIL: email,
+        MAILDESK_OUTBOUND_MODE: "cloudflare_email_service" as const,
+        MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        ...(configuredMode === undefined ? {} : { MAILDESK_OPERATOR_DELIVERY_MODE: configuredMode }),
+      };
+
+      await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, env as unknown as Env);
+
+      expect(email.messages).toHaveLength(0);
+      expect(batch.ackCount).toBe(1);
+      expect(db.hasAuditAction("outbound_reply_requested")).toBe(false);
+      expect(db.hasAuditAction("outbound_reply_authorized")).toBe(false);
+      expect(db.hasAuditAction("outbound_reply_send_attempted")).toBe(false);
+      expect(db.auditDetail("outbound_reply_failed")).toMatchObject({
+        result: {
+          provider: "cloudflare_email_service",
+          error: "operator delivery mode is invalid",
+        },
+      });
+    }
   });
 
   test("runtime sender authorization rejects wildcard configuration", async () => {
@@ -1397,6 +1712,7 @@ describe("mail API outbound sender modes", () => {
       EMAIL: email,
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com,*",
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(0);
@@ -1441,6 +1757,7 @@ describe("mail API outbound sender modes", () => {
         RESEND_API_KEY: "test-resend-key",
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+        MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1501,6 +1818,7 @@ describe("mail API outbound sender modes", () => {
           },
         },
       }),
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
     } as unknown as Env);
 
     expect(response.status).toBe(403);
@@ -1701,6 +2019,38 @@ function inboxRelayPolicyJson(): string {
       },
     },
   });
+}
+
+async function runInboxRelayHtmlReply(messageId: string, html: string) {
+  const policyJson = inboxRelayPolicyJson();
+  const db = new D1Recorder(undefined, policyJson);
+  const email = new SendEmailRecorder("provider-message");
+  const batch = new MessageBatchRecorder([{
+    kind: "outbound_reply_requested",
+    messageId,
+    threadId: `thread-${messageId}`,
+    operator: "operator@tenant.example.com",
+    envelopeTo: "security@tenant.example.com",
+    fromIdentity: "security@tenant.example.com",
+    to: ["correspondent@example.net"],
+    subject: "Reply",
+    text: "Contact the operator",
+    html,
+    queuedAt: "2026-08-12T00:00:00.000Z",
+  }]);
+
+  await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+    DB: db,
+    RAW_MAIL: {},
+    POLICY_STORE: policyStore(policyJson),
+    MAIL_JOBS: {},
+    EMAIL: email,
+    MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
+    MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
+    MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
+  } as unknown as Env);
+
+  return { batch, db, email };
 }
 
 class SendEmailRecorder {

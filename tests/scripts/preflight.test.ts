@@ -9,6 +9,22 @@ const root = resolve(import.meta.dir, "../..");
 setDefaultTimeout(30_000);
 
 describe("production preflight", () => {
+  test("tracked legacy web-desk configs declare an explicit delivery mode", () => {
+    for (const configPath of ["wrangler.toml", "deploy/ui/wrangler.toml"]) {
+      const config = Bun.TOML.parse(readFileSync(resolve(root, configPath), "utf8")) as {
+        vars?: Record<string, unknown>;
+      };
+
+      expect({
+        configPath,
+        mode: config.vars?.MAILDESK_OPERATOR_DELIVERY_MODE,
+      }).toEqual({
+        configPath,
+        mode: "web_desk",
+      });
+    }
+  });
+
   test("validates desired-state-selected production configs instead of tracked template placeholders", () => {
     const topology = writeProductionTopology();
     try {
@@ -50,6 +66,26 @@ describe("production preflight", () => {
       );
       expect(result.stderr).not.toContain(
         "cloudflare_email_service mode requires wrangler.toml send_email binding named \"EMAIL\"",
+      );
+    } finally {
+      topology.cleanup();
+    }
+  });
+
+  test("rejects a missing runtime operator delivery mode", () => {
+    const topology = writeProductionTopology();
+    try {
+      const env = productionEnv(topology.desiredPath, "cloudflare_email_service");
+      delete env.MAILDESK_OPERATOR_DELIVERY_MODE;
+      const result = spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "MAILDESK_OPERATOR_DELIVERY_MODE (missing) must match desired-state operator_delivery.mode (inbox_relay)",
       );
     } finally {
       topology.cleanup();

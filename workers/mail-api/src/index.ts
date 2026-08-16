@@ -81,6 +81,14 @@ export async function processQueueBatch(batch: MessageBatch<MailJob>, env: Env):
 }
 
 async function queueReply(request: Request, env: Env): Promise<Response> {
+  const delivery = operatorDeliveryConfig(env);
+  if (delivery.mode === "invalid") {
+    return json({ error: "operator_delivery_mode_invalid" }, { status: 503 });
+  }
+  if (delivery.mode === "inbox_relay") {
+    return notFound();
+  }
+
   if (!isAuthorizedRequest(request, env)) {
     return json({ error: "unauthorized" }, { status: 401 });
   }
@@ -162,6 +170,16 @@ async function processInboxReply(
   env: Env,
   attempt: number,
 ): Promise<QueueDisposition> {
+  const delivery = operatorDeliveryConfig(env);
+  if (delivery.mode !== "inbox_relay") {
+    await failRelayAttempt(
+      job,
+      env,
+      delivery.mode === "invalid" ? "operator_delivery_mode_invalid" : "inbox_relay_disabled",
+    );
+    return ACK;
+  }
+
   if (!env.RELAY_SPOOL || !env.POLICY_STORE) {
     await recoverRelayAttempt(job, env, "relay_storage_unavailable");
     return ACK;
@@ -353,6 +371,14 @@ async function recordQueueEvent(
   }
   if (job.kind === "inbound_delivery_result") {
     await projectInboundDeliveryResult(job, env);
+    return ACK;
+  }
+  if (job.kind === "outbound_reply_requested" && operatorDeliveryConfig(env).mode === "invalid") {
+    await recordTerminalSendEvent(job, env, "outbound_reply_failed", {
+      ok: false,
+      provider: configuredOutboundMode(env),
+      error: "operator delivery mode is invalid",
+    });
     return ACK;
   }
   const base = dedupeBase(job);
@@ -985,6 +1011,11 @@ async function sendOutboundReply(
   env: Env,
 ): Promise<OutboundSendResult> {
   const mode = configuredOutboundMode(env);
+  const delivery = operatorDeliveryConfig(env);
+
+  if (delivery.mode === "invalid") {
+    return { ok: false, provider: mode, error: "operator delivery mode is invalid" };
+  }
 
   if (mode === "disabled") {
     return { ok: false, provider: mode, error: "outbound sending is disabled" };
@@ -999,7 +1030,7 @@ async function sendOutboundReply(
     return { ok: false, provider: mode, error: "sender domain is not verified" };
   }
 
-  if (operatorDeliveryConfig(env).mode === "inbox_relay") {
+  if (delivery.mode === "inbox_relay") {
     const activePolicy = await loadActivePolicy(env);
     if (!activePolicy) {
       return { ok: false, provider: mode, error: "active policy is unavailable" };
@@ -1163,10 +1194,13 @@ function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPo
     htmlVisibleText(job.html ?? ""),
     ...Object.entries(outwardHeaders).flat(),
   ].map(normalizedVisibleValue);
-  return [...operators].some((operator) => {
-    const protectedIdentity = normalizedVisibleValue(operator);
-    return protectedIdentity && visible.some((value) => value.includes(protectedIdentity));
-  })
+  const protectedIdentities = [...operators].map(normalizedVisibleValue);
+  if ([...visible, ...protectedIdentities].some((value) => !value.complete)) {
+    return "outbound content encoding exceeds privacy inspection limits";
+  }
+  return protectedIdentities.some((protectedIdentity) =>
+    protectedIdentity.value && visible.some((value) => value.value.includes(protectedIdentity.value))
+  )
     ? "outbound content contains a private operator identity"
     : null;
 }
@@ -1179,21 +1213,80 @@ function htmlVisibleText(html: string): string {
     .replace(/<[^>]*>/g, "");
 }
 
-function normalizedVisibleValue(value: string): string {
+const MAX_PRIVACY_DECODING_ROUNDS = 4;
+const PRIVACY_UTF8_DECODER = new TextDecoder();
+
+interface NormalizedVisibleValue {
+  value: string;
+  complete: boolean;
+}
+
+function normalizedVisibleValue(value: string): NormalizedVisibleValue {
+  let current = canonicalVisibleText(value);
+  for (let round = 0; round < MAX_PRIVACY_DECODING_ROUNDS; round += 1) {
+    const next = canonicalVisibleText(decodePercentEncodedBytes(decodeHtmlEntities(current)));
+    if (next === current) return { value: current, complete: true };
+    current = next;
+  }
+
+  const next = canonicalVisibleText(decodePercentEncodedBytes(decodeHtmlEntities(current)));
+  return { value: current, complete: next === current };
+}
+
+function decodeHtmlEntities(value: string): string {
+  // HTML parsers consume numeric references even when the semicolon is omitted.
   return value
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#([0-9]+);/g, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&#x([0-9a-f]+);?/gi, (entity: string, hex: string) =>
+      decodeHtmlCodePoint(entity, hex, 16)
+    )
+    .replace(/&#([0-9]+);?/g, (entity: string, decimal: string) =>
+      decodeHtmlCodePoint(entity, decimal, 10)
+    )
+    .replace(/&tab;/gi, "\t")
+    .replace(/&newline;/gi, "\n")
     .replace(/&commat;/gi, "@")
     .replace(/&period;/gi, ".")
+    .replace(/&percnt;/gi, "%")
+    .replace(/&amp;/gi, "&");
+}
+
+function decodeHtmlCodePoint(entity: string, digits: string, radix: number): string {
+  const codePoint = Number.parseInt(digits, radix);
+  if (
+    !Number.isSafeInteger(codePoint) ||
+    codePoint <= 0 ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  ) {
+    return entity;
+  }
+  return String.fromCodePoint(codePoint);
+}
+
+function decodePercentEncodedBytes(value: string): string {
+  return value.replace(/(?:%[0-9a-f]{2})+/gi, (encoded: string) => {
+    const bytes = new Uint8Array(encoded.length / 3);
+    for (let offset = 0; offset < encoded.length; offset += 3) {
+      bytes[offset / 3] = Number.parseInt(encoded.slice(offset + 1, offset + 3), 16);
+    }
+    return PRIVACY_UTF8_DECODER.decode(bytes);
+  });
+}
+
+function canonicalVisibleText(value: string): string {
+  // WHATWG URL preprocessing removes these controls before interpreting href values.
+  return value
     .normalize("NFKC")
     .toLowerCase()
-    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
+    .replace(/[\t\n\r]/g, "");
 }
 
 async function auditOperator(env: Env, operator: string): Promise<string> {
-  return operatorDeliveryConfig(env).mode === "inbox_relay"
-    ? `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`
-    : operator;
+  const mode = operatorDeliveryConfig(env).mode;
+  if (mode === "inbox_relay") return `operator:${await sha256Hex(normalizeRelayMailbox(operator))}`;
+  if (mode === "web_desk") return operator;
+  return "operator:invalid";
 }
 
 function parseMailbox(address: string): ParsedMailbox | null {

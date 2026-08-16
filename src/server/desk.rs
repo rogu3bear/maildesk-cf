@@ -16,6 +16,23 @@ const MAX_VISIBLE_AUDIT_EVENTS: i32 = 100;
 const MAX_REPLY_SUBJECT_BYTES: usize = 240;
 const MAX_REPLY_BODY_BYTES: usize = 24_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperatorDeliveryMode {
+    WebDesk,
+    InboxRelay,
+    Invalid,
+}
+
+impl OperatorDeliveryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebDesk => "web_desk",
+            Self::InboxRelay => "inbox_relay",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ThreadRow {
     id: String,
@@ -88,6 +105,10 @@ struct OutboundReplyRequestedJob {
 
 pub async fn load_desk() -> AppResult<DeskSnapshot> {
     let state = app_state()?;
+    let delivery_mode = operator_delivery_mode(&state);
+    if delivery_mode == OperatorDeliveryMode::Invalid {
+        return Err(AppError::client("Operator delivery mode is invalid."));
+    }
     let operator = operator(&state)?;
     let outbound_mode = state
         .env
@@ -95,12 +116,6 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
         .ok()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "disabled".to_string());
-    let operator_delivery_mode = state
-        .env
-        .var("MAILDESK_OPERATOR_DELIVERY_MODE")
-        .ok()
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "web_desk".to_string());
 
     if state.preview() {
         return Ok(DeskSnapshot {
@@ -109,14 +124,14 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
             threads: Vec::new(),
             open_count: 0,
             outbound_mode,
-            operator_delivery_mode,
+            operator_delivery_mode: delivery_mode.as_str().to_string(),
             routes: Vec::new(),
         });
     }
 
     let db = state.db().map_err(db_binding_error)?;
     let routes = query_route_health(&db).await?;
-    let threads = if operator_delivery_mode == "inbox_relay" {
+    let threads = if delivery_mode == OperatorDeliveryMode::InboxRelay {
         Vec::new()
     } else {
         query_threads(&db, &operator).await?
@@ -126,23 +141,22 @@ pub async fn load_desk() -> AppResult<DeskSnapshot> {
         .filter(|thread| thread.status == "open")
         .count();
     Ok(DeskSnapshot {
-        operator: dashboard_operator_label(&operator_delivery_mode, operator),
+        operator: dashboard_operator_label(delivery_mode.as_str(), operator),
         preview: false,
         threads,
         open_count,
         outbound_mode,
-        operator_delivery_mode,
+        operator_delivery_mode: delivery_mode.as_str().to_string(),
         routes,
     })
 }
 
 pub async fn load_thread(thread_id: String) -> AppResult<ThreadDetail> {
     let state = app_state()?;
-    if operator_delivery_mode(&state) == "inbox_relay" {
-        return Err(AppError::client(
-            "Thread reading is disabled in inbox-relay mode. Use the routing-health dashboard.",
-        ));
-    }
+    require_web_desk_mode(
+        operator_delivery_mode(&state),
+        "Thread reading is disabled in inbox-relay mode. Use the routing-health dashboard.",
+    )?;
     let operator = operator(&state)?;
     let thread_id = normalize_identifier(thread_id, "Thread reference is invalid.")?;
 
@@ -175,11 +189,10 @@ pub async fn queue_reply(
     body: String,
 ) -> AppResult<ReplyReceipt> {
     let state = app_state()?;
-    if operator_delivery_mode(&state) == "inbox_relay" {
-        return Err(AppError::client(
-            "Web replies are disabled in inbox-relay mode. Reply normally from the routed operator inbox.",
-        ));
-    }
+    require_web_desk_mode(
+        operator_delivery_mode(&state),
+        "Web replies are disabled in inbox-relay mode. Reply normally from the routed operator inbox.",
+    )?;
     if state.preview() {
         return Err(AppError::client(
             "Replies are disabled while the desk is in template preview mode.",
@@ -500,13 +513,34 @@ fn operator(state: &AppState) -> AppResult<String> {
         .ok_or_else(|| AppError::client("Cloudflare Access identity is required."))
 }
 
-fn operator_delivery_mode(state: &AppState) -> String {
-    state
+fn operator_delivery_mode(state: &AppState) -> OperatorDeliveryMode {
+    let configured = state
         .env
         .var("MAILDESK_OPERATOR_DELIVERY_MODE")
         .ok()
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "web_desk".to_string())
+        .map(|value| value.to_string());
+    parse_operator_delivery_mode(configured.as_deref())
+}
+
+fn parse_operator_delivery_mode(value: Option<&str>) -> OperatorDeliveryMode {
+    match value {
+        Some("web_desk") => OperatorDeliveryMode::WebDesk,
+        Some("inbox_relay") => OperatorDeliveryMode::InboxRelay,
+        None | Some(_) => OperatorDeliveryMode::Invalid,
+    }
+}
+
+fn require_web_desk_mode(
+    mode: OperatorDeliveryMode,
+    inbox_relay_message: &'static str,
+) -> AppResult<()> {
+    match mode {
+        OperatorDeliveryMode::WebDesk => Ok(()),
+        OperatorDeliveryMode::InboxRelay => Err(AppError::client(inbox_relay_message)),
+        OperatorDeliveryMode::Invalid => {
+            Err(AppError::client("Operator delivery mode is invalid."))
+        }
+    }
 }
 
 fn db_binding_error(error: worker::Error) -> AppError {
@@ -590,8 +624,9 @@ fn random_message_id() -> AppResult<String> {
 mod tests {
     use super::{
         dashboard_operator_label, map_thread, normalize_identifier, normalize_mailbox,
-        normalize_subject, normalize_text, route_decision_for_thread, ThreadRow,
-        MAX_REPLY_BODY_BYTES, MAX_REPLY_SUBJECT_BYTES,
+        normalize_subject, normalize_text, parse_operator_delivery_mode, require_web_desk_mode,
+        route_decision_for_thread, OperatorDeliveryMode, ThreadRow, MAX_REPLY_BODY_BYTES,
+        MAX_REPLY_SUBJECT_BYTES,
     };
 
     fn example_thread_row() -> ThreadRow {
@@ -686,6 +721,45 @@ mod tests {
             dashboard_operator_label("web_desk", "operator@example.com".to_string()),
             "operator@example.com"
         );
+    }
+
+    #[test]
+    fn operator_delivery_mode_requires_an_explicit_supported_value() {
+        assert_eq!(
+            parse_operator_delivery_mode(Some("web_desk")),
+            OperatorDeliveryMode::WebDesk
+        );
+        assert_eq!(
+            parse_operator_delivery_mode(Some("inbox_relay")),
+            OperatorDeliveryMode::InboxRelay
+        );
+        for value in [
+            None,
+            Some(""),
+            Some(" inbox_relay"),
+            Some("inbox-relayy"),
+            Some("unknown"),
+            Some("disabled"),
+        ] {
+            assert_eq!(
+                parse_operator_delivery_mode(value),
+                OperatorDeliveryMode::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn thread_read_and_reply_guards_fail_closed_outside_web_desk() {
+        let inbox_message = "inbox relay disabled";
+        assert!(require_web_desk_mode(OperatorDeliveryMode::WebDesk, inbox_message).is_ok());
+        assert!(matches!(
+            require_web_desk_mode(OperatorDeliveryMode::InboxRelay, inbox_message),
+            Err(super::AppError::Client(message)) if message == inbox_message
+        ));
+        assert!(matches!(
+            require_web_desk_mode(OperatorDeliveryMode::Invalid, inbox_message),
+            Err(super::AppError::Client(message)) if message == "Operator delivery mode is invalid."
+        ));
     }
 
     #[test]
