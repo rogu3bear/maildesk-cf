@@ -73,6 +73,59 @@ describe("maildesk verifier", () => {
     expect(receipt.rows.every((row) => row.r2_policy === "not_checked")).toBe(true);
   });
 
+  test("partial D1 evidence cannot satisfy live evidence when governed cfctl readback is incomplete", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-incomplete-readback-"));
+    const evidencePath = join(dir, "evidence.json");
+    writeJson(evidencePath, {
+      generated_at: "2026-08-17T00:00:00.000Z",
+      d1: { tables: ["runtime_state"] },
+      cfctl_readback: {
+        required: true,
+        attempted: true,
+        complete: false,
+        profile_id: "profile-example",
+        account_id: "account-example",
+        receipts: [
+          {
+            capability_id: "zones-get",
+            ok: false,
+            performed: true,
+            verification_state: "failed",
+            evidence_hashes: [],
+            error_code: "CFCTL_LIVE_UNAUTHORIZED",
+          },
+        ],
+      },
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { live_evidence_present: boolean; edge_ready: boolean; mail_ready: boolean };
+    };
+    expect(receipt.status).toMatchObject({
+      live_evidence_present: false,
+      edge_ready: false,
+      mail_ready: false,
+    });
+  });
+
   test("self-consistent remote counts cannot impersonate the selected local projection", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const evidencePath = join(dir, "evidence.json");
@@ -107,11 +160,160 @@ describe("maildesk verifier", () => {
 
     expect(result.status).toBe(0);
     const receipt = JSON.parse(result.stdout) as {
-      status: { edge_ready: boolean };
+      status: { live_evidence_present: boolean; edge_ready: boolean };
       rows: Array<{ r2_policy: string }>;
     };
+    expect(receipt.status.live_evidence_present).toBe(true);
     expect(receipt.status.edge_ready).toBe(false);
     expect(receipt.rows.every((row) => row.r2_policy === "drift")).toBe(true);
+  });
+
+  test("empty or partial active-policy objects do not establish live evidence", () => {
+    for (const activePolicy of [
+      {},
+      { active_policy_sha256: "a".repeat(64) },
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-active-policy-shape-"));
+      const evidencePath = join(dir, "evidence.json");
+      writeJson(evidencePath, {
+        generated_at: "2026-08-17T00:00:00.000Z",
+        active_policy: activePolicy,
+      });
+      const result = spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/verify-maildesk.ts",
+          "--",
+          "--policy",
+          "config/policy.example.json",
+          "--desired-state",
+          "config/desired-state.example.json",
+          "--evidence",
+          evidencePath,
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+      expect(result.status).toBe(0);
+      const receipt = JSON.parse(result.stdout) as {
+        status: { live_evidence_present: boolean; edge_ready: boolean; mail_ready: boolean };
+      };
+      expect(receipt.status).toMatchObject({
+        live_evidence_present: false,
+        edge_ready: false,
+        mail_ready: false,
+      });
+    }
+  });
+
+  test("empty or partial nested proof maps do not establish live evidence", () => {
+    for (const proofEvidence of [
+      { inbound_proofs: { "example.com": {} } },
+      { outbound_proofs: { "example.com": { status: "delivered" } } },
+    ]) {
+      const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-proof-shape-"));
+      const evidencePath = join(dir, "evidence.json");
+      writeJson(evidencePath, {
+        generated_at: "2026-08-17T00:00:00.000Z",
+        ...proofEvidence,
+      });
+      const result = spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/verify-maildesk.ts",
+          "--",
+          "--policy",
+          "config/policy.example.json",
+          "--desired-state",
+          "config/desired-state.example.json",
+          "--evidence",
+          evidencePath,
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).status.live_evidence_present).toBe(false);
+    }
+  });
+
+  test("readyz presence requires a complete typed health contract", () => {
+    const cases = [
+      { readyz: { checks: [{}] }, expected: false },
+      { readyz: { ok: true }, expected: false },
+      { readyz: { ok: false, checks: [{ name: "db_query", ok: false }] }, expected: true },
+      { readyz: { ok: true, checks: [{ name: "db_query", ok: true, detail: "ready" }] }, expected: true },
+    ];
+    for (const { readyz, expected } of cases) {
+      const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-readyz-shape-"));
+      const evidencePath = join(dir, "evidence.json");
+      writeJson(evidencePath, { generated_at: "2026-08-17T00:00:00.000Z", readyz });
+      const result = spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/verify-maildesk.ts",
+          "--",
+          "--policy",
+          "config/policy.example.json",
+          "--desired-state",
+          "config/desired-state.example.json",
+          "--evidence",
+          evidencePath,
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).status.live_evidence_present).toBe(expected);
+    }
+  });
+
+  test("a fully shaped mismatched inbox-relay proof is present evidence but remains drift", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-proof-drift-"));
+    const evidencePath = join(dir, "evidence.json");
+    writeJson(evidencePath, {
+      generated_at: "2026-08-17T00:00:00.000Z",
+      inbound_proofs: {
+        "example.com": {
+          status: "ok",
+          envelope_to: "founders@example.com",
+          route_kind: "role_alias",
+          operator_count: 2,
+          policy_sha256: "b".repeat(64),
+          provider_message_ids: ["provider-a", "provider-b"],
+          provider_accepted_at: "2026-08-17T00:00:00.000Z",
+          inbox_verified_at: "2026-08-17T00:01:00.000Z",
+          default_reply_identity: "founders@example.com",
+          provider: "cloudflare_email_service",
+        },
+      },
+    });
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      status: { live_evidence_present: boolean };
+      rows: Array<{ inbound_proof: string }>;
+    };
+    expect(receipt.status.live_evidence_present).toBe(true);
+    expect(receipt.rows[0]?.inbound_proof).toBe("drift");
   });
 
   test("uses cfctl lifecycle evidence for edge readiness without hiding sender drift", () => {
@@ -158,6 +360,7 @@ describe("maildesk verifier", () => {
         domains: {
           "example.com": {
             email_routing: "ok",
+            catch_all: "ok",
             aliases: {
               "founders@example.com": "ok",
             },
@@ -278,6 +481,7 @@ describe("maildesk verifier", () => {
         domains: {
           "tenant.example.com": {
             email_routing: "ok",
+            catch_all: "ok",
             aliases: {
               "founders@tenant.example.com": "ok",
             },
@@ -396,6 +600,7 @@ describe("maildesk verifier", () => {
         domains: {
           "tenant.example.com": {
             email_routing: "ok",
+            catch_all: "ok",
             aliases: {
               "founders@tenant.example.com": "ok",
             },

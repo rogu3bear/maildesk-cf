@@ -11,6 +11,7 @@ describe("maildesk live-evidence collector", () => {
   test("the tracked canonical desired state selects the relay-router service", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-"));
     const cfctl = join(dir, "cfctl");
+    const cfctlLog = join(dir, "cfctl.log");
     const wrangler = join(dir, "wrangler");
     const out = join(dir, "evidence.json");
     const policyObject = resolve(root, "config/policy.example.json");
@@ -41,12 +42,23 @@ describe("maildesk live-evidence collector", () => {
     writeFileSync(
       cfctl,
       `#!/bin/sh
+echo "$@" >> "$MAILDESK_TEST_CFCTL_LOG"
 case "$*" in
-  *"maildesk-cf verify"*) echo '{"ok":false}' ;;
-  *"list zone"*) echo '{"ok":true,"result":[]}' ;;
-  *"list email.routing_rule"*) echo '{"ok":true,"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}]}' ;;
-  *"list dns.record"*) echo '{"ok":true,"result":[]}' ;;
-  *) echo '{"ok":false}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
+  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}' ;;
+  *"call listWorkers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
+  *"call d1-list-databases"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call r2-list-buckets"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
+  *"call queues-list-consumers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
+  *"call queues-list"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
     );
@@ -82,7 +94,16 @@ exit 0
         out,
         "--no-resend",
       ],
-      { cwd: root, encoding: "utf8", env: { ...process.env, MAILDESK_TEST_POLICY_OBJECT: policyObject } },
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MAILDESK_CFCTL_PROFILE: "profile-example",
+          MAILDESK_TEST_CFCTL_LOG: cfctlLog,
+          MAILDESK_TEST_POLICY_OBJECT: policyObject,
+        },
+      },
     );
 
     expect(result.status).toBe(0);
@@ -90,6 +111,19 @@ exit 0
       email_routing?: Record<string, { role_aliases: string[] }>;
       inbound_proofs?: Record<string, Record<string, unknown>>;
       active_policy?: Record<string, unknown>;
+      cfctl_maildesk?: {
+        workers?: Record<string, string>;
+        storage?: Record<string, string>;
+        domains?: Record<string, { catch_all?: string }>;
+      };
+      cfctl_readback?: {
+        required: boolean;
+        attempted: boolean;
+        complete: boolean;
+        profile_id: string;
+        account_id: string;
+        receipts: Array<{ capability_id: string; performed: boolean; ok: boolean }>;
+      };
     };
     expect(evidence.email_routing?.["example.com"]?.role_aliases).toEqual(["security"]);
     expect(evidence.active_policy).toMatchObject({
@@ -115,7 +149,798 @@ exit 0
     expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("forwarded_to");
     expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("raw_r2_key");
     expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("operator@");
+    expect(evidence.cfctl_maildesk?.workers).toEqual({
+      relay_router: "ok",
+      relay_outbound: "ok",
+      routing_health: "ok",
+    });
+    expect(evidence.cfctl_maildesk?.storage).toEqual({
+      d1_database: "ok",
+      r2_policy_bucket: "ok",
+      r2_spool_bucket: "ok",
+      queue: "ok",
+      dead_letter_queue: "ok",
+    });
+    expect(evidence.cfctl_maildesk?.domains?.["example.com"]?.catch_all).toBe("ok");
+    expect(evidence.cfctl_readback).toMatchObject({
+      required: true,
+      attempted: true,
+      complete: true,
+      profile_id: "profile-example",
+      account_id: "account-example",
+    });
+    expect(evidence.cfctl_readback?.receipts.every((receipt) =>
+      receipt.capability_id === "auth-profiles"
+        ? receipt.ok && !receipt.performed
+        : receipt.ok && receipt.performed
+    )).toBe(true);
+
+    const cfctlCalls = readFileSync(cfctlLog, "utf8");
+    expect(cfctlCalls).toContain("auth profiles --json");
+    for (const capability of [
+      "zones-get",
+      "email-routing-routing-rules-list-routing-rules",
+      "dns-records-for-a-zone-list-dns-records",
+      "email-routing-settings-get-email-routing-settings",
+      "email-routing-routing-rules-get-catch-all-rule",
+      "listWorkers",
+      "worker-script-get-settings",
+      "d1-list-databases",
+      "r2-list-buckets",
+      "queues-list",
+      "queues-list-consumers",
+    ]) {
+      expect(cfctlCalls).toContain(`call ${capability}`);
+    }
+    expect(cfctlCalls).toContain("--profile profile-example");
+    expect(cfctlCalls).toContain("--account account-example");
+    expect(cfctlCalls).not.toContain("list zone");
+    expect(cfctlCalls).not.toContain("maildesk-cf verify");
+
+    const successfulCfctlStub = readFileSync(cfctl, "utf8");
+    const forwardOnlyOut = join(dir, "forward-only-evidence.json");
+    writeFileSync(
+      cfctl,
+      successfulCfctlStub.replace(
+        '{"type":"worker","value":["maildesk-cf-router"]}',
+        '{"type":"forward","value":["operator@example.net"]}',
+      ),
+      { mode: 0o755 },
+    );
+    const forwardOnly = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        forwardOnlyOut,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MAILDESK_CFCTL_PROFILE: "profile-example",
+          MAILDESK_TEST_CFCTL_LOG: cfctlLog,
+          MAILDESK_TEST_POLICY_OBJECT: policyObject,
+        },
+      },
+    );
+    expect(forwardOnly.status).toBe(0);
+    const forwardOnlyEvidence = JSON.parse(readFileSync(forwardOnlyOut, "utf8")) as {
+      email_routing?: Record<string, { role_aliases: string[] }>;
+      cfctl_readback?: { complete: boolean };
+      cfctl_maildesk?: {
+        edge_ready?: boolean;
+        domains?: Record<string, { aliases?: Record<string, string> }>;
+      };
+    };
+    expect(forwardOnlyEvidence.cfctl_readback?.complete).toBe(true);
+    expect(forwardOnlyEvidence.email_routing?.["example.com"]?.role_aliases).not.toContain("security");
+    expect(forwardOnlyEvidence.cfctl_maildesk?.domains?.["example.com"]?.aliases?.["security@example.com"])
+      .toBe("missing");
+    expect(forwardOnlyEvidence.cfctl_maildesk?.edge_ready).toBe(false);
+
+    const catchAllOut = join(dir, "catch-all-evidence.json");
+    writeFileSync(
+      cfctl,
+      successfulCfctlStub.replace(
+        '"result":{"result":{"enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}',
+        '"result":{"result":{"enabled":false,"actions":[]}},"error":null}',
+      ),
+      { mode: 0o755 },
+    );
+    const catchAll = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        catchAllOut,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MAILDESK_CFCTL_PROFILE: "profile-example",
+          MAILDESK_TEST_CFCTL_LOG: cfctlLog,
+          MAILDESK_TEST_POLICY_OBJECT: policyObject,
+        },
+      },
+    );
+    expect(catchAll.status).toBe(0);
+    const catchAllEvidence = JSON.parse(readFileSync(catchAllOut, "utf8")) as {
+      cfctl_readback?: { complete: boolean };
+      cfctl_maildesk?: {
+        edge_ready?: boolean;
+        domains?: Record<string, { catch_all?: string }>;
+      };
+    };
+    expect(catchAllEvidence.cfctl_readback?.complete).toBe(true);
+    expect(catchAllEvidence.cfctl_maildesk?.domains?.["example.com"]?.catch_all).toBe("missing");
+    expect(catchAllEvidence.cfctl_maildesk?.edge_ready).toBe(false);
+
+    const googleDesiredPath = join(dir, "google-desired.json");
+    const googleDesired = JSON.parse(readFileSync(desiredObject, "utf8")) as {
+      domains: Array<{ inbound_mx_provider: string; catch_all?: boolean }>;
+    };
+    googleDesired.domains[0]!.inbound_mx_provider = "google_workspace";
+    googleDesired.domains[0]!.catch_all = false;
+    writeJson(googleDesiredPath, googleDesired);
+    const googlePolicyPath = join(dir, "google-policy.json");
+    const googlePolicy = JSON.parse(readFileSync(policyObject, "utf8")) as {
+      domains: Record<string, { catch_all?: unknown }>;
+    };
+    delete googlePolicy.domains["example.com"]?.catch_all;
+    writeJson(googlePolicyPath, googlePolicy);
+    const googleOut = join(dir, "google-evidence.json");
+    const googleAdmin = join(dir, "google-admin");
+    writeFileSync(
+      googleAdmin,
+      `#!/bin/sh
+cat <<'JSON'
+{"receipt_path":"var/proof/google-example.json","snapshot_captured_at":"2026-08-17T00:00:00.000Z","resources":[{"id":"workspace:group:founders@example.com","type":"workspace.group","record":{"email":"founders@example.com"}},{"id":"membership-a","type":"workspace.group_membership","record":{"email":"operator-a@example.com"}},{"id":"membership-b","type":"workspace.group_membership","record":{"email":"operator-b@example.com"}}]}
+JSON
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(googleAdmin, 0o755);
+    const googleMx = [
+      "aspmx.l.google.com",
+      "alt1.aspmx.l.google.com",
+      "alt2.aspmx.l.google.com",
+      "alt3.aspmx.l.google.com",
+      "alt4.aspmx.l.google.com",
+    ];
+    const googleDnsResult = googleMx.map((content) => ({
+      type: "MX",
+      name: "example.com",
+      content,
+    }));
+    writeFileSync(
+      cfctl,
+      successfulCfctlStub.replace(
+        '"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}',
+        `"result":${JSON.stringify(googleDnsResult)},"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":5}`,
+      ),
+      { mode: 0o755 },
+    );
+    writeFileSync(cfctlLog, "");
+    const googleCollection = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        googlePolicyPath,
+        "--desired-state",
+        googleDesiredPath,
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        googleOut,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MAILDESK_CFCTL_PROFILE: "profile-example",
+          GOOGLE_ADMIN_BIN: googleAdmin,
+          MAILDESK_TEST_CFCTL_LOG: cfctlLog,
+          MAILDESK_TEST_POLICY_OBJECT: policyObject,
+        },
+      },
+    );
+    expect(googleCollection.status).toBe(0);
+    const googleCalls = readFileSync(cfctlLog, "utf8");
+    expect(googleCalls).not.toContain("email-routing-routing-rules-list-routing-rules");
+    expect(googleCalls).not.toContain("email-routing-settings-get-email-routing-settings");
+    expect(googleCalls).not.toContain("email-routing-routing-rules-get-catch-all-rule");
+    const googleEvidence = JSON.parse(readFileSync(googleOut, "utf8")) as {
+      cfctl_readback?: { complete: boolean };
+      cfctl_maildesk?: {
+        domains?: Record<string, { email_routing?: string; catch_all?: string }>;
+      };
+    };
+    expect(googleEvidence.cfctl_readback?.complete).toBe(true);
+    expect(googleEvidence.cfctl_maildesk?.domains?.["example.com"]).toMatchObject({
+      email_routing: "not_applicable",
+      catch_all: "not_applicable",
+    });
+    const googleEvidenceText = readFileSync(googleOut, "utf8");
+    expect(googleEvidenceText).not.toContain("operator-a@example.com");
+    expect(googleEvidenceText).not.toContain("operator-b@example.com");
+    const googleProof = (JSON.parse(googleEvidenceText) as {
+      inbound_proofs?: Record<string, { operator_count?: number; operator_set_sha256?: string }>;
+    }).inbound_proofs?.["example.com"];
+    expect(googleProof).toMatchObject({
+      operator_count: 2,
+      operator_set_sha256: createHash("sha256")
+        .update(JSON.stringify(["operator-a@example.com", "operator-b@example.com"]))
+        .digest("hex"),
+    });
+
+    const googleVerification = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        googlePolicyPath,
+        "--desired-state",
+        googleDesiredPath,
+        "--evidence",
+        googleOut,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(googleVerification.status).toBe(0);
+    expect(googleVerification.stdout).not.toContain("operator-a@example.com");
+    expect(googleVerification.stdout).not.toContain("operator-b@example.com");
+    const googleReceipt = JSON.parse(googleVerification.stdout) as {
+      status: { edge_ready: boolean };
+      rows: Array<{
+        inbound_mx: string;
+        role_aliases_wired: string;
+        personal_aliases_wired: string;
+        catch_all_wired: string;
+      }>;
+    };
+    expect(googleReceipt.rows[0]).toMatchObject({
+      inbound_mx: "ok",
+      role_aliases_wired: "not_checked",
+      personal_aliases_wired: "not_checked",
+      catch_all_wired: "not_applicable",
+    });
+    expect(googleReceipt.status.edge_ready).toBe(false);
+
+    const mismatchedGoogleOut = join(dir, "google-evidence-mismatch.json");
+    const mismatchedGoogleEvidence = JSON.parse(googleEvidenceText) as {
+      inbound_proofs: Record<string, { operator_set_sha256: string }>;
+    };
+    mismatchedGoogleEvidence.inbound_proofs["example.com"]!.operator_set_sha256 = "0".repeat(64);
+    writeJson(mismatchedGoogleOut, mismatchedGoogleEvidence);
+    const mismatchedGoogleVerification = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        googlePolicyPath,
+        "--desired-state",
+        googleDesiredPath,
+        "--evidence",
+        mismatchedGoogleOut,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(mismatchedGoogleVerification.status).toBe(0);
+    expect(JSON.parse(mismatchedGoogleVerification.stdout).rows[0]?.inbound_proof).toBe("drift");
   }, 15_000);
+
+  test("an incomplete governed readback exits nonzero and records no live edge evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-failed-"));
+    const cfctl = join(dir, "cfctl");
+    const wrangler = join(dir, "wrangler");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+    writeFileSync(wrangler, "#!/bin/sh\necho '[]'\n", { mode: 0o755 });
+    chmodSync(wrangler, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      zones?: string[];
+      cfctl_readback?: {
+        complete: boolean;
+        receipts: Array<{ capability_id: string; ok: boolean; performed: boolean; error_code?: string }>;
+      };
+    };
+    expect(evidence.zones).toBeUndefined();
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_readback?.receipts).toContainEqual({
+      capability_id: "zones-get",
+      ok: false,
+      performed: true,
+      verification_state: "failed",
+      evidence_hashes: [],
+      error_code: "CFCTL_LIVE_UNAUTHORIZED",
+    });
+  });
+
+  test("a successful nonterminal page is rejected as incomplete evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-paginated-"));
+    const cfctl = join(dir, "cfctl");
+    const wrangler = join(dir, "wrangler");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":2,"total_count":51}},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+    writeFileSync(wrangler, "#!/bin/sh\necho '[]'\n", { mode: 0o755 });
+    chmodSync(wrangler, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      cfctl_readback?: {
+        complete: boolean;
+        receipts: Array<{
+          capability_id: string;
+          error_code?: string;
+          pagination?: { page?: number; total_pages?: number; total_count?: number };
+        }>;
+      };
+    };
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_readback?.receipts.at(-1)).toMatchObject({
+      capability_id: "email-routing-routing-rules-list-routing-rules",
+      error_code: "CFCTL_PAGINATION_INCOMPLETE",
+      pagination: { page: 1, total_pages: 2, total_count: 51 },
+    });
+  });
+
+  test("schema-v1 profile metadata is rejected before any governed live call", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-profile-version-"));
+    const cfctl = join(dir, "cfctl");
+    const cfctlLog = join(dir, "cfctl.log");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+echo "$@" >> "${cfctlLog}"
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":1,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const calls = readFileSync(cfctlLog, "utf8").trim().split("\n");
+    expect(calls).toEqual(["auth profiles --json"]);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      cfctl_readback?: { complete: boolean; receipts: Array<{ error_code?: string }> };
+    };
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_readback?.receipts.at(-1)?.error_code).toBe(
+      "CFCTL_ENVELOPE_VERSION_MISMATCH",
+    );
+  });
+
+  test("a schema-v1 live-call envelope cannot establish complete readback", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-call-version-"));
+    const cfctl = join(dir, "cfctl");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":1,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      cfctl_readback?: { complete: boolean; receipts: Array<{ error_code?: string }> };
+    };
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_readback?.receipts.at(-1)?.error_code).toBe(
+      "CFCTL_ENVELOPE_VERSION_MISMATCH",
+    );
+  });
+
+  test("a malformed required capability payload cannot be normalized as drift", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-shape-"));
+    const cfctl = join(dir, "cfctl");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"unexpected":true}},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      zones?: string[];
+      email_routing?: unknown;
+      dns_mx?: unknown;
+      cfctl_maildesk?: unknown;
+      cfctl_readback?: { complete: boolean; receipts: Array<{ error_code?: string }> };
+    };
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_readback?.receipts.at(-1)?.error_code).toBe(
+      "CFCTL_RESULT_SHAPE_MALFORMED",
+    );
+    expect(evidence.zones).toBeUndefined();
+    expect(evidence.email_routing).toBeUndefined();
+    expect(evidence.dns_mx).toBeUndefined();
+    expect(evidence.cfctl_maildesk).toBeUndefined();
+  });
+
+  test("a disabled required catch-all remains a completed read but fails edge readiness", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-catch-all-"));
+    const cfctl = join(dir, "cfctl");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
+  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"STOP_AFTER_CATCH_ALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      cfctl_readback?: { complete: boolean };
+      cfctl_maildesk?: { domains?: Record<string, { catch_all?: string }> };
+    };
+    expect(evidence.cfctl_readback?.complete).toBe(false);
+    expect(evidence.cfctl_maildesk).toBeUndefined();
+  });
+
+  test("the public template does not invoke cfctl without an explicit profile", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-no-profile-"));
+    const cfctl = join(dir, "cfctl");
+    const wrangler = join(dir, "wrangler");
+    const cfctlLog = join(dir, "cfctl.log");
+    const out = join(dir, "evidence.json");
+
+    writeFileSync(cfctl, `#!/bin/sh\necho "$@" >> "${cfctlLog}"\nexit 99\n`, { mode: 0o755 });
+    chmodSync(cfctl, 0o755);
+    writeFileSync(wrangler, "#!/bin/sh\necho '[]'\n", { mode: 0o755 });
+    chmodSync(wrangler, 0o755);
+
+    const env = { ...process.env };
+    delete env.MAILDESK_CFCTL_PROFILE;
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      { cwd: root, encoding: "utf8", env },
+    );
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(out, "utf8")).not.toContain("profile-example");
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      cfctl_readback?: { required: boolean; attempted: boolean; complete: boolean; receipts: unknown[] };
+    };
+    expect(evidence.cfctl_readback).toEqual({
+      required: false,
+      attempted: false,
+      complete: false,
+      receipts: [],
+    });
+    expect((evidence as { d1?: unknown }).d1).toBeUndefined();
+    expect(() => readFileSync(cfctlLog, "utf8")).toThrow();
+
+    const verification = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--evidence",
+        out,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(verification.status).toBe(0);
+    expect(JSON.parse(verification.stdout).status).toMatchObject({
+      live_evidence_present: false,
+      edge_ready: false,
+      mail_ready: false,
+    });
+
+    const populatedOut = join(dir, "populated-evidence.json");
+    writeFileSync(
+      wrangler,
+      `#!/bin/sh
+echo '[{"results":[{"name":"runtime_state"}]}]'
+`,
+      { mode: 0o755 },
+    );
+    const populatedCollection = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        populatedOut,
+        "--no-resend",
+      ],
+      { cwd: root, encoding: "utf8", env },
+    );
+    expect(populatedCollection.status).toBe(0);
+    const populatedVerification = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--evidence",
+        populatedOut,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(populatedVerification.status).toBe(0);
+    expect(JSON.parse(populatedVerification.stdout).status.live_evidence_present).toBe(true);
+  });
 });
 
 function projectionSummary(policyPath: string, desiredPath: string) {
@@ -129,4 +954,8 @@ function projectionSummary(policyPath: string, desiredPath: string) {
     desired_state_sha256: string;
     projection_sha256: string;
   };
+}
+
+function writeJson(path: string, value: unknown) {
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }

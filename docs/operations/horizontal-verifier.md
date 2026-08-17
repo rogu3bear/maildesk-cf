@@ -153,21 +153,81 @@ bun run verify:maildesk -- \
   --json
 ```
 
-Collect a best-effort live evidence file from local readback tools:
+Collect live evidence from explicitly bound readback tools:
 
 ```bash
 CFCTL_BIN=/path/to/cfctl \
+MAILDESK_CFCTL_PROFILE=<account-bound-profile> \
 MAILDESK_READYZ_URL=https://maildesk.example.workers.dev/readyz \
 bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 ```
 
-The collector reads Cloudflare state through `cfctl`, `/readyz` when
-`MAILDESK_READYZ_URL` is set, and D1 schema/audit counts through Wrangler when
-a D1 database is configured. Sender-domain readback follows desired-state
-`sender.mode`: `cloudflare_email_service` uses the `cfctl maildesk-cf verify`
-sender evidence, `resend` uses the Resend CLI when available, and `disabled`
-skips outbound sender-provider readback. It does not send mail and does not
-mutate Cloudflare.
+When `MAILDESK_CFCTL_PROFILE` is set, the collector resolves that exact profile
+to its configured account and uses only governed `cfctl call` operations. The
+v2 read set is explicit and bounded: exact-zone lookup, named Email Routing
+rules, the separate catch-all rule, Email Routing settings, root MX records, Workers and each Worker’s deployed settings, D1
+databases, R2 buckets, Queues and the target Queue’s consumers, and—for
+Cloudflare Email Service candidates—sending subdomains. Worker settings are
+compared with the checked-in role-specific Wrangler contracts; Queue consumer
+target, batch size, concurrency, retries, and DLQ are compared with the outbound
+Wrangler contract. Resource-name presence alone never proves a binding or
+consumer relationship. Every call carries the same `--profile` and `--account`
+binding. The collector accepts a result only
+when its `ResultEnvelopeV2` names the expected capability, profile, and account,
+declares `schema_version: 2`, reports `performed: true`, has no error, and succeeded.
+The local profile/account envelope must likewise be schema v2, successful,
+non-performing, and error-free before it can authorize any live call. It stores only bounded
+receipt fields and evidence hashes alongside the normalized Maildesk evidence;
+it does not copy raw provider responses into the receipt metadata.
+
+A missing profile, denied call, malformed envelope, binding mismatch, missing
+required zone, or partial capability set makes the collector exit nonzero after
+writing `cfctl_readback.complete: false`. Catalog-declared page and cursor
+metadata is part of that contract: absent or malformed metadata, a nonterminal
+page, or a continuation cursor is rejected rather than silently truncated; the
+receipt retains only bounded page/item counts or cursor presence. The verifier does not allow partial
+D1, `/readyz`, or provider evidence to turn that incomplete governed readback
+into `live_evidence_present: true`. When no profile is configured, the public
+template remains non-mutating and reports that governed Cloudflare readback was
+not attempted rather than launching an ambient or legacy profile lane.
+Evidence presence is content-aware: empty arrays and objects do not count, and
+the collector omits `d1` unless at least one valid table or audit-count entry
+was actually normalized. This keeps failed or empty Wrangler output from
+impersonating an independent live read when the optional cfctl lane is absent.
+Active-policy and inbound/outbound proof maps are also runtime-validated before
+they establish presence; a fully shaped but semantically mismatched receipt may
+be present evidence and still classify as drift, while an empty or partial
+nested object is not evidence.
+`/readyz` likewise counts only when it contains an overall boolean and a
+nonempty array of typed `{ name, ok, detail? }` checks. A valid negative health
+response is present evidence and may report drift; malformed or empty runtime
+JSON is omitted by the collector and does not establish presence.
+
+Email Routing aliases count as wired only when the matching rule invokes the
+configured Maildesk Worker. A direct `forward` action is completed provider
+evidence but is not Maildesk routing evidence: it cannot establish the opaque
+reply address, bannered operator delivery, or Rust routing boundary and is
+therefore normalized as a missing Maildesk alias rather than accepted wiring.
+Catch-all is read from its dedicated provider endpoint and reported as its own
+edge field; local desired-state agreement cannot substitute for an enabled
+catch-all rule that targets the exact Maildesk Worker.
+
+Routing evidence follows `inbound_mx_provider`. Cloudflare-routed domains use
+the named-rule, settings, and catch-all capabilities above. Google Workspace
+and generic external domains still use Cloudflare zone and root-MX readback,
+but Cloudflare Email Routing fields are explicitly `not_applicable` and are
+excluded from that provider’s readiness conjunction. Their role and personal
+route wiring remains `not_checked` until a provider-native adapter supplies
+typed configuration evidence; inbox or delivery receipts do not substitute for
+that control-plane relationship.
+
+`/readyz` is read when `MAILDESK_READYZ_URL` is set, and D1 schema/audit counts
+remain available through the configured Wrangler read lane. Sender-domain
+readback follows desired-state `sender.mode`: `cloudflare_email_service` uses
+the governed sending-subdomain capability, `resend` uses the Resend CLI when
+available, and `disabled` skips outbound sender-provider readback. The collector
+never invokes legacy `cfctl list ...` or `cfctl maildesk-cf verify` text, sends
+mail, selects a global profile, or mutates Cloudflare.
 
 Plan the remaining proof work from a receipt:
 
@@ -231,10 +291,7 @@ For proof-only runs and production closeout preflight, prefer a deployed
 
 The command emits one row per domain and reports:
 
-- configured operators;
-- configured reply identities;
-- route-level recipient, reply identity, allowed reply identity, and wiring
-  details;
+- configured operator, reply-identity, and route-kind counts without addresses;
 - sender-domain provider status;
 - root-domain MX records and classified inbound MX provider;
 - inbound and outbound audit evidence references;
@@ -391,6 +448,11 @@ active policy digest, public reply identity, provider message IDs, provider
 acceptance timestamp, and separately verified inbox-receipt timestamp. It must
 not expose operator addresses or a raw MIME object key. Google Workspace routes
 use their provider-native membership and receipt evidence instead.
+The verifier may consume private policy identities in memory for comparison,
+but JSON and table receipts never serialize operators, allowed identities,
+personal route addresses, reply identities, or Google group members. External
+membership is represented by count plus a deterministic normalized-set digest;
+provider payload integrity is represented by its SHA-256 receipt hash.
 
 Active-policy evidence is equally conjunctive. D1's active pointer and revision
 key must select the canonical remote R2 object; its downloaded bytes must hash
