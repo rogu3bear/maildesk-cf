@@ -69,7 +69,15 @@ if (!receiptPath) {
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const receipt = readJson<Receipt>(resolve(root, receiptPath));
 const policy = readJson<PolicyFile>(policyPath);
-const planManifest = loadPlanManifest(argValue("--plan-manifest"));
+const planManifestPath = argValue("--plan-manifest");
+if (
+  args.includes("--plan-manifest") &&
+  (!planManifestPath || planManifestPath.startsWith("--"))
+) {
+  console.error("missing --plan-manifest <path>");
+  process.exit(1);
+}
+const planManifest = loadPlanManifest(planManifestPath);
 const actions = buildActions(receipt, policy);
 const senderDomainPlans = senderDomainPlanSummary(actions);
 const plan = {
@@ -291,7 +299,14 @@ function rowSenderMode(row: DomainRow): SenderMode {
 
 function loadPlanManifest(path: string | undefined): Map<string, PlanManifestEntry> {
   if (!path) return new Map();
-  const manifest = readJson<PlanManifest>(resolve(root, path));
+  const manifestPath = resolve(root, path);
+  let manifest: PlanManifest;
+  try {
+    manifest = readJson<PlanManifest>(manifestPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
+    throw error;
+  }
   const items = Array.isArray(manifest) ? manifest : manifest.items ?? [];
   return new Map(
     items
