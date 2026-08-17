@@ -46,8 +46,7 @@ echo "$@" >> "$MAILDESK_TEST_CFCTL_LOG"
 case "$*" in
   "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
   *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*"page=2"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"8".repeat(64)}"}],"result":{"result":[]},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}]},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":true,"page_size":50,"pages":2,"rule_count":1,"rules":[{"enabled":true,"matchers":[{"matcher_type":"literal","field":"to","value_sha256":"sha256:786906db96ef646937f205d3e7398630ce2e97df5364baf31b81ef84f1386c3f"}],"actions":[{"action_type":"worker","worker_targets":["maildesk-cf-router"],"value_count":1}]}]}},"error":null}' ;;
   *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
   *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
   *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}' ;;
@@ -195,8 +194,12 @@ exit 0
     }
     expect(cfctlCalls).toContain("--profile profile-example");
     expect(cfctlCalls).toContain("--account account-example");
-    expect(cfctlCalls).toContain("--query page=2");
-    expect(cfctlCalls).not.toContain("--query page=3");
+    const routingCall = cfctlCalls.split("\n").find((line) =>
+      line.includes("call email-routing-routing-rules-list-routing-rules")
+    );
+    expect(routingCall).toBeDefined();
+    expect(routingCall).not.toContain("--query page=");
+    expect(routingCall).not.toContain("--query per_page=");
     expect(cfctlCalls).not.toContain("list zone");
     expect(cfctlCalls).not.toContain("maildesk-cf verify");
 
@@ -205,8 +208,8 @@ exit 0
     writeFileSync(
       cfctl,
       successfulCfctlStub.replace(
-        '{"type":"worker","value":["maildesk-cf-router"]}',
-        '{"type":"forward","value":["operator@example.net"]}',
+        '{"action_type":"worker","worker_targets":["maildesk-cf-router"],"value_count":1}',
+        '{"action_type":"forward","worker_targets":[],"value_count":1}',
       ),
       { mode: 0o755 },
     );
@@ -537,7 +540,7 @@ esac
     });
   });
 
-  test("a successful nonterminal page is rejected as incomplete evidence", () => {
+  test("an incomplete Email Routing projection is rejected as malformed evidence", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-paginated-"));
     const cfctl = join(dir, "cfctl");
     const wrangler = join(dir, "wrangler");
@@ -549,7 +552,7 @@ esac
 case "$*" in
   "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
   *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":2,"total_count":51}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":false,"page_size":50,"pages":1,"rule_count":0,"rules":[]}},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -591,24 +594,19 @@ esac
         receipts: Array<{
           capability_id: string;
           error_code?: string;
-          pagination?: { page?: number; total_pages?: number; total_count?: number };
         }>;
       };
     };
     expect(evidence.cfctl_readback?.complete).toBe(false);
     expect(evidence.cfctl_readback?.receipts.at(-1)).toMatchObject({
       capability_id: "email-routing-routing-rules-list-routing-rules",
-      error_code: "CFCTL_PAGINATION_INCOMPLETE",
-      pagination: { page: 1, total_pages: 2, total_count: 51 },
+      error_code: "CFCTL_RESULT_SHAPE_MALFORMED",
     });
 
     const cursorOut = join(dir, "cursor-evidence.json");
     writeFileSync(
       cfctl,
-      readFileSync(cfctl, "utf8").replace(
-        '"total_pages":2,"total_count":51',
-        '"total_pages":1,"total_count":1,"cursor":"next-page"',
-      ),
+      readFileSync(cfctl, "utf8"),
       { mode: 0o755 },
     );
     const cursorResult = spawnSync(
@@ -641,19 +639,23 @@ esac
     };
     expect(cursorEvidence.cfctl_readback?.receipts.at(-1)).toMatchObject({
       capability_id: "email-routing-routing-rules-list-routing-rules",
-      error_code: "CFCTL_PAGINATION_INCOMPLETE",
+      error_code: "CFCTL_RESULT_SHAPE_MALFORMED",
     });
   });
 
-  test("missing Email Routing pagination metadata cannot exceed the bounded page size", () => {
+  test("an Email Routing projection cannot exceed its completed page capacity", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-oversized-page-"));
     const cfctl = join(dir, "cfctl");
     const wrangler = join(dir, "wrangler");
     const out = join(dir, "evidence.json");
     const rules = Array.from({ length: 51 }, (_, index) => ({
-      recipient: `role-${index}@example.com`,
       enabled: true,
-      actions: [{ type: "worker", value: ["maildesk-cf-router"] }],
+      matchers: [{
+        matcher_type: "literal",
+        field: "to",
+        value_sha256: `sha256:${index.toString(16).padStart(64, "0")}`,
+      }],
+      actions: [{ action_type: "worker", worker_targets: ["maildesk-cf-router"], value_count: 1 }],
     }));
 
     writeFileSync(
@@ -662,7 +664,7 @@ esac
 case "$*" in
   "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
   *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '${JSON.stringify({ schema_version: 2, ok: true, performed: true, capability_id: "email-routing-routing-rules-list-routing-rules", profile_id: "profile-example", account_id: "account-example", verification: { state: "not_applicable" }, evidence: [{ content_hash: `sha256:${"b".repeat(64)}` }], result: { result: rules }, error: null })}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '${JSON.stringify({ schema_version: 2, ok: true, performed: true, capability_id: "email-routing-routing-rules-list-routing-rules", profile_id: "profile-example", account_id: "account-example", verification: { state: "not_applicable" }, evidence: [{ content_hash: `sha256:${"b".repeat(64)}` }], result: { result: { schema_version: 1, complete: true, page_size: 50, pages: 2, rule_count: rules.length, rules } }, error: null })}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -701,7 +703,7 @@ esac
     const receipt = (JSON.parse(readFileSync(out, "utf8")) as {
       cfctl_readback?: { receipts: Array<{ error_code?: string }> };
     }).cfctl_readback?.receipts.at(-1);
-    expect(receipt?.error_code).toBe("CFCTL_PAGINATION_PAGE_OVERSIZED");
+    expect(receipt?.error_code).toBe("CFCTL_RESULT_SHAPE_MALFORMED");
   });
 
   test("schema-v1 profile metadata is rejected before any governed live call", () => {
