@@ -224,6 +224,7 @@ describe("maildesk closeout gate", () => {
     const summaryPath = join(dir, "summary.json");
     const manifestPath = join(dir, "plan-manifest.json");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
+    const cfctl = "/path/to/reviewed/cfctl";
 
     writeJson(summaryPath, {
       local_truth_ok: true,
@@ -259,6 +260,8 @@ describe("maildesk closeout gate", () => {
         manifestPath,
         "--plan",
         "var/maildesk-proof-plan.json",
+        "--cfctl",
+        cfctl,
         "--preflight-command",
         preflight,
         "--redact-sensitive",
@@ -292,6 +295,8 @@ describe("maildesk closeout gate", () => {
       "--",
       "--manifest",
       relative(root, manifestPath),
+      "--cfctl",
+      cfctl,
       "--limit",
       "1",
       "--json",
@@ -303,6 +308,8 @@ describe("maildesk closeout gate", () => {
       "--",
       "--manifest",
       relative(root, manifestPath),
+      "--cfctl",
+      cfctl,
       "--execute",
       "--confirm-plan",
       "--limit",
@@ -343,6 +350,7 @@ describe("maildesk closeout gate", () => {
     const refreshLogPath = join(dir, "refresh.log");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
     const refresh = fakeAckRefresh(manifestPath, refreshLogPath);
+    const cfctl = "/path/to/reviewed/cfctl";
 
     writeJson(summaryPath, {
       local_truth_ok: true,
@@ -381,6 +389,8 @@ describe("maildesk closeout gate", () => {
         "--refresh-acks",
         "--refresh-ack-command",
         refresh,
+        "--cfctl",
+        cfctl,
         "--preflight-command",
         preflight,
         "--json",
@@ -390,6 +400,7 @@ describe("maildesk closeout gate", () => {
 
     expect(result.status).toBe(1);
     expect(readFileSync(refreshLogPath, "utf8")).toContain(`--out ${manifestPath}`);
+    expect(readFileSync(refreshLogPath, "utf8")).toContain(`--cfctl ${cfctl}`);
     const closeout = JSON.parse(result.stdout) as {
       ack_refresh?: { ok?: boolean; plan_ready_count?: number };
       ack_dry_run?: { ready_count?: number; dry_run_count?: number; executed_count?: number };
