@@ -91,6 +91,7 @@ const summaryPath =
 const ackManifestPath =
   argValue("--plan-manifest") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
+const cfctlBin = argValue("--cfctl");
 const refreshAcks = args.includes("--refresh-acks");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
@@ -102,17 +103,20 @@ const productionPreflight = !envFileValid
   : skipProductionPreflight
     ? null
     : runProductionPreflight();
-const ackRefresh = envFileValid && refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
+const ackRefresh = envFileValid && refreshAcks
+  ? runAckRefresh(planPath, ackManifestPath, cfctlBin)
+  : null;
 const ackDryRun =
   !envFileValid || skipAckDryRun || !existsSync(resolve(root, ackManifestPath))
     ? null
-    : runAckDryRun(ackManifestPath);
+    : runAckDryRun(ackManifestPath, cfctlBin);
 const blockers = buildBlockers(summary, productionPreflight, ackRefresh, ackDryRun);
 const protectedActions = buildProtectedActions(summary, ackDryRun);
 const protectedCommandHandoff = buildProtectedCommandHandoff(
   protectedActions,
   ackManifestPath,
   planPath,
+  cfctlBin,
 );
 const ready =
   blockers.length === 0 &&
@@ -282,9 +286,10 @@ function buildProtectedCommandHandoff(
   actions: ProtectedActionsSummary,
   manifestPath: string,
   proofPlanPath: string,
+  cfctl: string | undefined,
 ): ProtectedCommandHandoffSummary {
   return {
-    sender_domain_apply: senderDomainApplyCommands(actions.sender_domain_apply, manifestPath),
+    sender_domain_apply: senderDomainApplyCommands(actions.sender_domain_apply, manifestPath, cfctl),
     inbound_probe: inboundProbeCommands(actions.inbound_probe, proofPlanPath),
     outbound_reply_probe: outboundReplyProbeCommands(actions.outbound_reply_probe, proofPlanPath),
   };
@@ -293,6 +298,7 @@ function buildProtectedCommandHandoff(
 function senderDomainApplyCommands(
   action: ProtectedActionHandoff,
   manifestPath: string,
+  cfctl: string | undefined,
 ): ProtectedCommandHandoff | null {
   if (action.count <= 0) return null;
   const manifestArg = commandPath(manifestPath);
@@ -303,6 +309,7 @@ function senderDomainApplyCommands(
     "--",
     "--manifest",
     manifestArg,
+    ...(cfctl ? ["--cfctl", cfctl] : []),
   ];
   const dryRunOne = [...base, "--limit", "1", "--json"];
   const canExecute = (action.dry_run_ready_count ?? 0) > 0;
@@ -402,10 +409,22 @@ function outboundReplyProbeCommands(
   };
 }
 
-function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummary {
+function runAckRefresh(
+  planPath: string,
+  manifestPath: string,
+  cfctl: string | undefined,
+): AckRefreshSummary {
   const command = argValue("--refresh-ack-command");
+  const commandArgs = [
+    "--plan",
+    planPath,
+    "--out",
+    manifestPath,
+    ...(cfctl ? ["--cfctl", cfctl] : []),
+    "--json",
+  ];
   const result = command
-    ? spawnSync(command, ["--plan", planPath, "--out", manifestPath, "--json"], {
+    ? spawnSync(command, commandArgs, {
         cwd: root,
         encoding: "utf8",
         env: process.env,
@@ -415,11 +434,7 @@ function runAckRefresh(planPath: string, manifestPath: string): AckRefreshSummar
         [
           "run",
           "scripts/refresh-sender-domain-ack-manifest.ts",
-          "--plan",
-          planPath,
-          "--out",
-          manifestPath,
-          "--json",
+          ...commandArgs,
         ],
         { cwd: root, encoding: "utf8", env: process.env },
       );
@@ -468,10 +483,17 @@ function runProductionPreflight(): { ok: boolean; failures: string[]; status: nu
   };
 }
 
-function runAckDryRun(manifestPath: string): AckDryRunSummary {
+function runAckDryRun(manifestPath: string, cfctl: string | undefined): AckDryRunSummary {
   const result = spawnSync(
     "bun",
-    ["run", "scripts/apply-sender-domain-ack-manifest.ts", "--manifest", manifestPath, "--json"],
+    [
+      "run",
+      "scripts/apply-sender-domain-ack-manifest.ts",
+      "--manifest",
+      manifestPath,
+      ...(cfctl ? ["--cfctl", cfctl] : []),
+      "--json",
+    ],
     { cwd: root, encoding: "utf8", env: process.env },
   );
   if (result.status !== 0) {
