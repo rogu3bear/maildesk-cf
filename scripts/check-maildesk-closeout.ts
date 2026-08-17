@@ -94,16 +94,19 @@ const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
 const refreshAcks = args.includes("--refresh-acks");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
+const envFileValid = envFileLoad.failures.length === 0;
 
 const summary = readJson<ReceiptSummary>(summaryPath);
-const productionPreflight = skipProductionPreflight
-  ? null
-  : envFileLoad.failures.length > 0
-    ? { ok: false, status: 1, failures: envFileLoad.failures }
+const productionPreflight = !envFileValid
+  ? { ok: false, status: 1, failures: envFileLoad.failures }
+  : skipProductionPreflight
+    ? null
     : runProductionPreflight();
-const ackRefresh = refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
+const ackRefresh = envFileValid && refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
 const ackDryRun =
-  skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
+  !envFileValid || skipAckDryRun || !existsSync(resolve(root, ackManifestPath))
+    ? null
+    : runAckDryRun(ackManifestPath);
 const blockers = buildBlockers(summary, productionPreflight, ackRefresh, ackDryRun);
 const protectedActions = buildProtectedActions(summary, ackDryRun);
 const protectedCommandHandoff = buildProtectedCommandHandoff(

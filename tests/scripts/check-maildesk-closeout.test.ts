@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -521,6 +521,81 @@ describe("maildesk closeout gate", () => {
     });
     expect(closeout.blockers).not.toContainEqual({ kind: "production_preflight" });
   });
+
+  test("invalid env symlinks stop preflight and sender-plan refresh execution", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-env-boundary-"));
+    const summaryPath = join(dir, "summary.json");
+    const manifestPath = join(dir, "plan-manifest.json");
+    const externalFile = join(dir, ".external.vars");
+    const localDir = mkdtempSync(join(ensureVarDir(), "closeout-env-symlink-"));
+    const localLink = join(localDir, ".dev.vars");
+    const preflightMarker = join(dir, "preflight-invoked");
+    const refreshMarker = join(dir, "refresh-invoked");
+    writeFileSync(externalFile, "MAILDESK_API_TOKEN=secret-outside-value\n");
+    symlinkSync(externalFile, localLink);
+    writeJson(summaryPath, {
+      local_truth_ok: true,
+      live_evidence_present: true,
+      edge_ready: false,
+      mail_ready: false,
+      domain_count: 1,
+      gap_count: 1,
+      local_gap_count: 0,
+      edge_gap_count: 1,
+      mail_gap_count: 0,
+      proof_actions: 0,
+      targeted_inbound_probes: 0,
+      targeted_outbound_reply_probes: 0,
+      blocked_proofs: 0,
+      sender_domain_blocked_count: 0,
+      sender_domain_plan_ready_count: 0,
+      sender_domain_plan_missing_count: 0,
+    });
+
+    try {
+      const result = spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/check-maildesk-closeout.ts",
+          "--",
+          "--summary",
+          summaryPath,
+          "--plan-manifest",
+          manifestPath,
+          "--env-file",
+          relative(root, localLink),
+          "--refresh-acks",
+          "--preflight-command",
+          fakeInvocationRecorder(preflightMarker),
+          "--refresh-ack-command",
+          fakeInvocationRecorder(refreshMarker),
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(1);
+      expect(existsSync(preflightMarker)).toBe(false);
+      expect(existsSync(refreshMarker)).toBe(false);
+      expect(result.stdout).not.toContain("secret-outside-value");
+      const closeout = JSON.parse(result.stdout) as {
+        production_preflight?: { ok?: boolean; failures?: string[] };
+        blockers?: Array<{ kind?: string; detail?: string }>;
+      };
+      expect(closeout.production_preflight).toMatchObject({
+        ok: false,
+        failures: ["env file must be under repository root"],
+      });
+      expect(closeout.blockers).toContainEqual({
+        kind: "production_preflight",
+        detail: "env file must be under repository root",
+      });
+    } finally {
+      rmSync(localDir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function ensureVarDir(): string {
@@ -558,6 +633,20 @@ if [ -n "$MAILDESK_API_TOKEN" ]; then
 fi
 echo "fail: missing or placeholder environment variable: MAILDESK_API_TOKEN" >&2
 exit 1
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeInvocationRecorder(markerPath: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-invocation-recorder-"));
+  const path = join(dir, "record-invocation");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+touch ${JSON.stringify(markerPath)}
+exit 0
 `,
   );
   chmodSync(path, 0o700);
