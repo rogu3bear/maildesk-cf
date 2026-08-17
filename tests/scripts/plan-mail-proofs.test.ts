@@ -153,8 +153,8 @@ describe("mail proof planner", () => {
       actions: Array<{
         kind: string;
         blocked_by?: string;
-        preview_command?: string;
-        ack_command_template?: string;
+        plan_request?: unknown;
+        verify_request?: unknown;
         verify_command?: string;
       }>;
     };
@@ -162,11 +162,28 @@ describe("mail proof planner", () => {
     expect(plan.actions[0]).toMatchObject({
       kind: "blocked",
       blocked_by: "sender_domain_not_verified",
-      preview_command:
-        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --plan",
-      ack_command_template:
-        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan <operation-id>",
-      verify_command: "cfctl maildesk-cf verify --file config/desired-state.local.json",
+      plan_request: {
+        schema_version: 2,
+        capability_id: "email-sending-subdomains-create-sending-subdomain",
+        target: {
+          zone_name: "tenant.example.com",
+          sending_subdomain_name: "tenant.example.com",
+        },
+        profile_binding: "explicit",
+        account_binding: "profile_account",
+        zone_binding: { capability_id: "zones-get", exact_name: "tenant.example.com" },
+        body: { name: "tenant.example.com" },
+      },
+      verify_request: {
+        schema_version: 2,
+        capability_id: "email-sending-subdomains-list-sending-subdomains",
+        target: {
+          zone_name: "tenant.example.com",
+          sending_subdomain_name: "tenant.example.com",
+        },
+        profile_binding: "explicit",
+        account_binding: "profile_account",
+      },
     });
   });
 
@@ -247,20 +264,20 @@ describe("mail proof planner", () => {
     const plan = JSON.parse(result.stdout) as {
       summary: {
         sender_domain_blocked_count?: number;
-        sender_domain_ack_missing_count?: number;
+        sender_domain_plan_missing_count?: number;
       };
       actions: Array<{
         kind: string;
         blocked_by?: string;
-        preview_command?: string;
-        ack_command_template?: string;
+        plan_request?: unknown;
+        verify_request?: unknown;
         verify_command?: string;
       }>;
     };
 
     expect(plan.summary).toMatchObject({
       sender_domain_blocked_count: 0,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_missing_count: 0,
     });
     expect(plan.actions).toHaveLength(1);
     expect(plan.actions[0]).toMatchObject({
@@ -268,15 +285,15 @@ describe("mail proof planner", () => {
       blocked_by: "resend_sender_domain_not_verified",
       verify_command: "resend domains list --json --limit 100",
     });
-    expect(plan.actions[0]?.preview_command).toBeUndefined();
-    expect(plan.actions[0]?.ack_command_template).toBeUndefined();
+    expect(plan.actions[0]?.plan_request).toBeUndefined();
+    expect(plan.actions[0]?.verify_request).toBeUndefined();
   });
 
-  test("fills exact sender-domain ack command from an ack manifest", () => {
+  test("fills the exact PlanV2 lifecycle from a prepared plan manifest", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-"));
     const receiptPath = join(dir, "receipt.json");
     const policyPath = join(dir, "policy.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     writeFileSync(
       receiptPath,
       `${JSON.stringify(
@@ -330,14 +347,17 @@ describe("mail proof planner", () => {
         {
           items: [
             {
+              schema_version: 2,
               ok: true,
               performed: false,
-              plan_mode: true,
-              lane: "global",
+              capability_id: "email-sending-subdomains-create-sending-subdomain",
+              profile_id: "profile-example",
+              account_id: "account-example",
+              zone_id: "zone-example",
               target: "tenant.example.com",
               operation_id: "20260701T000000Z-00000-tenant",
-              ack_command:
-                "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
+              plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
             },
           ],
         },
@@ -356,7 +376,7 @@ describe("mail proof planner", () => {
         receiptPath,
         "--policy",
         policyPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--json",
       ],
@@ -371,7 +391,7 @@ describe("mail proof planner", () => {
       actions: Array<{
         kind: string;
         blocked_by?: string;
-        ack_command?: string;
+        lifecycle?: Record<string, string[]>;
         operation_id?: string;
       }>;
     };
@@ -380,16 +400,20 @@ describe("mail proof planner", () => {
       kind: "blocked",
       blocked_by: "sender_domain_not_verified",
       operation_id: "20260701T000000Z-00000-tenant",
-      ack_command:
-        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
+      lifecycle: {
+        show: ["cfctl", "plans", "show", "20260701T000000Z-00000-tenant", "--json"],
+        approve: ["cfctl", "plans", "approve", "20260701T000000Z-00000-tenant", "--yes", "--json"],
+        run: ["cfctl", "plans", "run", "20260701T000000Z-00000-tenant", "--json"],
+        status: ["cfctl", "plans", "status", "20260701T000000Z-00000-tenant", "--json"],
+      },
     });
   });
 
-  test("matches sender-domain ack commands whose zone differs from name", () => {
+  test("matches a prepared subdomain plan independently of its zone identifier", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-"));
     const receiptPath = join(dir, "receipt.json");
     const policyPath = join(dir, "policy.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     writeFileSync(
       receiptPath,
       `${JSON.stringify(
@@ -443,12 +467,17 @@ describe("mail proof planner", () => {
         {
           items: [
             {
+              schema_version: 2,
               ok: true,
               performed: false,
+              capability_id: "email-sending-subdomains-create-sending-subdomain",
+              profile_id: "profile-example",
+              account_id: "account-example",
+              zone_id: "zone-example",
               target: "mail.tenant.example.com",
               operation_id: "20260701T000000Z-00000-subdomain",
-              ack_command:
-                "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name mail.tenant.example.com --ack-plan 20260701T000000Z-00000-subdomain",
+              plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
             },
           ],
         },
@@ -467,7 +496,7 @@ describe("mail proof planner", () => {
         receiptPath,
         "--policy",
         policyPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--json",
       ],
@@ -480,21 +509,23 @@ describe("mail proof planner", () => {
     expect(result.status).toBe(0);
     const plan = JSON.parse(result.stdout) as {
       actions: Array<{
-        ack_command?: string;
+        lifecycle?: Record<string, string[]>;
         operation_id?: string;
       }>;
     };
     expect(plan.actions[0]).toMatchObject({
       operation_id: "20260701T000000Z-00000-subdomain",
-      ack_command:
-        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name mail.tenant.example.com --ack-plan 20260701T000000Z-00000-subdomain",
+      lifecycle: {
+        run: ["cfctl", "plans", "run", "20260701T000000Z-00000-subdomain", "--json"],
+      },
     });
   });
 
-  test("require ack ready fails when sender-domain blockers lack exact ack commands", () => {
+  test("require plan ready fails when sender-domain blockers lack exact PlanV2 operations", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-"));
     const receiptPath = join(dir, "receipt.json");
     const policyPath = join(dir, "policy.json");
+    const manifestPath = join(dir, "invalid-plan-manifest.json");
     writeFileSync(
       receiptPath,
       `${JSON.stringify(
@@ -542,6 +573,21 @@ describe("mail proof planner", () => {
         2,
       )}\n`,
     );
+    writeFileSync(
+      manifestPath,
+      `${JSON.stringify({
+        items: [{
+          capability_id: "email-sending-subdomains-create-sending-subdomain",
+          profile_id: "profile-example",
+          account_id: "account-example",
+          zone_id: "zone-example",
+          target: "tenant.example.com",
+          operation_id: "operation-example",
+          plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        }],
+      }, null, 2)}\n`,
+    );
 
     const result = spawnSync(
       "bun",
@@ -553,7 +599,9 @@ describe("mail proof planner", () => {
         receiptPath,
         "--policy",
         policyPath,
-        "--require-ack-ready",
+        "--plan-manifest",
+        manifestPath,
+        "--require-plan-ready",
         "--json",
       ],
       {
@@ -566,15 +614,15 @@ describe("mail proof planner", () => {
     const plan = JSON.parse(result.stdout) as {
       summary: {
         sender_domain_blocked_count?: number;
-        sender_domain_ack_ready_count?: number;
-        sender_domain_ack_missing_count?: number;
+        sender_domain_plan_ready_count?: number;
+        sender_domain_plan_missing_count?: number;
       };
     };
     expect(plan.summary).toMatchObject({
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 0,
-      sender_domain_ack_missing_count: 1,
+      sender_domain_plan_ready_count: 0,
+      sender_domain_plan_missing_count: 1,
     });
-    expect(result.stderr).toContain("sender-domain ack commands are not ready");
+    expect(result.stderr).toContain("sender-domain PlanV2 operations are not ready");
   });
 });

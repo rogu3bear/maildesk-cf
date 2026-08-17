@@ -18,14 +18,14 @@ interface ReceiptSummary {
   targeted_outbound_reply_probes?: number;
   blocked_proofs?: number;
   sender_domain_blocked_count?: number;
-  sender_domain_ack_ready_count?: number;
-  sender_domain_ack_missing_count?: number;
+  sender_domain_plan_ready_count?: number;
+  sender_domain_plan_missing_count?: number;
 }
 
 interface AckDryRunSummary {
   mode?: string;
   ready_count?: number;
-  applied_count?: number;
+  executed_count?: number;
   dry_run_count?: number;
   results?: unknown[];
 }
@@ -33,7 +33,7 @@ interface AckDryRunSummary {
 interface RedactedAckDryRunSummary {
   mode: string;
   ready_count: number;
-  applied_count: number;
+  executed_count: number;
   dry_run_count: number;
   result_count: number;
 }
@@ -44,18 +44,8 @@ interface AckRefreshSummary {
   plan_path?: string;
   manifest_path?: string;
   preview_count?: number;
-  ack_ready_count?: number;
+  plan_ready_count?: number;
   failed_count?: number;
-  failures: string[];
-}
-
-interface PreviewCleanupSummary {
-  ok: boolean;
-  status: number;
-  performed?: boolean;
-  purged_count?: number;
-  duplicate_group_count?: number;
-  expired_purged_count?: number;
   failures: string[];
 }
 
@@ -99,11 +89,9 @@ const envFileLoad = loadEnvFile(root, argValue("--env-file"));
 const summaryPath =
   argValue("--summary") ?? "var/proof/maildesk-receipt-require-ack-ready-summary.local.json";
 const ackManifestPath =
-  argValue("--ack-manifest") ?? "var/proof/maildesk-sender-domain-ack-manifest.local.json";
+  argValue("--plan-manifest") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
 const refreshAcks = args.includes("--refresh-acks");
-const purgeDuplicatePreviews = args.includes("--purge-duplicate-previews");
-const purgeExpiredPreviews = args.includes("--purge-expired-previews");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
 
@@ -114,13 +102,9 @@ const productionPreflight = skipProductionPreflight
     ? { ok: false, status: 1, failures: envFileLoad.failures }
     : runProductionPreflight();
 const ackRefresh = refreshAcks ? runAckRefresh(planPath, ackManifestPath) : null;
-const previewCleanup =
-  purgeDuplicatePreviews || purgeExpiredPreviews
-    ? runPreviewCleanup(purgeDuplicatePreviews, purgeExpiredPreviews)
-    : null;
 const ackDryRun =
   skipAckDryRun || !existsSync(resolve(root, ackManifestPath)) ? null : runAckDryRun(ackManifestPath);
-const blockers = buildBlockers(summary, productionPreflight, ackRefresh, previewCleanup, ackDryRun);
+const blockers = buildBlockers(summary, productionPreflight, ackRefresh, ackDryRun);
 const protectedActions = buildProtectedActions(summary, ackDryRun);
 const protectedCommandHandoff = buildProtectedCommandHandoff(
   protectedActions,
@@ -145,7 +129,6 @@ const closeout = {
       : relativePath(resolve(root, ackManifestPath)),
   production_preflight: productionPreflight,
   ack_refresh: ackRefresh,
-  preview_cleanup: previewCleanup,
   receipt: {
     local_truth_ok: summary.local_truth_ok === true,
     live_evidence_present: summary.live_evidence_present === true,
@@ -163,8 +146,8 @@ const closeout = {
     targeted_outbound_reply_probes: summary.targeted_outbound_reply_probes ?? 0,
     blocked_proofs: summary.blocked_proofs ?? 0,
     sender_domain_blocked_count: summary.sender_domain_blocked_count ?? 0,
-    sender_domain_ack_ready_count: summary.sender_domain_ack_ready_count ?? 0,
-    sender_domain_ack_missing_count: summary.sender_domain_ack_missing_count ?? 0,
+    sender_domain_plan_ready_count: summary.sender_domain_plan_ready_count ?? 0,
+    sender_domain_plan_missing_count: summary.sender_domain_plan_missing_count ?? 0,
   },
   ack_dry_run: redactSensitive ? redactAckDryRun(ackDryRun) : ackDryRun,
   protected_actions: protectedActions,
@@ -202,7 +185,6 @@ function buildBlockers(
   receipt: ReceiptSummary,
   preflight: { ok: boolean; failures: string[] } | null,
   refresh: AckRefreshSummary | null,
-  previewCleanup: PreviewCleanupSummary | null,
   ack: AckDryRunSummary | null,
 ): Blocker[] {
   const blockers: Blocker[] = [];
@@ -215,11 +197,6 @@ function buildBlockers(
   if (refresh?.ok === false) {
     for (const failure of refresh.failures) {
       blockers.push({ kind: "sender_domain_ack_refresh", detail: failure });
-    }
-  }
-  if (previewCleanup?.ok === false) {
-    for (const failure of previewCleanup.failures) {
-      blockers.push({ kind: "preview_cleanup", detail: failure });
     }
   }
   if (receipt.local_truth_ok !== true) {
@@ -235,22 +212,22 @@ function buildBlockers(
     blockers.push({ kind: "mail_ready_false", count: receipt.mail_gap_count ?? receipt.gap_count ?? 0 });
   }
 
-  const missingAcks = receipt.sender_domain_ack_missing_count ?? 0;
-  if (missingAcks > 0) {
-    blockers.push({ kind: "sender_domain_ack_missing", count: missingAcks });
+  const missingPlans = receipt.sender_domain_plan_missing_count ?? 0;
+  if (missingPlans > 0) {
+    blockers.push({ kind: "sender_domain_plan_missing", count: missingPlans });
   }
 
   const blockedSenderDomains = receipt.sender_domain_blocked_count ?? 0;
-  if (blockedSenderDomains > 0 && missingAcks === 0) {
+  if (blockedSenderDomains > 0 && missingPlans === 0) {
     blockers.push({ kind: "protected_sender_domain_apply", count: blockedSenderDomains });
   }
 
-  const expectedReadyAcks = receipt.sender_domain_ack_ready_count ?? 0;
-  if (ack && expectedReadyAcks > 0 && (ack.ready_count ?? 0) < expectedReadyAcks) {
-    blockers.push({ kind: "sender_domain_ack_dry_run_stale", count: expectedReadyAcks - (ack.ready_count ?? 0) });
+  const expectedReadyPlans = receipt.sender_domain_plan_ready_count ?? 0;
+  if (ack && expectedReadyPlans > 0 && (ack.ready_count ?? 0) < expectedReadyPlans) {
+    blockers.push({ kind: "sender_domain_plan_dry_run_stale", count: expectedReadyPlans - (ack.ready_count ?? 0) });
   }
-  if ((ack?.applied_count ?? 0) > 0) {
-    blockers.push({ kind: "unexpected_sender_domain_apply", count: ack?.applied_count ?? 0 });
+  if ((ack?.executed_count ?? 0) > 0) {
+    blockers.push({ kind: "unexpected_sender_domain_execution", count: ack?.executed_count ?? 0 });
   }
 
   const inboundProbes = receipt.targeted_inbound_probes ?? 0;
@@ -271,7 +248,7 @@ function buildProtectedActions(
   ack: AckDryRunSummary | null,
 ): ProtectedActionsSummary {
   const senderDomainCount =
-    (receipt.sender_domain_ack_missing_count ?? 0) > 0 ? 0 : receipt.sender_domain_blocked_count ?? 0;
+    (receipt.sender_domain_plan_missing_count ?? 0) > 0 ? 0 : receipt.sender_domain_blocked_count ?? 0;
   const inboundProbeCount = receipt.targeted_inbound_probes ?? 0;
   const outboundReplyProbeCount = receipt.targeted_outbound_reply_probes ?? 0;
 
@@ -279,9 +256,9 @@ function buildProtectedActions(
     sender_domain_apply: {
       count: senderDomainCount,
       dry_run_ready_count: ack?.ready_count ?? 0,
-      required_flags: ["--execute", "--confirm-ack-plan"],
+      required_flags: ["--execute", "--confirm-plan"],
       bulk_confirmation_required: senderDomainCount > 1,
-      bulk_confirmation_flag: senderDomainCount > 1 ? "--confirm-bulk-ack-plan" : null,
+      bulk_confirmation_flag: senderDomainCount > 1 ? "--confirm-bulk-plan" : null,
     },
     inbound_probe: {
       count: inboundProbeCount,
@@ -327,15 +304,15 @@ function senderDomainApplyCommands(
   const dryRunOne = [...base, "--limit", "1", "--json"];
   const canExecute = (action.dry_run_ready_count ?? 0) > 0;
   const executeOne = canExecute
-    ? [...base, "--execute", "--confirm-ack-plan", "--limit", "1", "--json"]
+    ? [...base, "--execute", "--confirm-plan", "--limit", "1", "--json"]
     : null;
   const executeAll =
     canExecute && action.count > 1
       ? [
           ...base,
           "--execute",
-          "--confirm-ack-plan",
-          "--confirm-bulk-ack-plan",
+          "--confirm-plan",
+          "--confirm-bulk-plan",
           "--all",
           "--json",
         ]
@@ -488,79 +465,6 @@ function runProductionPreflight(): { ok: boolean; failures: string[]; status: nu
   };
 }
 
-function runPreviewCleanup(purgeDuplicates: boolean, purgeExpired: boolean): PreviewCleanupSummary {
-  const duplicateCleanup =
-    purgeDuplicates
-      ? runPreviewCleanupCommand(
-          "duplicate preview cleanup",
-          argValue("--preview-cleanup-command"),
-          ["previews", "purge-duplicate-active"],
-        )
-      : null;
-  const expiredCleanup =
-    purgeExpired
-      ? runPreviewCleanupCommand(
-          "expired preview cleanup",
-          argValue("--expired-preview-cleanup-command"),
-          ["previews", "purge-expired"],
-        )
-      : null;
-  const results = [duplicateCleanup, expiredCleanup].filter(
-    (result): result is PreviewCleanupSummary => Boolean(result),
-  );
-  const failures = results.flatMap((result) => result.failures);
-
-  return {
-    ok: failures.length === 0,
-    status: failures.length === 0 ? 0 : results.find((result) => result.status !== 0)?.status ?? 1,
-    performed: results.some((result) => result.performed === true),
-    purged_count: results.reduce((total, result) => total + (result.purged_count ?? 0), 0),
-    duplicate_group_count: duplicateCleanup?.duplicate_group_count ?? 0,
-    expired_purged_count: expiredCleanup?.purged_count ?? 0,
-    failures,
-  };
-}
-
-function runPreviewCleanupCommand(
-  label: string,
-  command: string | undefined,
-  cfctlArgs: string[],
-): PreviewCleanupSummary {
-  const result = command
-    ? spawnSync(command, { cwd: root, encoding: "utf8", env: process.env })
-    : spawnSync("cfctl", cfctlArgs, {
-        cwd: root,
-        encoding: "utf8",
-        env: process.env,
-      });
-  const status = result.status ?? 1;
-  if (status !== 0) {
-    return {
-      ok: false,
-      status,
-      failures: [`${label} exited ${status}`],
-    };
-  }
-
-  const output = parseJson<{
-    ok?: boolean;
-    performed?: boolean;
-    summary?: {
-      purged_count?: number;
-      duplicate_group_count?: number;
-    };
-  }>(result.stdout, label);
-
-  return {
-    ok: output.ok === true,
-    status,
-    performed: output.performed === true,
-    purged_count: output.summary?.purged_count ?? 0,
-    duplicate_group_count: output.summary?.duplicate_group_count ?? 0,
-    failures: output.ok === true ? [] : [`${label} did not report ok`],
-  };
-}
-
 function runAckDryRun(manifestPath: string): AckDryRunSummary {
   const result = spawnSync(
     "bun",
@@ -572,7 +476,7 @@ function runAckDryRun(manifestPath: string): AckDryRunSummary {
       mode: "dry_run",
       ready_count: 0,
       dry_run_count: 0,
-      applied_count: 0,
+      executed_count: 0,
       results: [],
     };
   }
@@ -584,7 +488,7 @@ function redactAckDryRun(ack: AckDryRunSummary | null): RedactedAckDryRunSummary
   return {
     mode: ack.mode ?? "dry_run",
     ready_count: ack.ready_count ?? 0,
-    applied_count: ack.applied_count ?? 0,
+    executed_count: ack.executed_count ?? 0,
     dry_run_count: ack.dry_run_count ?? 0,
     result_count: ack.results?.length ?? 0,
   };

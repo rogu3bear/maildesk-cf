@@ -52,13 +52,13 @@ describe("governed email-routing provisioning reconciler", () => {
     expect(summary.failed_count).toBe(0);
   });
 
-  test("idempotent: already-enabled zone with all rules present applies nothing", () => {
+  test("idempotent: already-enabled zone with all rules present plans nothing", () => {
     const { cfctl, state } = fixture({
       zoneFound: true,
       enabled: true,
       existingRuleAddresses: ["founders@example.com", "support@example.com"],
     });
-    const out = run(["--apply", "--desired-state", state, "--cfctl", cfctl, "--json"]);
+    const out = run(["--plan", "--desired-state", state, "--cfctl", cfctl, "--json"]);
     expect(out.status).toBe(0);
     const d = JSON.parse(out.stdout).domains[0];
     expect(d.applied).toEqual([]);
@@ -74,30 +74,44 @@ describe("governed email-routing provisioning reconciler", () => {
     expect(s.domains.map((d: { domain: string }) => d.domain)).toEqual(["example.com"]);
   });
 
-  test("apply drafts, approves and runs each missing delta", () => {
+  test("rejects direct apply before invoking cfctl", () => {
     const { cfctl, logPath, state } = fixture({ zoneFound: true, enabled: false, existingRuleAddresses: ["founders@example.com"] });
     const out = run(["--apply", "--desired-state", state, "--cfctl", cfctl, "--json"]);
-    expect(out.status).toBe(0);
-    const d = JSON.parse(out.stdout).domains[0];
-    // enable + the one missing rule are applied; the present rule is already.
-    expect(d.applied.map((a: { item: string }) => a.item).sort()).toEqual(["enable-routing", "rule:support@example.com"]);
-    expect(d.already).toContain("rule:founders@example.com");
-    const log = readFileSync(logPath, "utf8");
-    expect(log).toContain("plans approve");
-    expect(log).toContain("plans run");
+    expect(out.status).toBe(1);
+    expect(out.stderr).toContain("direct --apply mode is retired");
+    expect(existsSync(logPath)).toBe(false);
   });
 
   test("unresolvable zone fails closed with a non-zero exit", () => {
     const { cfctl, state } = fixture({ zoneFound: false });
-    const out = run(["--apply", "--desired-state", state, "--cfctl", cfctl, "--json"]);
+    const out = run(["--plan", "--desired-state", state, "--cfctl", cfctl, "--json"]);
     expect(out.status).toBe(1);
     const d = JSON.parse(out.stdout).domains[0];
     expect(d.zone_error).toContain("no active zone named example.com");
   });
+
+  test("binds every governed read to the explicit profile and its account", () => {
+    const { cfctl, logPath, state } = fixture({ zoneFound: true, enabled: true, existingRuleAddresses: [] });
+    const out = run(["--plan", "--desired-state", state, "--cfctl", cfctl, "--json"]);
+    expect(out.status, out.stderr).toBe(0);
+    const log = readFileSync(logPath, "utf8");
+    for (const line of log.trim().split("\n").filter((line) => line.startsWith("call "))) {
+      expect(line).toContain("--profile profile-example --account account-example --json");
+    }
+    expect(log).not.toContain("plans approve");
+    expect(log).not.toContain("plans run");
+  });
 });
 
 function run(scriptArgs: string[]) {
-  return spawnSync("bun", ["run", "scripts/provision-email-routing.ts", "--", ...scriptArgs], {
+  return spawnSync("bun", [
+    "run",
+    "scripts/provision-email-routing.ts",
+    "--",
+    ...scriptArgs,
+    "--profile",
+    "profile-example",
+  ], {
     cwd: root,
     encoding: "utf8",
   });
@@ -159,15 +173,12 @@ function fakeCfctl(dir: string, logPath: string, s: Scenario): string {
     `#!/bin/sh
 printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
 case "$*" in
-  *"call zones-get"*) echo '{"ok":true,"result":${zoneResult}}' ;;
-  *"settings-get-email-routing-settings"*) echo '{"ok":true,"result":{"enabled":${enabled}}}' ;;
-  *"rules-list-routing-rules"*) echo '{"ok":true,"result":${rules.replace(/'/g, "'\\''")}}' ;;
-  *"list-dns-records"*) echo '{"ok":true,"result":[{"content":"${mx}"}]}' ;;
-  *"call email-routing-settings-enable"*) echo '{"ok":true,"operation_id":"op-enable"}' ;;
-  *"call email-routing-routing-rules-create"*) echo '{"ok":true,"operation_id":"op-rule"}' ;;
-  *"plans approve"*) echo '{"ok":true}' ;;
-  *"plans run"*) echo '{"ok":true,"performed":true}' ;;
-  *) echo '{"ok":true}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"profiles":[{"id":"profile-example","account_id":"account-example"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":${zoneResult}},"error":null}' ;;
+  *"settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":{"enabled":${enabled}}},"error":null}' ;;
+  *"rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":${rules.replace(/'/g, "'\\''")}},"error":null}' ;;
+  *"list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":[{"content":"${mx}"}]},"error":null}' ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
   );

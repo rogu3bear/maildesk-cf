@@ -1,6 +1,6 @@
 # UI and Access Desired-State Extension
 
-Status: design contract; not yet an implemented `cfctl maildesk-cf` surface.
+Status: design contract; not yet a complete cfctl v2 capability workflow.
 
 The Cargo-Leptos UI adds account state that the current public
 `maildesk-cf` desired-state schema does not model. Production must not bypass
@@ -31,15 +31,18 @@ itself is not the application authorization boundary.
 The implemented surface must support the normal governed flow:
 
 ```text
-cfctl doctor
-cfctl maildesk-cf verify --file <private-desired-state>
-cfctl standards access
-cfctl classify access apply
-cfctl guide access apply
-cfctl maildesk-cf provision --file <private-desired-state> --plan
-cfctl maildesk-cf provision --file <private-desired-state> --ack-plan <operation-id>
-cfctl maildesk-cf verify --file <private-desired-state>
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read the exact Maildesk Access application and route state without mutation" --json
+cfctl catalog show <resolved-capability-id> --json
+cfctl guide <resolved-capability-id> --json
+cfctl call <resolved-capability-id> --profile <profile-id> --account <account-id> <exact-selectors> --json
 ```
+
+Any write must create a PlanV2 operation through the exact resolved capability,
+then pass `plans show`, separate approval, `plans run`, `plans status`, and
+capability-specific readback.
 
 The preview must enumerate the UI Worker, route, Access application and
 policies, bindings, and lifecycle rule as distinct deltas. Acknowledgment of an
@@ -60,7 +63,7 @@ Post-apply readback must prove:
 
 ## Closure condition
 
-This design note is superseded only when the canonical `cfctl maildesk-cf`
-schema, planner, apply path, and verifier model these fields and focused tests
+This design note is superseded only when canonical cfctl v2 capabilities,
+PlanV2 workflows, and readback model these fields and focused tests
 prove plan/apply/readback behavior. Until then, the UI/Access production plan is
 blocked rather than silently split across control planes.

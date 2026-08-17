@@ -153,7 +153,7 @@ bun run check:cfctl-provisioning
 bun run plan:dark
 bun run plan:maildesk-proofs -- --receipt var/maildesk-receipt.json
 bun run check:maildesk-closeout -- --env-file .dev.vars --summary var/maildesk-receipt-summary.json --redact-sensitive --json
-bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json --json
+bun run apply:maildesk-acks -- --manifest var/proof/maildesk-sender-domain-plan-manifest.local.json --json
 bun run send:maildesk-probes -- --from proof@example.com --json
 bun run preflight:template
 bash scripts/check-template.sh
@@ -188,10 +188,10 @@ boundary and trade-offs.
 desired-state, and optional live evidence. See
 [docs/operations/horizontal-verifier.md](docs/operations/horizontal-verifier.md).
 `bun run check:cfctl-provisioning` validates the public desired-state fixture
-against the `cfctl maildesk-cf` schema and emits the non-mutating
-plan/ack/verify handoff. It proves this checkout has a provisioning lane input;
-it does not install `cfctl`, supply account credentials, acknowledge a preview,
-or mutate Cloudflare.
+and emits the non-performing cfctl v2 discovery plus PlanV2 lifecycle handoff.
+It proves this checkout has a provisioning-lane input; it does not install
+`cfctl`, supply account credentials, approve a plan, run a plan, or mutate
+Cloudflare.
 `bun run plan:dark` emits the two-stage, source-hash-bound dark-deployment
 blueprint described in
 [docs/operations/dark-deployment.md](docs/operations/dark-deployment.md). It
@@ -199,8 +199,9 @@ does not create child operation IDs or perform any Cloudflare action.
 `bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
 workflow and writes the receipt artifacts under `var/`. Pass
 `--summary <path>` to persist the compact readiness handoff JSON. Pass
-`--ack-manifest <path> --require-ack-ready` when the receipt should also prove
-that every Cloudflare sender-domain blocker has an exact reviewed ack command.
+`--plan-manifest <path> --require-plan-ready` when the receipt should also prove
+that every Cloudflare sender-domain blocker has an exact reviewed PlanV2
+operation.
 `bun run collect:maildesk-evidence` builds that optional evidence file from
 available readbacks without mutating Cloudflare. Sender-domain readback follows
 the desired-state sender mode: Cloudflare Email Service uses `cfctl` evidence,
@@ -208,29 +209,26 @@ Resend uses Resend provider readback, and `disabled` skips outbound provider
 readback.
 `bun run plan:maildesk-proofs` turns receipt gaps into a minimal proof plan.
 `bun run check:maildesk-closeout` joins production preflight, the compact
-receipt summary, and sender-domain ack dry-run state into one non-mutating
+receipt summary, and sender-domain PlanV2 dry-run state into one non-mutating
 closeout gate. It exits non-zero until instance, edge, and mail readiness are
 actually proven. Pass `--env-file .dev.vars` when production-only values live
 in the ignored local env file instead of the shell environment. Pass
-`--refresh-acks` when the closeout should refresh the sender-domain ack
-manifest in `cfctl --plan` mode before dry-running it. Pass `--redact-sensitive`
+`--refresh-acks` when the closeout should refresh the sender-domain PlanV2
+manifest before dry-running it. Pass `--redact-sensitive`
 with `--json` for shareable summaries that keep counts and blocker kinds
-without printing sender domains or ack commands. Pass
-`--purge-duplicate-previews` after repeated `--refresh-acks` runs to clean up
-duplicate active local `cfctl` preview records after the new previews are
-captured. Pass `--purge-expired-previews` to remove expired local preview
-records when `cfctl doctor` reports preview-ledger drift. Closeout JSON also
+without printing sender domains or operation lifecycle commands. PlanV2 does
+not expose an ambient preview-cleanup lane; an unwanted draft is retired only
+through its exact reviewed operation ID. Closeout JSON also
 includes aggregate `protected_actions` counts, required confirmation flags, and
 sanitized `protected_command_handoff` argv arrays for the next sender-domain
 apply and live-probe handoffs.
-`bun run refresh:maildesk-acks` reruns Cloudflare Email Service sender-domain
-preview commands from that plan in `cfctl --plan` mode and writes an ack
-manifest without applying it. Resend sender-domain blockers do not produce
-Cloudflare ack commands.
-`bun run apply:maildesk-acks` dry-runs reviewed Cloudflare sender-domain ack
-commands by default and requires `--execute --confirm-ack-plan` before it
-applies any `cfctl --ack-plan` operation. Applying more than one selected ack
-operation also requires `--confirm-bulk-ack-plan`.
+`bun run refresh:maildesk-acks` resolves exact zones and creates Cloudflare
+Email Service sender-domain PlanV2 operations from typed proof-plan requests;
+it never approves or runs them. Resend sender-domain blockers do not produce
+Cloudflare plans. `bun run apply:maildesk-acks` dry-runs reviewed PlanV2
+lifecycles by default and requires `--execute --confirm-plan` before it invokes
+show/approve/run/status for one operation. More than one selected operation also
+requires `--confirm-bulk-plan`.
 `bun run send:maildesk-probes` dry-runs targeted inbound probes locally by
 default and requires `--execute --confirm-live-send --inbound-provider resend`
 before it sends mail through Resend. Its reply-API proof mode additionally
@@ -300,7 +298,7 @@ The first milestone is deliberately narrow:
 - Worker adapters;
 - Cargo-Leptos public site and operator routing-health console with explicit
   empty, loading, failure, provider, inbox-proof, and reply-proof states;
-- schema-backed `cfctl maildesk-cf` provisioning contract and local proof hook;
+- schema-backed cfctl v2 provisioning contract and local proof hook;
 - template hygiene check.
 
 Everything else should build on that foundation.

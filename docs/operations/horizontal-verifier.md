@@ -15,20 +15,20 @@ available, writes `var/maildesk-live-evidence.json`, writes
 short readiness summary. Add `--summary var/maildesk-receipt-summary.json` when
 that compact handoff should be persisted beside the full artifacts.
 
-When a reviewed sender-domain preview manifest exists, include it in the same
+When a reviewed sender-domain PlanV2 manifest exists, include it in the same
 receipt run:
 
 ```bash
 bun run receipt:maildesk -- \
-  --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
-  --require-ack-ready \
-  --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json
+  --plan-manifest var/proof/maildesk-sender-domain-plan-manifest.local.json \
+  --require-plan-ready \
+  --summary var/proof/maildesk-receipt-require-plan-ready-summary.local.json
 ```
 
 That remains a no-mutation workflow. It fails the receipt only when Cloudflare
-Email Service sender-domain blockers are missing exact ack commands. Resend
-sender-domain blockers are provider-readback blockers and do not have
-`cfctl --ack-plan` commands.
+Email Service sender-domain blockers are missing exact unexpired PlanV2
+operation IDs. Resend sender-domain blockers are provider-readback blockers and
+do not have Cloudflare plan operations.
 
 Run the closeout gate when the next question is whether the instance can be
 called done:
@@ -36,18 +36,16 @@ called done:
 ```bash
 bun run check:maildesk-closeout -- \
   --env-file .dev.vars \
-  --summary var/proof/maildesk-receipt-require-ack-ready-summary.local.json \
-  --ack-manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --summary var/proof/maildesk-receipt-require-plan-ready-summary.local.json \
+  --plan-manifest var/proof/maildesk-sender-domain-plan-manifest.local.json \
   --refresh-acks \
-  --purge-duplicate-previews \
-  --purge-expired-previews \
   --redact-sensitive \
   --json
 ```
 
 That command is non-mutating. It runs production preflight, reads the compact
-receipt summary, optionally refreshes the sender-domain ack manifest in
-`cfctl --plan` mode, dry-runs the reviewed sender-domain ack manifest, and
+receipt summary, optionally refreshes the sender-domain PlanV2 manifest, dry-runs
+the reviewed PlanV2 lifecycle, and
 exits non-zero until `instance-ready`, `edge-ready`, and `mail-ready` are all
 proven. Use `--env-file .dev.vars` when production-only values live in the
 ignored repo-local env file instead of the shell environment. Protected applies
@@ -58,64 +56,64 @@ The closeout JSON includes an aggregate `protected_actions` handoff. It records
 how many sender-domain applies, inbound probes, and outbound reply probes are
 waiting, whether the corresponding dry-run is ready, and which confirmation
 flags are required for the next protected command. This handoff is count-only;
-redacted output does not include domains, addresses, operation IDs, or
-`cfctl --ack-plan` commands.
+redacted output does not include domains, addresses, operation IDs, or raw
+approval/execution commands.
 
 The closeout JSON also includes `protected_command_handoff`, a sanitized set of
 argv arrays for the next protected command. Cloudflare sender-domain commands
-call `apply:maildesk-acks` with the reviewed manifest and default to
+call `apply:maildesk-acks` with the reviewed PlanV2 manifest and default to
 `--limit 1`. Probe commands call `send:maildesk-probes` with placeholder values
 such as `<probe-provider>`, `<verified-sender>`, `<maildesk-api-url>`,
 `<reply-api-token>`, and `<proof-recipient>` that must be replaced before any
 live send. The handoff does not include domains, addresses, operation IDs,
-tokens, or raw `cfctl --ack-plan` commands.
+tokens, or raw cfctl lifecycle commands.
 
-Use `--purge-duplicate-previews` when `--refresh-acks` has been run repeatedly.
-The cleanup is local `cfctl` preview-ledger hygiene: it removes duplicate active
-preview records after fresh previews are captured, without applying
-sender-domain changes.
-
-Use `--purge-expired-previews` when `cfctl doctor` reports expired preview
-records. The cleanup removes only expired local preview-ledger records; it does
-not apply sender-domain changes.
+PlanV2 has no ambient preview-cleanup lane. Retire a specific unwanted draft
+only by reviewing its exact operation ID and using the governed `plans cancel`
+lifecycle; the closeout gate never searches for or bulk-retires plans.
 
 Use `--redact-sensitive` for JSON that may be copied into an issue, PR, or
 status report. The redacted form preserves readiness, aggregate dry-run counts,
-and blocker kinds, but omits per-domain sender-domain ack details and
-`cfctl --ack-plan` commands.
+and blocker kinds, but omits per-domain sender-domain plan details and raw
+cfctl lifecycle commands.
 
 To refresh that manifest from the current proof plan without applying anything:
 
 ```bash
 bun run refresh:maildesk-acks -- \
   --plan var/maildesk-proof-plan.json \
-  --out var/proof/maildesk-sender-domain-ack-manifest.local.json
+  --out var/proof/maildesk-sender-domain-plan-manifest.local.json \
+  --profile "$MAILDESK_CFCTL_PROFILE"
 ```
 
-The refresher executes only the Cloudflare
-`cfctl apply sender_domain enable ... --plan` commands already present in the
-proof plan, stores the preview receipts, and constructs protected `--ack-plan`
-commands for review. A Resend sender-domain blocker will not appear in this
-manifest; repair it in Resend and recollect provider readback instead.
+The refresher accepts only typed sender-domain plan requests from the proof
+plan. It resolves the exact profile account, reads one active zone ID through
+`zones-get`, and creates a capability-bound PlanV2 operation with
+`performed:false`. The manifest retains `result.plan_v2.content_hash` and the
+exact profile, account, zone selector, capability, and request-body pins. The
+executor requires `plans show` to reproduce those PlanV2 bytes before approval;
+it does not expect the show command to repeat the creation envelope's evidence.
+A Resend sender-domain blocker will not appear in this manifest; repair it in
+Resend and recollect provider readback instead.
 
 Dry-run the reviewed sender-domain apply handoff before any protected apply:
 
 ```bash
 bun run apply:maildesk-acks -- \
-  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --manifest var/proof/maildesk-sender-domain-plan-manifest.local.json \
   --json
 ```
 
-Applying sender-domain ack commands is a protected action. It requires both
-`--execute` and `--confirm-ack-plan`, and it defaults to one apply at a time
-unless `--all` or a larger `--limit` is passed. Applying more than one selected
-ack operation also requires `--confirm-bulk-ack-plan`:
+Executing a sender-domain PlanV2 operation is a protected action. It requires
+both `--execute` and `--confirm-plan`, and it defaults to one operation at a
+time unless `--all` or a larger `--limit` is passed. Executing more than one
+selected operation also requires `--confirm-bulk-plan`:
 
 ```bash
 bun run apply:maildesk-acks -- \
-  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --manifest var/proof/maildesk-sender-domain-plan-manifest.local.json \
   --execute \
-  --confirm-ack-plan \
+  --confirm-plan \
   --limit 1
 ```
 
@@ -124,10 +122,10 @@ reviewing the selected manifest entries:
 
 ```bash
 bun run apply:maildesk-acks -- \
-  --manifest var/proof/maildesk-sender-domain-ack-manifest.local.json \
+  --manifest var/proof/maildesk-sender-domain-plan-manifest.local.json \
   --execute \
-  --confirm-ack-plan \
-  --confirm-bulk-ack-plan \
+  --confirm-plan \
+  --confirm-bulk-plan \
   --limit 2
 ```
 
@@ -226,8 +224,8 @@ remain available through the configured Wrangler read lane. Sender-domain
 readback follows desired-state `sender.mode`: `cloudflare_email_service` uses
 the governed sending-subdomain capability, `resend` uses the Resend CLI when
 available, and `disabled` skips outbound sender-provider readback. The collector
-never invokes legacy `cfctl list ...` or `cfctl maildesk-cf verify` text, sends
-mail, selects a global profile, or mutates Cloudflare.
+uses only explicit v2 capability calls, sends no mail, selects no ambient
+profile, and performs no Cloudflare mutation.
 
 Plan the remaining proof work from a receipt:
 
@@ -346,16 +344,15 @@ the proof records a provider name.
 `bun run plan:maildesk-proofs` turns `mail_ready` gaps into the next safe
 operator action. Cloudflare Email Service sender-domain readiness gaps remain
 blocked actions because they require Cloudflare mutation, and the JSON plan
-includes the `cfctl` preview command, protected `--ack-plan` command template,
-and follow-up verify command so a reviewed handoff can stay inside the
-control-plane flow. Resend sender-domain readiness gaps remain blocked until
-Resend readback reports the domain as verified; they do not create Cloudflare
-ack commands. `disabled` mode does not create sender-domain repair work.
-When a reviewed preview receipt has already been built, pass it with
-`--ack-manifest <path>` to copy exact, unexpired Cloudflare sender-domain
-`ack_command` values into the proof plan without applying them.
-Add `--require-ack-ready` when the handoff should fail unless every Cloudflare
-sender-domain blocker has an exact operation id and ack command.
+includes a typed create-sending-subdomain request and a capability-specific
+verify request. Resend sender-domain readiness gaps remain blocked until Resend
+readback reports the domain as verified; they do not create Cloudflare plans.
+`disabled` mode does not create sender-domain repair work. When a reviewed plan
+receipt has already been built, pass it with `--plan-manifest <path>` to bind
+exact, unexpired operation IDs and lifecycle argv arrays into the proof plan
+without approving or running them. Add `--require-plan-ready` when the handoff
+should fail unless every Cloudflare sender-domain blocker has an exact PlanV2
+operation.
 
 Email Routing evidence may include more rules than the policy requires. The
 verifier checks that every expected alias is present and tolerates extra

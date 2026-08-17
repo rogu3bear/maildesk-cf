@@ -13,7 +13,7 @@ describe("maildesk receipt workflow", () => {
     const policyPath = join(dir, "policy.json");
     const desiredPath = join(dir, "desired-state.json");
     const evidencePath = join(dir, "evidence.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const receiptPath = join(dir, "receipt.json");
     const planPath = join(dir, "proof-plan.json");
     const summaryPath = join(dir, "receipt-summary.json");
@@ -101,14 +101,7 @@ describe("maildesk receipt workflow", () => {
     });
     writeJson(manifestPath, {
       items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "20260701T000000Z-00000-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
-        },
+        planManifestItem("tenant.example.com", "20260701T000000Z-00000-tenant"),
       ],
     });
 
@@ -125,9 +118,9 @@ describe("maildesk receipt workflow", () => {
         desiredPath,
         "--evidence",
         evidencePath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
-        "--require-ack-ready",
+        "--require-plan-ready",
         "--receipt",
         receiptPath,
         "--plan",
@@ -145,49 +138,73 @@ describe("maildesk receipt workflow", () => {
     expect(result.status).toBe(0);
     const summary = JSON.parse(result.stdout) as {
       sender_domain_blocked_count?: number;
-      sender_domain_ack_ready_count?: number;
-      sender_domain_ack_missing_count?: number;
+      sender_domain_plan_ready_count?: number;
+      sender_domain_plan_missing_count?: number;
     };
     expect(summary).toMatchObject({
       summary_path: summaryPath,
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
 
     const writtenSummary = JSON.parse(readFileSync(summaryPath, "utf8")) as {
       summary_path?: string;
       sender_domain_blocked_count?: number;
-      sender_domain_ack_ready_count?: number;
-      sender_domain_ack_missing_count?: number;
+      sender_domain_plan_ready_count?: number;
+      sender_domain_plan_missing_count?: number;
     };
     expect(writtenSummary).toMatchObject({
       summary_path: summaryPath,
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
 
     const plan = JSON.parse(readFileSync(planPath, "utf8")) as {
       summary: {
         sender_domain_blocked_count?: number;
-        sender_domain_ack_ready_count?: number;
-        sender_domain_ack_missing_count?: number;
+        sender_domain_plan_ready_count?: number;
+        sender_domain_plan_missing_count?: number;
       };
-      actions: Array<{ ack_command?: string; operation_id?: string }>;
+      actions: Array<{ lifecycle?: Record<string, string[]>; operation_id?: string }>;
     };
     expect(plan.summary).toMatchObject({
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
     expect(plan.actions.find((action) => action.operation_id)).toMatchObject({
       operation_id: "20260701T000000Z-00000-tenant",
-      ack_command:
-        "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan 20260701T000000Z-00000-tenant",
+      lifecycle: {
+        run: [
+          "cfctl",
+          "plans",
+          "run",
+          "20260701T000000Z-00000-tenant",
+          "--json",
+        ],
+      },
     });
   });
 });
+
+function planManifestItem(target: string, operationId: string) {
+  return {
+    schema_version: 2,
+    ok: true,
+    performed: false,
+    capability_id: "email-sending-subdomains-create-sending-subdomain",
+    profile_id: "profile-example",
+    account_id: "account-example",
+    zone_id: `zone-${target}`,
+    target,
+    operation_id: operationId,
+    plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    plan_expires_at: "2099-01-01T00:00:00Z",
+  };
+}
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);

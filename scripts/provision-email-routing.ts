@@ -1,24 +1,21 @@
 // scripts/provision-email-routing.ts — governed inbound Email Routing provisioning.
 //
 // A state RECONCILER over cfctl's governed lane, not an imperative script:
-//   read observed state -> compute desired -> diff -> preflight -> apply delta
-//   (draft -> approve -> run) -> verify -> report residual.
-// Idempotent and resumable. Every Cloudflare mutation flows through cfctl
-// (repo doctrine: "Do not mutate Cloudflare outside cfctl").
+//   read observed state -> compute desired -> diff -> report bounded PlanV2
+//   requests. This script never approves or runs a Cloudflare mutation.
 //
 // Inbound aliases route to the Rust `relay_router` Worker (action type `worker`),
 // which needs no verified destination address — matching the architecture where
 // the Rust router owns policy. See docs/architecture/email-routing-provisioning.md.
 //
 // Usage:
-//   bun run scripts/provision-email-routing.ts [--plan|--apply] \
-//     [--desired-state <path>] [--domain <name>] [--lane <cf-token-lane>] \
-//     [--cfctl <bin>] [--json]
+//   MAILDESK_CFCTL_PROFILE=<profile> \
+//   bun run scripts/provision-email-routing.ts [--plan] \
+//     [--desired-state <path>] [--domain <name>] [--cfctl <bin>] [--json]
 //
-// --plan (default) reads + diffs + preflights, drafts NOTHING. --apply drafts,
-// approves (--yes), and runs each delta. The provisioning token/lane must hold
-// `Email Routing Rules Write` + `Zone Settings Write` (see AGENTS.md / cfctl
-// `keys mint --zone`).
+// --plan (default) reads + diffs + preflights and drafts NOTHING. The former
+// direct --apply mode is rejected; each delta must enter the separately reviewed
+// capability call -> plans show -> approve -> run -> status lifecycle.
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -45,11 +42,20 @@ const CF_EMAIL_ROUTING_MX = ["mx.cloudflare.net", "route1.mx.cloudflare.net", "r
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
-const apply = args.includes("--apply"); // default is --plan (dry, no mutation)
-const lane = argValue("--lane") ?? process.env.CF_TOKEN_LANE;
 const cfctlBin = argValue("--cfctl") ?? process.env.CFCTL_BIN ?? "cfctl";
+const profileId = argValue("--profile") ?? process.env.MAILDESK_CFCTL_PROFILE?.trim();
 const domainFilter = argValue("--domain");
 const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDesiredStatePath());
+
+if (args.includes("--apply")) {
+  console.error("direct --apply mode is retired; create and review one PlanV2 operation per delta");
+  process.exit(1);
+}
+if (!profileId) {
+  console.error("missing explicit cfctl profile: set MAILDESK_CFCTL_PROFILE or pass --profile");
+  process.exit(1);
+}
+const accountId = resolveProfileAccount(profileId);
 
 const state = readDesiredState(desiredStatePath);
 const workerScript = state.workers?.relay_router?.script_name;
@@ -67,9 +73,10 @@ const skippedNonCf = state.domains
 const domainResults = targets.map(reconcileDomain);
 
 const summary = {
-  mode: apply ? "apply" : "plan",
+  mode: "plan",
   desired_state: relativePath(desiredStatePath),
-  lane: lane ?? null,
+  profile_bound: true,
+  account_bound: true,
   worker_script: workerScript ?? null,
   requested_domain: domainFilter ?? null,
   skipped_non_cloudflare: skippedNonCf,
@@ -180,21 +187,17 @@ function reconcileDomain(domain: DesiredDomain) {
 
   if (deltas.length === 0) {
     // Nothing to do — fully converged (or blocked by an unreadable observation).
-  } else if (!apply) {
-    for (const d of deltas) pending.push({ item: d.item, reason: "plan-only (run with --apply to mutate)" });
   } else {
-    // ---- Apply (edge cases 6, 7, 8) ----
-    for (const delta of deltas) {
-      const outcome = applyGoverned(zoneId, delta, workerScript);
-      if (outcome.status === "applied") applied.push({ item: delta.item, operation_id: outcome.operation_id });
-      else if (outcome.status === "pending") pending.push({ item: delta.item, reason: outcome.reason });
-      else failed.push({ item: delta.item, reason: outcome.reason }); // continue, do not abort the batch
+    for (const d of deltas) {
+      pending.push({
+        item: d.item,
+        reason: `PlanV2 required for capability ${d.capability}; resolve, inspect, and create one exact plan`,
+      });
     }
   }
 
   // ---- Verify (re-read; report setting vs delivery honestly) ----
-  const post = apply ? cfctlRead("email-routing-settings-get-email-routing-settings", { zone_id: zoneId }) : settings;
-  const routingEnabled = post.ok ? Boolean(post.result?.enabled) : observedEnabled;
+  const routingEnabled = settings.ok ? Boolean(settings.result?.enabled) : observedEnabled;
 
   return {
     domain: domain.name,
@@ -213,7 +216,12 @@ function reconcileDomain(domain: DesiredDomain) {
 // Edge case 4: exactly-one-active-zone, or an explicit per-domain pin.
 function resolveZone(domain: DesiredDomain): { zone_id?: string; error?: string } {
   if (domain.zone_id) return { zone_id: domain.zone_id };
-  const res = cfctlRead("zones-get", {}, { name: domain.name });
+  const res = cfctlRead("zones-get", {}, {
+    name: domain.name,
+    "account.id": accountId,
+    page: "1",
+    per_page: "5",
+  });
   if (!res.ok) return { error: `zone lookup failed for ${domain.name}: ${res.error ?? "cfctl error"}` };
   const zones = (Array.isArray(res.result) ? res.result : []).filter(
     (z: { name?: string; status?: string }) => z.name === domain.name && z.status === "active",
@@ -221,34 +229,6 @@ function resolveZone(domain: DesiredDomain): { zone_id?: string; error?: string 
   if (zones.length === 0) return { error: `no active zone named ${domain.name} in the account (is it added to Cloudflare?)` };
   if (zones.length > 1) return { error: `ambiguous: ${zones.length} active zones named ${domain.name}; pin zone_id in desired-state` };
   return { zone_id: (zones[0] as { id: string }).id };
-}
-
-// Governed apply of one delta: draft -> approve -> run, with a single drift
-// retry (edge case 7) and per-item failure isolation (edge case 8).
-function applyGoverned(zoneId: string, delta: Delta, worker: string | undefined, retry = true): ApplyOutcome {
-  const draft = cfctlCall(["call", delta.capability, "--selector", `zone_id=${zoneId}`, ...bodyArgs(delta.body)]);
-  if (!draft.ok || !draft.envelope.operation_id) {
-    return { status: "failed", reason: `draft failed: ${draft.error ?? errText(draft.envelope)}` };
-  }
-  const op = draft.envelope.operation_id;
-  const approve = cfctlCall(["plans", "approve", op, "--yes"]);
-  if (!approve.ok) return { status: "failed", reason: `approve failed: ${approve.error ?? errText(approve.envelope)}` };
-  const run = cfctlCall(["plans", "run", op]);
-  if (run.ok && run.envelope.performed) return { status: "applied", operation_id: op };
-
-  const msg = (run.error ?? errText(run.envelope) ?? "").toString();
-  // Edge case 7: drift between draft and run -> re-diff/re-draft once.
-  if (retry && /drift|Base branch was modified|precondition/i.test(msg)) {
-    return applyGoverned(zoneId, delta, worker, false);
-  }
-  // Edge case 3/9: worker-missing or auth are actionable, not silent.
-  if (/worker|script/i.test(msg) && delta.capability.includes("rules")) {
-    return { status: "failed", reason: `rule rejected — is the Worker "${worker}" deployed? (${msg})` };
-  }
-  if (/401|403|permission|token/i.test(msg)) {
-    return { status: "failed", reason: `authorization — lane needs Email Routing Rules Write + Zone Settings Write (${msg})` };
-  }
-  return { status: "failed", reason: `run failed: ${msg}` };
 }
 
 // A per-alias literal rule routing to the relay_router Worker (edge case 5).
@@ -286,15 +266,22 @@ function readMx(zoneId: string): { records: string[] } {
 function cfctlRead(capability: string, selectors: Record<string, string>, query?: Record<string, string>): CfctlResult {
   const sel = Object.entries(selectors).flatMap(([k, v]) => ["--selector", `${k}=${v}`]);
   const q = Object.entries(query ?? {}).flatMap(([k, v]) => ["--query", `${k}=${v}`]);
-  const r = cfctlCall(["call", capability, ...sel, ...q]);
-  return { ok: r.ok && r.envelope.ok !== false, result: r.envelope.result, error: r.error };
+  const r = cfctlCall(capability, ["call", capability, ...sel, ...q]);
+  return { ok: r.ok, result: resultPayload(r.envelope.result), error: r.error };
 }
 
-function cfctlCall(subArgs: string[]): { ok: boolean; envelope: CfctlEnvelope; error?: string } {
-  const result = spawnSync(cfctlBin, [...subArgs, "--json"], {
+function cfctlCall(capability: string, subArgs: string[]): { ok: boolean; envelope: CfctlEnvelope; error?: string } {
+  const result = spawnSync(cfctlBin, [
+    ...subArgs,
+    "--profile",
+    profileId,
+    "--account",
+    accountId,
+    "--json",
+  ], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, ...(lane ? { CF_TOKEN_LANE: lane } : {}) },
+    env: process.env,
   });
   if (result.error) return { ok: false, envelope: {}, error: String(result.error) };
   let envelope: CfctlEnvelope = {};
@@ -303,11 +290,63 @@ function cfctlCall(subArgs: string[]): { ok: boolean; envelope: CfctlEnvelope; e
   } catch {
     return { ok: false, envelope: {}, error: `non-JSON cfctl output: ${(result.stdout || result.stderr || "").slice(0, 200)}` };
   }
-  return { ok: result.status === 0 && envelope.ok !== false, envelope };
+  const hashes = (envelope.evidence ?? [])
+    .map((entry) => entry.content_hash)
+    .filter((value): value is string =>
+      typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value)
+    );
+  const ok = result.status === 0 &&
+    envelope.schema_version === 2 &&
+    envelope.ok === true &&
+    envelope.performed === true &&
+    envelope.capability_id === capability &&
+    envelope.profile_id === profileId &&
+    envelope.account_id === accountId &&
+    !envelope.error &&
+    hashes.length > 0;
+  return { ok, envelope, ...(ok ? {} : { error: errText(envelope) ?? "ResultEnvelopeV2 binding mismatch" }) };
 }
 
-function bodyArgs(body: unknown): string[] {
-  return body === undefined ? [] : ["--body-json", JSON.stringify(body)];
+function resolveProfileAccount(profile: string): string {
+  const result = spawnSync(cfctlBin, ["auth", "profiles", "--json"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  const envelope = parseEnvelope(result.stdout);
+  if (
+    result.status !== 0 ||
+    envelope.schema_version !== 2 ||
+    envelope.ok !== true ||
+    envelope.performed !== false ||
+    envelope.error
+  ) {
+    console.error("cfctl profile envelope is not a valid non-performing v2 result");
+    process.exit(1);
+  }
+  const resultObject = isRecord(envelope.result) ? envelope.result : {};
+  const profiles = Array.isArray(resultObject.profiles) ? resultObject.profiles.filter(isRecord) : [];
+  const selected = profiles.find((entry) => entry.id === profile);
+  if (typeof selected?.account_id !== "string" || selected.account_id.length === 0) {
+    console.error("explicit cfctl profile is not bound to an account");
+    process.exit(1);
+  }
+  return selected.account_id;
+}
+
+function parseEnvelope(value: string): CfctlEnvelope {
+  try {
+    return JSON.parse(value || "{}") as CfctlEnvelope;
+  } catch {
+    return {};
+  }
+}
+
+function resultPayload(value: unknown): unknown {
+  return isRecord(value) && "result" in value ? value.result : value;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function errText(env: CfctlEnvelope | undefined): string | undefined {
@@ -364,10 +403,15 @@ interface Delta {
 }
 
 interface CfctlEnvelope {
+  schema_version?: number;
   ok?: boolean;
   performed?: boolean;
+  capability_id?: string | null;
   operation_id?: string;
-  result?: { enabled?: boolean; errors?: unknown } & Record<string, unknown> & unknown[];
+  profile_id?: string | null;
+  account_id?: string | null;
+  evidence?: Array<{ content_hash?: string }>;
+  result?: unknown;
   error?: unknown;
 }
 
@@ -376,8 +420,3 @@ interface CfctlResult {
   result?: any;
   error?: string;
 }
-
-type ApplyOutcome =
-  | { status: "applied"; operation_id: string }
-  | { status: "pending"; reason: string }
-  | { status: "failed"; reason: string };

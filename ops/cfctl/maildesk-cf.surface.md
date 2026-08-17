@@ -6,11 +6,11 @@ the remaining component surfaces that a production instance may need.
 ## Commands
 
 ```bash
-cfctl maildesk-cf init --domain example.com
-cfctl maildesk-cf verify --file config/desired-state.example.json
-cfctl maildesk-cf diff --file config/desired-state.example.json
-cfctl maildesk-cf provision --file config/desired-state.example.json --plan
-cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read Maildesk current state for config/desired-state.example.json without mutation" --json
+cfctl resolve "plan one Maildesk desired-state delta for config/desired-state.example.json without applying it" --json
 ```
 
 ## Inputs
@@ -86,19 +86,20 @@ The repo-local proof hook is:
 bun run check:cfctl-provisioning
 ```
 
-It validates the desired-state file and prints the lifecycle handoff. It does
-not call live `cfctl`, acknowledge previews, or mutate Cloudflare.
+It validates the desired-state file and emits the typed v2 discovery and PlanV2
+lifecycle handoff. It does not call live `cfctl`, approve plans, run plans, or
+mutate Cloudflare.
 
 ## Outputs
 
-- preview artifact;
-- applied operation receipt;
+- PlanV2 preview artifact;
+- operation status and post-change receipt;
 - resource inventory snapshot;
 - verification report.
 
 ## Plan/Verify Invariants
 
-- no apply without a plan and acknowledged operation id;
+- no execution without an exact PlanV2 operation and separate approval;
 - no broad live email tests by default;
 - no secret values in receipts;
 - explicit drift status per domain and binding;
@@ -107,21 +108,33 @@ not call live `cfctl`, acknowledge previews, or mutate Cloudflare.
 
 ## Rule
 
-Use `cfctl maildesk-cf` for lifecycle readback and planning. When the plan
-emits component operations, use the named primitive `cfctl` surface for the
-actual preview/ack flow rather than bypassing `cfctl`.
+Use `cfctl resolve`, `catalog show`, and `guide` to select each capability. Live
+reads and plans must use explicit profile/account bindings and exact selectors;
+never substitute ambient command interpretation.
 
 Sender provider mode must be one of `disabled`, `cloudflare_email_service`, or
 `resend`, matching the runtime `MAILDESK_OUTBOUND_MODE` values.
 
 Current component surfaces include Email Routing rules and Cloudflare Email
-Service sender domains. Cloudflare sender-domain authentication is previewed
-through:
+Service sender domains. The sender-domain planner emits a typed request for
+`email-sending-subdomains-create-sending-subdomain`; the private refresher binds
+the exact profile, account, and active zone before running:
 
 ```bash
-cfctl apply sender_domain enable --zone example.com --name example.com --plan
+printf '%s\n' '{"name":"example.com"}' | \
+  cfctl call email-sending-subdomains-create-sending-subdomain \
+  --selector zone_id="$MAILDESK_ZONE_ID" \
+  --profile "$MAILDESK_CFCTL_PROFILE" \
+  --account "$CLOUDFLARE_ACCOUNT_ID" \
+  --body-stdin --json
 ```
 
-Cloudflare writes still require a reviewed preview receipt and explicit
-`--ack-plan <operation-id>`. Resend sender-domain verification is provider
-readback, not a `cfctl sender_domain` write.
+That call creates a plan and must report `performed:false`. Cloudflare writes
+still require `plans show`, separate approval, `plans run`, `plans status`, and
+capability-specific verification. Resend sender-domain verification is provider
+readback, not a Cloudflare write.
+
+Bind review continuity to `result.plan_v2.content_hash` plus the nested
+operation, capability, profile, account, selector, and body fields. `plans show`
+returns the stored PlanV2; it is not required to repeat the creation command's
+outer evidence array.

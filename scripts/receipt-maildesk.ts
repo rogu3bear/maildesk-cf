@@ -20,8 +20,8 @@ interface ProofPlan {
     outbound_reply_probe_count?: number;
     blocked_count?: number;
     sender_domain_blocked_count?: number;
-    sender_domain_ack_ready_count?: number;
-    sender_domain_ack_missing_count?: number;
+    sender_domain_plan_ready_count?: number;
+    sender_domain_plan_missing_count?: number;
   };
 }
 
@@ -29,7 +29,7 @@ const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
 const requireLive = args.includes("--require-live");
-const requireAckReady = args.includes("--require-ack-ready");
+const requirePlanReady = args.includes("--require-plan-ready");
 const skipCollect = args.includes("--skip-collect");
 const explicitEvidencePath = Boolean(argValue("--evidence"));
 const evidencePath = argValue("--evidence") ?? "var/maildesk-live-evidence.json";
@@ -69,8 +69,8 @@ const planArgs = [
   receiptPath,
   "--json",
   ...forwardValue("--policy"),
-  ...forwardValue("--ack-manifest"),
-  ...(requireAckReady ? ["--require-ack-ready"] : []),
+  ...forwardValue("--plan-manifest"),
+  ...(requirePlanReady ? ["--require-plan-ready"] : []),
 ];
 const planResult = runCaptured("plan mail proof gaps", ["run", "scripts/plan-mail-proofs.ts", "--", ...planArgs]);
 const proofPlan = parseJson<ProofPlan>(planResult.stdout, "plan mail proof gaps");
@@ -95,8 +95,8 @@ const summary = {
   targeted_outbound_reply_probes: proofPlan.summary?.outbound_reply_probe_count ?? 0,
   blocked_proofs: proofPlan.summary?.blocked_count ?? 0,
   sender_domain_blocked_count: proofPlan.summary?.sender_domain_blocked_count ?? 0,
-  sender_domain_ack_ready_count: proofPlan.summary?.sender_domain_ack_ready_count ?? 0,
-  sender_domain_ack_missing_count: proofPlan.summary?.sender_domain_ack_missing_count ?? 0,
+  sender_domain_plan_ready_count: proofPlan.summary?.sender_domain_plan_ready_count ?? 0,
+  sender_domain_plan_missing_count: proofPlan.summary?.sender_domain_plan_missing_count ?? 0,
 };
 
 if (summaryPath) {
@@ -121,7 +121,7 @@ if (jsonOutput) {
     `proof_actions total=${summary.proof_actions} inbound=${summary.targeted_inbound_probes} outbound=${summary.targeted_outbound_reply_probes} blocked=${summary.blocked_proofs}`,
   );
   console.log(
-    `sender_domain_ack_ready ${summary.sender_domain_ack_ready_count}/${summary.sender_domain_blocked_count}`,
+    `sender_domain_plan_ready ${summary.sender_domain_plan_ready_count}/${summary.sender_domain_blocked_count}`,
   );
 }
 

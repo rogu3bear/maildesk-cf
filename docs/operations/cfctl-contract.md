@@ -3,19 +3,20 @@
 `cfctl` is a required operational dependency for `maildesk-cf`.
 
 The app may ship placeholders and local development config, but production
-provisioning must flow through `cfctl` so account state has previews, acks, and
+provisioning must flow through `cfctl` so account state has hash-bound plans and
 verification receipts.
 
 ## Current Surface
 
-The first-class lifecycle surface in `cfctl` is file-driven:
+The current cfctl v2 surface is capability-driven. Begin with non-performing
+health and resolution commands:
 
 ```bash
-cfctl maildesk-cf init --domain example.com
-cfctl maildesk-cf verify --file config/desired-state.example.json
-cfctl maildesk-cf diff --file config/desired-state.example.json
-cfctl maildesk-cf provision --file config/desired-state.example.json --plan
-cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read Maildesk current state for config/desired-state.example.json without mutation" --json
+cfctl resolve "plan one Maildesk desired-state delta for config/desired-state.example.json without applying it" --json
 ```
 
 The surface consumes a desired-state file generated from the same policy shape
@@ -32,9 +33,9 @@ input locally:
 bun run check:cfctl-provisioning
 ```
 
-That hook validates the desired-state file and prints the `cfctl doctor`,
-`diff`, `provision --plan`, `provision --ack-plan`, and `verify` handoff. It is
-non-mutating and does not replace `cfctl` live readback.
+That hook validates the desired-state file and emits a typed v2 discovery and
+PlanV2 lifecycle handoff. It is non-mutating and does not replace `cfctl` live
+readback.
 
 ## Resources To Own
 
@@ -76,7 +77,7 @@ Verification should avoid broad live sends. Prefer:
 
 The app-side command `bun run verify:maildesk` consumes the same desired-state
 and policy shape and can consume a live evidence file. Treat it as the local
-receipt format that complements `cfctl maildesk-cf verify` live readback.
+receipt format that complements capability-specific `cfctl call` live readback.
 
 Verification output should distinguish:
 
@@ -90,22 +91,27 @@ Verification output should distinguish:
 
 ## Current State
 
-This repo contains the app-side contract and placeholders. The control-plane
-repo now exposes a first-class `maildesk-cf` lifecycle surface, and component
-plans may point at primitive `cfctl` surfaces such as `email.routing_rule` and
-`sender_domain` for Cloudflare Email Service preview-gated writes. Resend
-sender-domain setup remains provider-side readback and should not be converted
-into a Cloudflare `sender_domain --ack-plan`. Do not run `--ack-plan` until the
-operator has reviewed the preview receipt and explicitly chosen to mutate
-Cloudflare.
+This repo contains the app-side desired-state contract and placeholders. The
+control plane resolves each bounded intent to an explicit capability. Mutating
+`cfctl call` operations create PlanV2 records; they do not apply Cloudflare
+changes. Review the immutable operation with `cfctl plans show`, then use the
+separate approve/run/status lifecycle only after explicit authorization.
+Resend sender-domain setup remains provider-side readback and is never converted
+into a Cloudflare mutation.
+
+The reviewed continuity anchor is `result.plan_v2.content_hash`. Persist that
+hash with the exact operation, profile, account, selectors, and request body.
+Before approval, `cfctl plans show` must return the same PlanV2 content hash and
+the same nested input pins. Outer envelope evidence belongs to the command that
+emitted it and is not a substitute for the stored PlanV2 hash.
 
 What remains outside this checkout:
 
-- install or update `cfctl` with the `maildesk-cf` lifecycle surface;
+- install or update `cfctl` with the required v2 catalog capabilities;
 - copy `config/desired-state.example.json` to an ignored local file with a real
   account and domain;
-- run `cfctl doctor` with a healthy credential lane;
-- review a real `cfctl maildesk-cf provision --plan` receipt and supply its
-  operation id before `--ack-plan`;
-- run targeted `cfctl maildesk-cf verify` and mail proof readbacks after
-  mutation.
+- run version, doctor, and agents-doctor health checks;
+- resolve the bounded intent and bind every live call to an explicit profile,
+  account, capability, and exact selectors;
+- review the immutable PlanV2 operation before approval and execution;
+- run capability-specific readback and targeted mail proof after mutation.

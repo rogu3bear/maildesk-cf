@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import {
+  planLifecycle,
+  senderDomainPlanManifestItem,
+  senderDomainPlanRequest,
+  senderDomainVerifyRequest,
+  type PlanLifecycle,
+  type SenderDomainPlanRequest,
+  type SenderDomainVerifyRequest,
+} from "./cfctl-v2-command-contract";
 
 interface Receipt {
   rows: DomainRow[];
@@ -50,7 +59,7 @@ type Status = "ok" | "drift" | "missing" | "not_checked";
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
-const requireAckReady = args.includes("--require-ack-ready");
+const requirePlanReady = args.includes("--require-plan-ready");
 const receiptPath = argValue("--receipt");
 if (!receiptPath) {
   console.error("missing --receipt <path>");
@@ -60,9 +69,9 @@ if (!receiptPath) {
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const receipt = readJson<Receipt>(resolve(root, receiptPath));
 const policy = readJson<PolicyFile>(policyPath);
-const ackManifest = loadAckManifest(argValue("--ack-manifest"));
+const planManifest = loadPlanManifest(argValue("--plan-manifest"));
 const actions = buildActions(receipt, policy);
-const senderDomainAck = senderDomainAckSummary(actions);
+const senderDomainPlans = senderDomainPlanSummary(actions);
 const plan = {
   generated_at: new Date().toISOString(),
   receipt_path: relativePath(resolve(root, receiptPath)),
@@ -72,9 +81,9 @@ const plan = {
     inbound_probe_count: actions.filter((action) => action.kind === "targeted_inbound_probe").length,
     outbound_reply_probe_count: actions.filter((action) => action.kind === "targeted_outbound_reply_probe").length,
     blocked_count: actions.filter((action) => action.kind === "blocked").length,
-    sender_domain_blocked_count: senderDomainAck.blocked,
-    sender_domain_ack_ready_count: senderDomainAck.ready,
-    sender_domain_ack_missing_count: senderDomainAck.missing,
+    sender_domain_blocked_count: senderDomainPlans.blocked,
+    sender_domain_plan_ready_count: senderDomainPlans.ready,
+    sender_domain_plan_missing_count: senderDomainPlans.missing,
   },
   actions,
 };
@@ -91,13 +100,13 @@ if (jsonOutput) {
   console.log(`targeted_outbound_reply_probes ${plan.summary.outbound_reply_probe_count}`);
   console.log(`blocked ${plan.summary.blocked_count}`);
   console.log(
-    `sender_domain_ack_ready ${plan.summary.sender_domain_ack_ready_count}/${plan.summary.sender_domain_blocked_count}`,
+    `sender_domain_plan_ready ${plan.summary.sender_domain_plan_ready_count}/${plan.summary.sender_domain_blocked_count}`,
   );
 }
 
-if (requireAckReady && senderDomainAck.missing > 0) {
+if (requirePlanReady && senderDomainPlans.missing > 0) {
   console.error(
-    `sender-domain ack commands are not ready: missing ${senderDomainAck.missing} of ${senderDomainAck.blocked}`,
+    `sender-domain PlanV2 operations are not ready: missing ${senderDomainPlans.missing} of ${senderDomainPlans.blocked}`,
   );
   process.exit(1);
 }
@@ -194,7 +203,7 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
   return actions;
 }
 
-function senderDomainAckSummary(actions: ProofAction[]): SenderDomainAckSummary {
+function senderDomainPlanSummary(actions: ProofAction[]): SenderDomainPlanSummary {
   const blocked = actions.filter(
     (action) => action.kind === "blocked" && action.blocked_by === "sender_domain_not_verified",
   );
@@ -202,8 +211,7 @@ function senderDomainAckSummary(actions: ProofAction[]): SenderDomainAckSummary 
     (action) =>
       typeof action.operation_id === "string" &&
       action.operation_id.length > 0 &&
-      typeof action.ack_command === "string" &&
-      action.ack_command.length > 0,
+      Boolean(action.lifecycle),
   );
   return {
     blocked: blocked.length,
@@ -237,18 +245,16 @@ function isReservedExampleDomain(domain: string): boolean {
 }
 
 function senderDomainRepairCommands(domain: string): SenderDomainRepairCommands {
-  const base = `CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone ${domain} --name ${domain}`;
-  const ackPreview = ackManifest.get(domain);
+  const preparedPlan = planManifest.get(domain);
   return {
-    preview_command: `${base} --plan`,
-    ack_command_template: `${base} --ack-plan <operation-id>`,
-    ...(ackPreview
+    plan_request: senderDomainPlanRequest(domain),
+    verify_request: senderDomainVerifyRequest(domain),
+    ...(preparedPlan
       ? {
-          operation_id: ackPreview.operation_id,
-          ack_command: ackPreview.ack_command,
+          operation_id: preparedPlan.operation_id,
+          lifecycle: planLifecycle(preparedPlan.operation_id),
         }
       : {}),
-    verify_command: "cfctl maildesk-cf verify --file config/desired-state.local.json",
   };
 }
 
@@ -283,50 +289,26 @@ function rowSenderMode(row: DomainRow): SenderMode {
   return isSenderMode(provider) ? provider : senderModeOrDefault(provider);
 }
 
-function loadAckManifest(path: string | undefined): Map<string, AckManifestEntry> {
+function loadPlanManifest(path: string | undefined): Map<string, PlanManifestEntry> {
   if (!path) return new Map();
-  const manifest = readJson<AckManifest>(resolve(root, path));
+  const manifest = readJson<PlanManifest>(resolve(root, path));
   const items = Array.isArray(manifest) ? manifest : manifest.items ?? [];
   return new Map(
     items
-      .map((item) => normalizedAckManifestEntry(item))
-      .filter((item): item is AckManifestEntry => Boolean(item))
+      .map((item) => normalizedPlanManifestEntry(item))
+      .filter((item): item is PlanManifestEntry => Boolean(item))
       .map((item) => [item.domain, item]),
   );
 }
 
-function normalizedAckManifestEntry(item: AckManifestItem): AckManifestEntry | null {
-  if (item.performed === true) return null;
-  if (item.ok === false) return null;
-  if (typeof item.operation_id !== "string" || item.operation_id.length === 0) return null;
-  if (typeof item.ack_command !== "string" || item.ack_command.length === 0) return null;
-  if (isExpired(item.preview_expires_at)) return null;
-
-  const command = parseSenderDomainAckCommand(item.ack_command);
-  if (!command) return null;
-  const target = typeof item.target === "string" && item.target.length > 0 ? item.target : command.name;
-  if (target !== command.name) return null;
-  if (item.operation_id !== command.operation_id) return null;
+function normalizedPlanManifestEntry(value: unknown): PlanManifestEntry | null {
+  const item = senderDomainPlanManifestItem(value);
+  if (!item) return null;
 
   return {
-    domain: target,
+    domain: item.target,
     operation_id: item.operation_id,
-    ack_command: item.ack_command,
   };
-}
-
-function parseSenderDomainAckCommand(command: string): SenderDomainAckCommand | null {
-  const match = command.match(
-    /cfctl\s+apply\s+sender_domain\s+enable\s+--zone\s+([^\s]+)\s+--name\s+([^\s]+)\s+--ack-plan\s+([^\s]+)/,
-  );
-  if (!match) return null;
-  return { zone: match[1], name: match[2], operation_id: match[3] };
-}
-
-function isExpired(value: string | undefined): boolean {
-  if (!value) return false;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && timestamp <= Date.now();
 }
 
 function defaultPolicyPath(): string {
@@ -373,18 +355,21 @@ type ProofAction =
         | "resend_sender_domain_not_verified"
         | "outbound_disabled"
         | "template_desired_state";
-      preview_command?: string;
-      ack_command_template?: string;
+      plan_request?: SenderDomainPlanRequest;
+      verify_request?: SenderDomainVerifyRequest;
+      operation_id?: string;
+      lifecycle?: PlanLifecycle;
       verify_command?: string;
       description: string;
     };
 
 interface SenderDomainRepairCommands {
-  preview_command: string;
-  ack_command_template: string;
+  plan_request: SenderDomainPlanRequest;
+  verify_request: SenderDomainVerifyRequest;
   operation_id?: string;
-  ack_command?: string;
-  verify_command: string;
+  plan_content_hash?: string;
+  evidence_hashes?: string[];
+  lifecycle?: PlanLifecycle;
 }
 
 interface SenderRepairAction extends Partial<SenderDomainRepairCommands> {
@@ -395,32 +380,16 @@ interface SenderRepairAction extends Partial<SenderDomainRepairCommands> {
   description: string;
 }
 
-interface AckManifest {
-  items?: AckManifestItem[];
+interface PlanManifest {
+  items?: unknown[];
 }
 
-interface AckManifestItem {
-  ok?: boolean;
-  performed?: boolean;
-  operation_id?: string;
-  ack_command?: string;
-  preview_expires_at?: string;
-  target?: string;
-}
-
-interface AckManifestEntry {
+interface PlanManifestEntry {
   domain: string;
   operation_id: string;
-  ack_command: string;
 }
 
-interface SenderDomainAckCommand {
-  zone: string;
-  name: string;
-  operation_id: string;
-}
-
-interface SenderDomainAckSummary {
+interface SenderDomainPlanSummary {
   blocked: number;
   ready: number;
   missing: number;

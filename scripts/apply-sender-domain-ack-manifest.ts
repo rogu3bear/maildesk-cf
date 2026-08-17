@@ -1,46 +1,50 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  CFCTL_COMMAND_CONTRACT_VERSION,
+  SENDER_DOMAIN_CREATE_CAPABILITY,
+  planLifecycle,
+  senderDomainPlanManifestItem,
+  senderDomainPlanV2Failure,
+  type PlanLifecycle,
+} from "./cfctl-v2-command-contract";
 
-interface AckManifest {
-  items?: AckManifestItem[];
+interface PlanManifest {
+  schema_version?: number;
+  items?: unknown[];
 }
 
-interface AckManifestItem {
-  ok?: boolean;
-  performed?: boolean;
-  lane?: string | null;
-  zone?: string;
-  target?: string;
-  operation_id?: string;
-  ack_command?: string;
-  preview_expires_at?: string;
-}
-
-interface ReadyAck {
+interface ReadyPlan {
   index: number;
   domain: string;
-  lane: string | null;
-  zone: string;
-  name: string;
+  capability_id: typeof SENDER_DOMAIN_CREATE_CAPABILITY;
+  profile_id: string;
+  account_id: string;
+  zone_id: string;
   operation_id: string;
-  ack_command: string;
+  plan_content_hash: string;
+  evidence_hashes: string[];
+  lifecycle: PlanLifecycle;
 }
 
-interface SenderDomainAckCommand {
-  lane?: string;
-  zone: string;
-  name: string;
-  operation_id: string;
+interface CfctlEnvelope {
+  schema_version?: number;
+  ok?: boolean;
+  performed?: boolean;
+  operation_id?: string | null;
+  error?: { code?: string } | null;
+  result?: unknown;
+  capability_id?: string | null;
 }
 
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const execute = args.includes("--execute");
-const confirmAckPlan = args.includes("--confirm-ack-plan");
-const confirmBulkAckPlan = args.includes("--confirm-bulk-ack-plan");
+const confirmPlan = args.includes("--confirm-plan");
+const confirmBulkPlan = args.includes("--confirm-bulk-plan");
 const jsonOutput = args.includes("--json");
-const manifestPath = argValue("--manifest") ?? "var/proof/maildesk-sender-domain-ack-manifest.local.json";
+const manifestPath = argValue("--manifest") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const outPath = argValue("--out");
 const cfctlBin = argValue("--cfctl") ?? "cfctl";
 const domainFilter = argValue("--domain");
@@ -48,8 +52,8 @@ const limit = args.includes("--all")
   ? Number.POSITIVE_INFINITY
   : Number(argValue("--limit") ?? (execute ? "1" : "Infinity"));
 
-if (execute && !confirmAckPlan) {
-  console.error("missing --confirm-ack-plan for --execute");
+if (execute && !confirmPlan) {
+  console.error("missing --confirm-plan for --execute");
   process.exit(1);
 }
 
@@ -58,146 +62,147 @@ if (!Number.isFinite(limit) && !args.includes("--all") && !(!execute && argValue
   process.exit(1);
 }
 
-const manifest = readJson<AckManifest | AckManifestItem[]>(resolve(root, manifestPath));
+const manifest = readJson<PlanManifest | unknown[]>(resolve(root, manifestPath));
 const items = Array.isArray(manifest) ? manifest : manifest.items ?? [];
 const ready = items
-  .map((item, index) => normalizedAck(item, index + 1))
-  .filter((item): item is ReadyAck => Boolean(item))
+  .map((item, index) => normalizedPlan(item, index + 1))
+  .filter((item): item is ReadyPlan => Boolean(item))
   .filter((item) => !domainFilter || item.domain === domainFilter)
   .slice(0, limit);
 
-if (execute && ready.length > 1 && !confirmBulkAckPlan) {
-  console.error("missing --confirm-bulk-ack-plan for bulk --execute");
+if (execute && ready.length > 1 && !confirmBulkPlan) {
+  console.error("missing --confirm-bulk-plan for bulk --execute");
   process.exit(1);
 }
 
-const results = ready.map((item) => (execute ? applyAck(item) : dryRunAck(item)));
+const results = ready.map((item) => executePlan(item));
 const summary = {
   mode: execute ? "execute" : "dry_run",
   manifest_path: relativePath(resolve(root, manifestPath)),
   requested_domain: domainFilter ?? null,
   ready_count: ready.length,
-  applied_count: results.filter((result) => result.status === "applied").length,
+  executed_count: results.filter((result) => result.status === "executed").length,
   dry_run_count: results.filter((result) => result.status === "dry_run").length,
   results,
 };
 
-if (outPath) {
-  writeJson(outPath, summary);
-}
+if (outPath) writeJson(outPath, summary);
 
 if (jsonOutput) {
   console.log(JSON.stringify(summary, null, 2));
 } else {
-  for (const result of results) {
-    console.log(`${result.status} ${result.domain} ${result.operation_id}`);
-  }
+  for (const result of results) console.log(`${result.status} ${result.domain} ${result.operation_id}`);
   console.log(`mode ${summary.mode}`);
   console.log(`ready_count ${summary.ready_count}`);
-  console.log(`applied_count ${summary.applied_count}`);
+  console.log(`executed_count ${summary.executed_count}`);
   console.log(`dry_run_count ${summary.dry_run_count}`);
 }
 
-function normalizedAck(item: AckManifestItem, index: number): ReadyAck | null {
-  if (item.performed === true) return null;
-  if (item.ok === false) return null;
-  if (typeof item.operation_id !== "string" || item.operation_id.length === 0) return null;
-  if (typeof item.ack_command !== "string" || item.ack_command.length === 0) return null;
-  if (isExpired(item.preview_expires_at)) return null;
-
-  const command = parseSenderDomainAckCommand(item.ack_command);
-  if (!command) return null;
-  if (item.operation_id !== command.operation_id) return null;
-
-  const target = typeof item.target === "string" && item.target.length > 0 ? item.target : command.name;
-  if (target !== command.name) return null;
-
+function normalizedPlan(value: unknown, index: number): ReadyPlan | null {
+  const item = senderDomainPlanManifestItem(value);
+  if (!item) return null;
   return {
     index,
-    domain: target,
-    lane: command.lane ?? item.lane ?? null,
-    zone: command.zone,
-    name: command.name,
+    domain: item.target,
+    capability_id: SENDER_DOMAIN_CREATE_CAPABILITY,
+    profile_id: item.profile_id,
+    account_id: item.account_id,
+    zone_id: item.zone_id,
     operation_id: item.operation_id,
-    ack_command: item.ack_command,
+    plan_content_hash: item.plan_content_hash,
+    evidence_hashes: [...item.evidence_hashes],
+    lifecycle: planLifecycle(item.operation_id),
   };
 }
 
-function dryRunAck(item: ReadyAck) {
-  return {
-    status: "dry_run" as const,
-    index: item.index,
-    domain: item.domain,
-    lane: item.lane,
-    zone: item.zone,
-    name: item.name,
-    operation_id: item.operation_id,
-    ack_command: item.ack_command,
-  };
-}
-
-function applyAck(item: ReadyAck) {
-  const result = spawnSync(
-    cfctlBin,
-    [
-      "apply",
-      "sender_domain",
-      "enable",
-      "--zone",
-      item.zone,
-      "--name",
-      item.name,
-      "--ack-plan",
-      item.operation_id,
-    ],
-    {
-      cwd: root,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        ...(item.lane ? { CF_TOKEN_LANE: item.lane } : {}),
-      },
-    },
-  );
-
-  if (result.stderr) process.stderr.write(result.stderr);
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+function executePlan(item: ReadyPlan) {
+  if (!execute) {
+    return {
+      status: "dry_run" as const,
+      index: item.index,
+      domain: item.domain,
+      capability_id: item.capability_id,
+      profile_id: item.profile_id,
+      account_id: item.account_id,
+      zone_id: item.zone_id,
+      operation_id: item.operation_id,
+      lifecycle: item.lifecycle,
+    };
   }
 
+  runLifecycleStep(item, "show", false, true);
+  runLifecycleStep(item, "approve", false);
+  runLifecycleStep(item, "run", true);
+  runLifecycleStep(item, "status", false);
   return {
-    status: "applied" as const,
+    status: "executed" as const,
     index: item.index,
     domain: item.domain,
-    lane: item.lane,
-    zone: item.zone,
-    name: item.name,
+    capability_id: item.capability_id,
+    profile_id: item.profile_id,
+    account_id: item.account_id,
+    zone_id: item.zone_id,
     operation_id: item.operation_id,
   };
 }
 
-function parseSenderDomainAckCommand(command: string): SenderDomainAckCommand | null {
-  const match = command.match(
-    /^(?:CF_TOKEN_LANE=([^\s]+)\s+)?cfctl\s+apply\s+sender_domain\s+enable\s+--zone\s+([^\s]+)\s+--name\s+([^\s]+)\s+--ack-plan\s+([^\s]+)$/,
-  );
-  if (!match) return null;
-  return { lane: match[1], zone: match[2], name: match[3], operation_id: match[4] };
+function runLifecycleStep(
+  item: ReadyPlan,
+  step: keyof PlanLifecycle,
+  expectedPerformed: boolean,
+  requirePlanEvidence = false,
+): void {
+  const argv = item.lifecycle[step];
+  const result = spawnSync(cfctlBin, argv.slice(1), { cwd: root, encoding: "utf8" });
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.status !== 0 || !result.stdout) process.exit(result.status ?? 1);
+  const envelope = parseJson<CfctlEnvelope>(result.stdout, `PlanV2 ${step}`);
+  const shownPlanV2 = isRecord(envelope.result) ? envelope.result.plan_v2 : undefined;
+  const planFailure = requirePlanEvidence
+    ? senderDomainPlanV2Failure(shownPlanV2, {
+        operation_id: item.operation_id,
+        profile_id: item.profile_id,
+        account_id: item.account_id,
+        zone_id: item.zone_id,
+        target: item.domain,
+        plan_content_hash: item.plan_content_hash,
+      })
+    : null;
+  if (
+    envelope.schema_version !== CFCTL_COMMAND_CONTRACT_VERSION ||
+    envelope.ok !== true ||
+    envelope.performed !== expectedPerformed ||
+    envelope.error ||
+    (requirePlanEvidence && envelope.capability_id !== item.capability_id) ||
+    (envelope.operation_id !== null && envelope.operation_id !== undefined &&
+      envelope.operation_id !== item.operation_id) ||
+    planFailure
+  ) {
+    console.error(`PlanV2 ${step} envelope mismatch for ${item.operation_id}`);
+    process.exit(1);
+  }
 }
 
-function isExpired(value: string | undefined): boolean {
-  if (!value) return false;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && timestamp <= Date.now();
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function argValue(name: string): string | undefined {
   const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
+  return index === -1 ? undefined : args[index + 1];
 }
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
+}
+
+function parseJson<T>(value: string, label: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    console.error(`${label} did not produce valid JSON`);
+    throw error;
+  }
 }
 
 function writeJson(path: string, value: unknown): void {

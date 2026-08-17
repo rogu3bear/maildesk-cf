@@ -10,7 +10,7 @@ describe("maildesk closeout gate", () => {
   test("reports protected sender-domain applies without applying them", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
 
     writeJson(summaryPath, {
@@ -25,19 +25,12 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 1,
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
     writeJson(manifestPath, {
       items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "op-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-        },
+        planManifestItem("tenant.example.com", "op-tenant"),
       ],
     });
 
@@ -49,7 +42,7 @@ describe("maildesk closeout gate", () => {
         "--",
         "--summary",
         summaryPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--preflight-command",
         preflight,
@@ -62,7 +55,7 @@ describe("maildesk closeout gate", () => {
     const closeout = JSON.parse(result.stdout) as {
       ready?: boolean;
       production_preflight?: { ok?: boolean };
-      ack_dry_run?: { ready_count?: number; dry_run_count?: number; applied_count?: number };
+      ack_dry_run?: { ready_count?: number; dry_run_count?: number; executed_count?: number };
       blockers?: Array<{ kind?: string; count?: number }>;
     };
     expect(closeout.ready).toBe(false);
@@ -70,7 +63,7 @@ describe("maildesk closeout gate", () => {
     expect(closeout.ack_dry_run).toMatchObject({
       ready_count: 1,
       dry_run_count: 1,
-      applied_count: 0,
+      executed_count: 0,
     });
     expect(closeout.blockers).toContainEqual({
       kind: "protected_sender_domain_apply",
@@ -85,7 +78,7 @@ describe("maildesk closeout gate", () => {
   test("redacts sensitive ack dry-run details from JSON output", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
 
     writeJson(summaryPath, {
@@ -100,19 +93,12 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 1,
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
     writeJson(manifestPath, {
       items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "op-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-        },
+        planManifestItem("tenant.example.com", "op-tenant"),
       ],
     });
 
@@ -124,7 +110,7 @@ describe("maildesk closeout gate", () => {
         "--",
         "--summary",
         summaryPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--preflight-command",
         preflight,
@@ -140,13 +126,13 @@ describe("maildesk closeout gate", () => {
     expect(result.stdout).not.toContain("--ack-plan");
     const closeout = JSON.parse(result.stdout) as {
       sensitive_redacted?: boolean;
-      ack_dry_run?: { ready_count?: number; dry_run_count?: number; applied_count?: number; result_count?: number };
+      ack_dry_run?: { ready_count?: number; dry_run_count?: number; executed_count?: number; result_count?: number };
     };
     expect(closeout.sensitive_redacted).toBe(true);
     expect(closeout.ack_dry_run).toMatchObject({
       ready_count: 1,
       dry_run_count: 1,
-      applied_count: 0,
+      executed_count: 0,
       result_count: 1,
     });
   });
@@ -154,7 +140,7 @@ describe("maildesk closeout gate", () => {
   test("summarizes protected action handoffs without exposing sensitive details", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
 
     writeJson(summaryPath, {
@@ -169,27 +155,13 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 2,
       sender_domain_blocked_count: 2,
-      sender_domain_ack_ready_count: 2,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 2,
+      sender_domain_plan_missing_count: 0,
     });
     writeJson(manifestPath, {
       items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant-a.example.com",
-          operation_id: "op-a",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-a.example.com --name tenant-a.example.com --ack-plan op-a",
-        },
-        {
-          ok: true,
-          performed: false,
-          target: "tenant-b.example.com",
-          operation_id: "op-b",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-b.example.com --name tenant-b.example.com --ack-plan op-b",
-        },
+        planManifestItem("tenant-a.example.com", "op-a"),
+        planManifestItem("tenant-b.example.com", "op-b"),
       ],
     });
 
@@ -201,7 +173,7 @@ describe("maildesk closeout gate", () => {
         "--",
         "--summary",
         summaryPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--preflight-command",
         preflight,
@@ -235,9 +207,9 @@ describe("maildesk closeout gate", () => {
     expect(closeout.protected_actions?.sender_domain_apply).toMatchObject({
       count: 2,
       dry_run_ready_count: 2,
-      required_flags: ["--execute", "--confirm-ack-plan"],
+      required_flags: ["--execute", "--confirm-plan"],
       bulk_confirmation_required: true,
-      bulk_confirmation_flag: "--confirm-bulk-ack-plan",
+      bulk_confirmation_flag: "--confirm-bulk-plan",
     });
     expect(closeout.protected_actions?.inbound_probe).toMatchObject({
       count: 2,
@@ -250,7 +222,7 @@ describe("maildesk closeout gate", () => {
   test("emits sanitized argv commands for the next protected handoff", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
 
     writeJson(summaryPath, {
@@ -265,27 +237,13 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 2,
       sender_domain_blocked_count: 2,
-      sender_domain_ack_ready_count: 2,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 2,
+      sender_domain_plan_missing_count: 0,
     });
     writeJson(manifestPath, {
       items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant-a.example.com",
-          operation_id: "op-a",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-a.example.com --name tenant-a.example.com --ack-plan op-a",
-        },
-        {
-          ok: true,
-          performed: false,
-          target: "tenant-b.example.com",
-          operation_id: "op-b",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant-b.example.com --name tenant-b.example.com --ack-plan op-b",
-        },
+        planManifestItem("tenant-a.example.com", "op-a"),
+        planManifestItem("tenant-b.example.com", "op-b"),
       ],
     });
 
@@ -297,7 +255,7 @@ describe("maildesk closeout gate", () => {
         "--",
         "--summary",
         summaryPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--plan",
         "var/maildesk-proof-plan.json",
@@ -346,13 +304,13 @@ describe("maildesk closeout gate", () => {
       "--manifest",
       relative(root, manifestPath),
       "--execute",
-      "--confirm-ack-plan",
+      "--confirm-plan",
       "--limit",
       "1",
       "--json",
     ]);
     expect(closeout.protected_command_handoff?.sender_domain_apply?.execute_all).toContain(
-      "--confirm-bulk-ack-plan",
+      "--confirm-bulk-plan",
     );
     expect(closeout.protected_command_handoff?.inbound_probe?.execute_one).toEqual([
       "bun",
@@ -381,7 +339,7 @@ describe("maildesk closeout gate", () => {
   test("refreshes ack manifest before closeout dry-run when requested", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
+    const manifestPath = join(dir, "plan-manifest.json");
     const refreshLogPath = join(dir, "refresh.log");
     const preflight = fakePreflight(0, "", "preflight ok: production\n");
     const refresh = fakeAckRefresh(manifestPath, refreshLogPath);
@@ -398,19 +356,14 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 1,
       sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 1,
+      sender_domain_plan_missing_count: 0,
     });
     writeJson(manifestPath, {
       items: [
         {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "old-op",
-          preview_expires_at: "2000-01-01T00:00:00.000Z",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan old-op",
+          ...planManifestItem("tenant.example.com", "old-op"),
+          plan_expires_at: "2000-01-01T00:00:00.000Z",
         },
       ],
     });
@@ -423,7 +376,7 @@ describe("maildesk closeout gate", () => {
         "--",
         "--summary",
         summaryPath,
-        "--ack-manifest",
+        "--plan-manifest",
         manifestPath,
         "--refresh-acks",
         "--refresh-ack-command",
@@ -438,170 +391,23 @@ describe("maildesk closeout gate", () => {
     expect(result.status).toBe(1);
     expect(readFileSync(refreshLogPath, "utf8")).toContain(`--out ${manifestPath}`);
     const closeout = JSON.parse(result.stdout) as {
-      ack_refresh?: { ok?: boolean; ack_ready_count?: number };
-      ack_dry_run?: { ready_count?: number; dry_run_count?: number; applied_count?: number };
+      ack_refresh?: { ok?: boolean; plan_ready_count?: number };
+      ack_dry_run?: { ready_count?: number; dry_run_count?: number; executed_count?: number };
       blockers?: Array<{ kind?: string; count?: number }>;
     };
     expect(closeout.ack_refresh).toMatchObject({
       ok: true,
-      ack_ready_count: 1,
+      plan_ready_count: 1,
     });
     expect(closeout.ack_dry_run).toMatchObject({
       ready_count: 1,
       dry_run_count: 1,
-      applied_count: 0,
+      executed_count: 0,
     });
     expect(closeout.blockers).not.toContainEqual({
-      kind: "sender_domain_ack_dry_run_stale",
+      kind: "sender_domain_plan_dry_run_stale",
       count: 1,
     });
-  });
-
-  test("purges duplicate active previews during closeout when requested", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
-    const summaryPath = join(dir, "summary.json");
-    const manifestPath = join(dir, "ack-manifest.json");
-    const refreshLogPath = join(dir, "refresh.log");
-    const cleanupLogPath = join(dir, "cleanup.log");
-    const preflight = fakePreflight(0, "", "preflight ok: production\n");
-    const refresh = fakeAckRefresh(manifestPath, refreshLogPath);
-    const cleanup = fakePreviewCleanup(cleanupLogPath);
-
-    writeJson(summaryPath, {
-      local_truth_ok: true,
-      live_evidence_present: true,
-      edge_ready: true,
-      mail_ready: false,
-      domain_count: 1,
-      gap_count: 1,
-      proof_actions: 1,
-      targeted_inbound_probes: 0,
-      targeted_outbound_reply_probes: 0,
-      blocked_proofs: 1,
-      sender_domain_blocked_count: 1,
-      sender_domain_ack_ready_count: 1,
-      sender_domain_ack_missing_count: 0,
-    });
-    writeJson(manifestPath, {
-      items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "old-op",
-          preview_expires_at: "2000-01-01T00:00:00.000Z",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan old-op",
-        },
-      ],
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/check-maildesk-closeout.ts",
-        "--",
-        "--summary",
-        summaryPath,
-        "--ack-manifest",
-        manifestPath,
-        "--refresh-acks",
-        "--refresh-ack-command",
-        refresh,
-        "--purge-duplicate-previews",
-        "--preview-cleanup-command",
-        cleanup,
-        "--preflight-command",
-        preflight,
-        "--json",
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
-
-    expect(result.status).toBe(1);
-    expect(existsSync(cleanupLogPath)).toBe(true);
-    expect(readFileSync(cleanupLogPath, "utf8")).toContain("cleanup invoked");
-    const closeout = JSON.parse(result.stdout) as {
-      preview_cleanup?: {
-        ok?: boolean;
-        performed?: boolean;
-        purged_count?: number;
-        duplicate_group_count?: number;
-      };
-      blockers?: Array<{ kind?: string }>;
-    };
-    expect(closeout.preview_cleanup).toMatchObject({
-      ok: true,
-      performed: true,
-      purged_count: 2,
-      duplicate_group_count: 1,
-    });
-    expect(closeout.blockers).not.toContainEqual({ kind: "preview_cleanup" });
-  });
-
-  test("purges expired previews during closeout when requested", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
-    const summaryPath = join(dir, "summary.json");
-    const cleanupLogPath = join(dir, "expired-cleanup.log");
-    const preflight = fakePreflight(0, "", "preflight ok: production\n");
-    const cleanup = fakeExpiredPreviewCleanup(cleanupLogPath);
-
-    writeJson(summaryPath, {
-      local_truth_ok: true,
-      live_evidence_present: true,
-      edge_ready: true,
-      mail_ready: false,
-      domain_count: 1,
-      gap_count: 1,
-      targeted_inbound_probes: 0,
-      targeted_outbound_reply_probes: 0,
-      blocked_proofs: 0,
-      sender_domain_blocked_count: 0,
-      sender_domain_ack_ready_count: 0,
-      sender_domain_ack_missing_count: 0,
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/check-maildesk-closeout.ts",
-        "--",
-        "--summary",
-        summaryPath,
-        "--skip-ack-dry-run",
-        "--purge-expired-previews",
-        "--expired-preview-cleanup-command",
-        cleanup,
-        "--preflight-command",
-        preflight,
-        "--json",
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
-
-    expect(result.status).toBe(1);
-    expect(existsSync(cleanupLogPath)).toBe(true);
-    expect(readFileSync(cleanupLogPath, "utf8")).toContain("expired cleanup invoked");
-    const closeout = JSON.parse(result.stdout) as {
-      preview_cleanup?: {
-        ok?: boolean;
-        performed?: boolean;
-        purged_count?: number;
-        expired_purged_count?: number;
-        duplicate_group_count?: number;
-      };
-      blockers?: Array<{ kind?: string }>;
-    };
-    expect(closeout.preview_cleanup).toMatchObject({
-      ok: true,
-      performed: true,
-      purged_count: 14,
-      expired_purged_count: 14,
-      duplicate_group_count: 0,
-    });
-    expect(closeout.blockers).not.toContainEqual({ kind: "preview_cleanup" });
   });
 
   test("surfaces production preflight failures as instance blockers", () => {
@@ -625,8 +431,8 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 0,
       sender_domain_blocked_count: 0,
-      sender_domain_ack_ready_count: 0,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 0,
+      sender_domain_plan_missing_count: 0,
     });
 
     const result = spawnSync(
@@ -679,8 +485,8 @@ describe("maildesk closeout gate", () => {
       targeted_outbound_reply_probes: 0,
       blocked_proofs: 0,
       sender_domain_blocked_count: 0,
-      sender_domain_ack_ready_count: 0,
-      sender_domain_ack_missing_count: 0,
+      sender_domain_plan_ready_count: 0,
+      sender_domain_plan_missing_count: 0,
     });
     const env = { ...process.env };
     delete env.MAILDESK_API_TOKEN;
@@ -767,51 +573,26 @@ function fakeAckRefresh(manifestPath: string, logPath: string): string {
 echo "$@" > ${JSON.stringify(logPath)}
 cat > ${JSON.stringify(manifestPath)} <<'JSON'
 {
+  "schema_version": 2,
   "items": [
     {
+      "schema_version": 2,
       "ok": true,
       "performed": false,
+      "capability_id": "email-sending-subdomains-create-sending-subdomain",
+      "profile_id": "profile-example",
+      "account_id": "account-example",
+      "zone_id": "zone-example",
       "target": "tenant.example.com",
       "operation_id": "new-op",
-      "ack_command": "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan new-op"
+      "plan_content_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "evidence_hashes": ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
     }
   ]
 }
 JSON
 cat <<'JSON'
-{"preview_count":1,"ack_ready_count":1,"failed_count":0}
-JSON
-`,
-  );
-  chmodSync(path, 0o700);
-  return path;
-}
-
-function fakePreviewCleanup(logPath: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "maildesk-preview-cleanup-"));
-  const path = join(dir, "preview-cleanup");
-  writeFileSync(
-    path,
-    `#!/bin/sh
-echo "cleanup invoked" > ${JSON.stringify(logPath)}
-cat <<'JSON'
-{"ok":true,"performed":true,"summary":{"purged_count":2,"duplicate_group_count":1}}
-JSON
-`,
-  );
-  chmodSync(path, 0o700);
-  return path;
-}
-
-function fakeExpiredPreviewCleanup(logPath: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "maildesk-expired-preview-cleanup-"));
-  const path = join(dir, "expired-preview-cleanup");
-  writeFileSync(
-    path,
-    `#!/bin/sh
-echo "expired cleanup invoked" > ${JSON.stringify(logPath)}
-cat <<'JSON'
-{"ok":true,"performed":true,"summary":{"purged_count":14}}
+{"preview_count":1,"plan_ready_count":1,"failed_count":0}
 JSON
 `,
   );
@@ -821,4 +602,21 @@ JSON
 
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function planManifestItem(target: string, operationId: string) {
+  return {
+    schema_version: 2,
+    ok: true,
+    performed: false,
+    capability_id: "email-sending-subdomains-create-sending-subdomain",
+    profile_id: "profile-example",
+    account_id: "account-example",
+    zone_id: `zone-${target}`,
+    target,
+    operation_id: operationId,
+    plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    plan_expires_at: "2099-01-01T00:00:00Z",
+  };
 }
