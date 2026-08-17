@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export interface EnvFileLoadResult {
@@ -30,9 +30,27 @@ export function loadEnvFile(
     };
   }
 
+  let canonicalRoot: string;
+  let canonicalPath: string;
+  try {
+    canonicalRoot = realpathSync(resolvedRoot);
+    canonicalPath = realpathSync(resolvedPath);
+  } catch {
+    return {
+      loaded: [],
+      failures: [`env file could not be resolved: ${displayPath}`],
+    };
+  }
+  if (!isInsideRoot(canonicalRoot, canonicalPath)) {
+    return {
+      loaded: [],
+      failures: ["env file must be under repository root"],
+    };
+  }
+
   const loaded: string[] = [];
   const failures: string[] = [];
-  const lines = readFileSync(resolvedPath, "utf8").split(/\r?\n/);
+  const lines = readFileSync(canonicalPath, "utf8").split(/\r?\n/);
   for (const [index, rawLine] of lines.entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;

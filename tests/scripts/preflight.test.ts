@@ -1,8 +1,9 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { loadEnvFile } from "../../scripts/env-file";
 
 const root = resolve(import.meta.dir, "../..");
 
@@ -347,6 +348,74 @@ describe("production preflight", () => {
     expect(result.stderr).not.toContain("secret-outside-value");
   });
 
+  test("rejects a repo-local env symlink whose target escapes the repository", () => {
+    const externalDir = mkdtempSync(join(tmpdir(), "maildesk-external-env-"));
+    const externalFile = join(externalDir, ".dev.vars");
+    const varDir = resolve(root, "var");
+    mkdirSync(varDir, { recursive: true });
+    const localDir = mkdtempSync(join(varDir, "env-symlink-"));
+    const localLink = join(localDir, ".dev.vars");
+    writeFileSync(externalFile, "MAILDESK_API_TOKEN=secret-outside-value\n");
+    symlinkSync(externalFile, localLink);
+    const env: Record<string, string | undefined> = {};
+    const commandMarker = join(localDir, "cfctl-invoked");
+    const cfctl = fakeCommandRecorder(commandMarker);
+
+    try {
+      const result = loadEnvFile(root, relative(root, localLink), env);
+
+      expect(result).toEqual({
+        loaded: [],
+        failures: ["env file must be under repository root"],
+      });
+      expect(env.MAILDESK_API_TOKEN).toBeUndefined();
+
+      const preflight = spawnSync(
+        "bun",
+        [
+          "run",
+          "scripts/preflight.ts",
+          "--mode",
+          "production",
+          "--env-file",
+          relative(root, localLink),
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: { ...process.env, CFCTL_BIN: cfctl },
+        },
+      );
+      expect(preflight.status).toBe(1);
+      expect(preflight.stderr).toContain("env file must be under repository root");
+      expect(preflight.stderr).not.toContain("secret-outside-value");
+      expect(existsSync(commandMarker)).toBe(false);
+    } finally {
+      rmSync(localDir, { recursive: true, force: true });
+      rmSync(externalDir, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts a repo-local env symlink whose canonical target stays in the repository", () => {
+    const varDir = resolve(root, "var");
+    mkdirSync(varDir, { recursive: true });
+    const localDir = mkdtempSync(join(varDir, "env-symlink-internal-"));
+    const localTarget = join(localDir, "environment.vars");
+    const localLink = join(localDir, ".dev.vars");
+    writeFileSync(localTarget, "MAILDESK_API_TOKEN=example-local-value\n");
+    symlinkSync(localTarget, localLink);
+    const env: Record<string, string | undefined> = {};
+
+    try {
+      const result = loadEnvFile(root, relative(root, localLink), env);
+
+      expect(result).toEqual({ loaded: ["MAILDESK_API_TOKEN"], failures: [] });
+      expect(env.MAILDESK_API_TOKEN).toBe("example-local-value");
+    } finally {
+      rmSync(localDir, { recursive: true, force: true });
+    }
+  });
+
   test("fails Cloudflare proof when cfctl doctor has no healthy lane", () => {
     const cfctl = fakeCfctlDoctor(false);
     const env = {
@@ -593,6 +662,20 @@ JSON
   exit 0
 fi
 exit 1
+`,
+  );
+  chmodSync(path, 0o700);
+  return path;
+}
+
+function fakeCommandRecorder(markerPath: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-command-recorder-"));
+  const path = join(dir, "command-recorder");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+touch ${JSON.stringify(markerPath)}
+exit 0
 `,
   );
   chmodSync(path, 0o700);

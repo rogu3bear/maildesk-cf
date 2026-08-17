@@ -54,6 +54,7 @@ const failures: string[] = [];
 const warnings: string[] = [];
 const envFileLoad = loadEnvFile(root, argValue("--env-file"));
 failures.push(...envFileLoad.failures);
+if (failures.length > 0) reportFailuresAndExit();
 const mode: Mode = args.has("--mode")
   ? parseMode(argValue("--mode"))
   : args.has("--production")
@@ -116,14 +117,16 @@ for (const warning of warnings) {
   console.warn(`warn: ${warning}`);
 }
 
-if (failures.length > 0) {
+if (failures.length > 0) reportFailuresAndExit();
+
+console.log(`preflight ok: ${mode}`);
+
+function reportFailuresAndExit(): never {
   for (const failure of failures) {
     console.error(`fail: ${failure}`);
   }
   process.exit(1);
 }
-
-console.log(`preflight ok: ${mode}`);
 
 function parseMode(value: string | undefined): Mode {
   if (value === "template" || value === "production") return value;
