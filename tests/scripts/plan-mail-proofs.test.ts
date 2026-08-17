@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -287,6 +287,119 @@ describe("mail proof planner", () => {
     });
     expect(plan.actions[0]?.plan_request).toBeUndefined();
     expect(plan.actions[0]?.verify_request).toBeUndefined();
+  });
+
+  test("treats an absent optional plan manifest as no prepared plans", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-missing-manifest-"));
+    const receiptPath = join(dir, "receipt.json");
+    const policyPath = join(dir, "policy.json");
+    const manifestPath = join(dir, "not-created-plan-manifest.json");
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({
+        rows: [{
+          domain: "tenant.example.com",
+          inbound_mx: "ok",
+          inbound_mx_provider: "cloudflare_email_routing",
+          inbound_proof: "ok",
+          outbound_sender: "missing",
+          outbound_proof: "not_checked",
+        }],
+        gaps: [{
+          domain: "tenant.example.com",
+          field: "outbound_sender",
+          status: "missing",
+          readiness: "mail",
+        }],
+      }, null, 2)}\n`,
+    );
+    writeFileSync(
+      policyPath,
+      `${JSON.stringify({
+        domains: {
+          "tenant.example.com": {
+            role_aliases: {
+              founders: {
+                operators: ["operator@tenant.example.com"],
+                reply_identity: "founders@tenant.example.com",
+              },
+            },
+            personal_aliases: {},
+          },
+        },
+      }, null, 2)}\n`,
+    );
+
+    const run = (extraArgs: string[] = [], selectedManifest = manifestPath) => spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/plan-mail-proofs.ts",
+        "--",
+        "--receipt",
+        receiptPath,
+        "--policy",
+        policyPath,
+        "--plan-manifest",
+        selectedManifest,
+        ...extraArgs,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    const optional = run();
+    expect(optional.status).toBe(0);
+    const plan = JSON.parse(optional.stdout) as {
+      summary: {
+        sender_domain_blocked_count?: number;
+        sender_domain_plan_ready_count?: number;
+        sender_domain_plan_missing_count?: number;
+      };
+      actions: Array<{ operation_id?: string; lifecycle?: unknown }>;
+    };
+    expect(plan.summary).toMatchObject({
+      sender_domain_blocked_count: 1,
+      sender_domain_plan_ready_count: 0,
+      sender_domain_plan_missing_count: 1,
+    });
+    expect(plan.actions[0]?.operation_id).toBeUndefined();
+    expect(plan.actions[0]?.lifecycle).toBeUndefined();
+
+    const required = run(["--require-plan-ready"]);
+    expect(required.status).toBe(1);
+    expect(JSON.parse(required.stdout).summary).toMatchObject(plan.summary);
+    expect(required.stderr).toContain("sender-domain PlanV2 operations are not ready");
+
+    const missingValue = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/plan-mail-proofs.ts",
+        "--",
+        "--receipt",
+        receiptPath,
+        "--policy",
+        policyPath,
+        "--plan-manifest",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(missingValue.status).toBe(1);
+    expect(missingValue.stdout).toBe("");
+    expect(missingValue.stderr).toContain("missing --plan-manifest <path>");
+
+    writeFileSync(manifestPath, "{ malformed\n");
+    const malformed = run();
+    expect(malformed.status).toBe(1);
+    expect(malformed.stdout).toBe("");
+
+    const directoryManifestPath = join(dir, "manifest-directory");
+    mkdirSync(directoryManifestPath);
+    const directory = run([], directoryManifestPath);
+    expect(directory.status).toBe(1);
+    expect(directory.stdout).toBe("");
   });
 
   test("fills the exact PlanV2 lifecycle from a prepared plan manifest", () => {
