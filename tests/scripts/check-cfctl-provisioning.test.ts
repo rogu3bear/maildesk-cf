@@ -12,7 +12,7 @@ import { isRepositoryRelativePath } from "../../scripts/wrangler-config";
 const root = resolve(import.meta.dir, "../..");
 
 describe("cfctl provisioning contract check", () => {
-  test("reports the template desired state as a cfctl maildesk-cf provisioning lane", () => {
+  test("reports the template desired state as a non-performing cfctl v2 handoff", () => {
     const result = spawnSync(
       "bun",
       [
@@ -34,7 +34,12 @@ describe("cfctl provisioning contract check", () => {
       schema_path: string;
       desired_state_path: string;
       status: { provisioning_contract_ready: boolean };
-      cfctl_commands: string[];
+      cfctl_handoff: {
+        schema_version: number;
+        discovery_commands: Array<{ purpose: string; performed: boolean; argv: string[] }>;
+        read_contract: Record<string, string>;
+        mutation_contract: Record<string, string>;
+      };
       resources: {
         workers: string[];
         worker_configs: string[];
@@ -47,15 +52,23 @@ describe("cfctl provisioning contract check", () => {
     expect(receipt.schema_path).toBe("ops/cfctl/maildesk-cf.desired-state.schema.json");
     expect(receipt.desired_state_path).toBe("config/desired-state.example.json");
     expect(receipt.status.provisioning_contract_ready).toBe(true);
-    expect(receipt.cfctl_commands).toContain(
-      "cfctl maildesk-cf provision --file config/desired-state.example.json --plan",
-    );
-    expect(receipt.cfctl_commands).toContain(
-      "cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>",
-    );
-    expect(receipt.cfctl_commands).toContain(
-      "cfctl maildesk-cf verify --file config/desired-state.example.json",
-    );
+    expect(receipt.cfctl_handoff.schema_version).toBe(2);
+    expect(receipt.cfctl_handoff.discovery_commands).toContainEqual({
+      purpose: "doctor",
+      performed: false,
+      argv: ["cfctl", "doctor", "--json"],
+    });
+    expect(receipt.cfctl_handoff.discovery_commands).toContainEqual({
+      purpose: "resolve_readback",
+      performed: false,
+      argv: [
+        "cfctl",
+        "resolve",
+        "read Maildesk current state for config/desired-state.example.json without mutation",
+        "--json",
+      ],
+    });
+    expect(JSON.stringify(receipt.cfctl_handoff)).not.toMatch(/cfctl maildesk-cf|--ack-plan|cfctl apply/);
     expect(receipt.resources.workers).toEqual([
       "maildesk-cf-relay-outbound",
       "maildesk-cf-router",
@@ -76,11 +89,12 @@ describe("cfctl provisioning contract check", () => {
     ]);
     expect(receipt.resources.email_routing_aliases).toContain("founders@example.com");
     expect(receipt.outside_checkout_blockers).toEqual([
-      "install or update cfctl with the maildesk-cf lifecycle surface",
+      "install or update cfctl with the required v2 catalog capabilities",
       "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
-      "run cfctl doctor with a healthy credential lane before planning",
-      "review the cfctl provision preview and provide its operation id before --ack-plan",
-      "run targeted cfctl maildesk-cf verify and mail proof readbacks after mutation",
+      "run cfctl version, doctor, and agents doctor before governed discovery",
+      "bind every live call to an explicit profile, selected account, capability, and exact selectors",
+      "review the immutable PlanV2 operation before approval and execution",
+      "run capability-specific post-change readback and targeted mail proof after mutation",
     ]);
   });
 

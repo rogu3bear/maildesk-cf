@@ -95,15 +95,16 @@ ad hoc API scripts, or unreviewed `wrangler` commands.
 
 Required mutation flow:
 
-1. `cfctl doctor`
-2. current-state read with `cfctl list|get|snapshot|verify`
-3. `cfctl standards <surface>` when available
-4. `cfctl classify <surface> <operation>`
-5. `cfctl guide <surface> <operation>`
-6. `cfctl apply ... --plan`
-7. inspect and record the `operation_id`
-8. `cfctl apply ... --ack-plan <operation_id>`
-9. targeted verification
+1. `cfctl version --json`
+2. `cfctl doctor --json` and `cfctl agents doctor --json`
+3. `cfctl resolve "<bounded intent>" --json`
+4. inspect the selected contract with `cfctl catalog show <capability-id> --json`
+5. load `cfctl guide <capability-id> --json`
+6. run read calls with the exact capability, profile, account, selectors, and `--json`
+7. for a write, create one hash-bound plan with `cfctl call <capability-id> ... --json`
+8. inspect `cfctl plans show <operation-id> --json`
+9. after separate approval, use `cfctl plans approve`, `cfctl plans run`, and `cfctl plans status`
+10. perform the capability-specific targeted readback
 
 If a needed `cfctl` surface does not exist yet, add an `ops/cfctl/` desired
 state or design note that explains the intended surface. Do not bypass the

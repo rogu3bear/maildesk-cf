@@ -35,20 +35,20 @@ Use `cfctl` for Cloudflare account resources:
 
 ```bash
 bun run check:cfctl-provisioning
-cfctl doctor
-cfctl maildesk-cf provision --file config/desired-state.example.json --plan
-cfctl maildesk-cf provision --file config/desired-state.example.json --ack-plan <operation-id>
-cfctl maildesk-cf verify --file config/desired-state.example.json
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read Maildesk current state for config/desired-state.example.json without mutation" --json
 ```
 
 `bun run check:cfctl-provisioning` is local and non-mutating. It proves the
-desired-state file is a valid input to the `cfctl maildesk-cf` lifecycle before
-any live account planning.
+desired-state file satisfies the app-side contract before live capability
+resolution or account planning.
 
-Review the provision plan before acknowledging it. If the plan emits component
-commands for DNS, Email Routing, sender domains, Worker scripts, D1, R2,
-Queues, or secrets, run those through the named primitive `cfctl` surface rather
-than using ad hoc Cloudflare API calls.
+Resolve and guide each required capability. Bind live calls to an explicit
+profile and account. For a mutation, inspect the resulting operation with
+`cfctl plans show`; approval, execution, status, and verification remain
+separate steps. Never substitute ad hoc Cloudflare API calls.
 
 ## 4. Run Local Checks
 

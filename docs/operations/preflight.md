@@ -16,7 +16,7 @@ Together, template preflight and `scripts/check-template.sh` verify:
 
 - Bun, Rust, Cargo, and TypeScript tooling are available;
 - required source files exist;
-- the public `cfctl maildesk-cf` desired-state schema and fixture validate;
+- the public Maildesk desired-state schema and cfctl v2 handoff validate;
 - `config/policy.example.json` validates through the Rust router;
 - reserved example domains remain present;
 - Worker TypeScript compiles.
@@ -125,14 +125,19 @@ cargo run --package maildesk-router --bin maildesk-policy-check -- "${MAILDESK_P
 ## Control Plane
 
 Passing production preflight does not mutate Cloudflare. It only proves the
-local checkout is ready for the `cfctl` plan/apply/verify flow.
+local checkout is ready for governed cfctl v2 capability resolution and PlanV2.
 
 Cloudflare account writes should still follow:
 
 ```bash
 bun run check:cfctl-provisioning -- --desired-state config/desired-state.local.json
-cfctl doctor
-cfctl maildesk-cf provision --file config/desired-state.local.json --plan
-cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>
-cfctl maildesk-cf verify --file config/desired-state.local.json
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read Maildesk current state for config/desired-state.local.json without mutation" --json
 ```
+
+After resolution, inspect the selected catalog contract and guide. Bind each
+live call to the exact profile/account and selectors. A mutating `cfctl call`
+creates one PlanV2 operation; it does not cross the write boundary until the
+reviewed operation is separately approved and run.

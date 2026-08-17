@@ -15,7 +15,7 @@ complete elsewhere.
 - [x] Email Worker and API Worker skeletons.
 - [x] Separate API Worker and Email Worker Wrangler targets.
 - [x] Shared TypeScript edge contract for readiness and queue jobs.
-- [x] Template desired-state fixture for `cfctl maildesk-cf`.
+- [x] Template desired-state fixture for the cfctl v2 capability contract.
 - [x] `cfctl` surface contract.
 - [x] Production rollout, deliverability, and outbound identity runbooks.
 
@@ -32,8 +32,8 @@ complete elsewhere.
 - [ ] Queue consumer parses MIME and records parse status.
 - [ ] API Worker exposes authenticated thread and identity endpoints.
 - [x] API Worker exposes a token-gated reply queue endpoint.
-- [x] Public `cfctl maildesk-cf` provisioning lane has a desired-state schema,
-      template fixture, local proof hook, and plan/ack/verify handoff for D1,
+- [x] Public cfctl v2 provisioning lane has a desired-state schema,
+      template fixture, local proof hook, and PlanV2/readback handoff for D1,
       R2, Queue, Worker, DNS, and Email Routing resources.
 
 ## Milestone 2: Operator Desk
@@ -49,7 +49,8 @@ complete elsewhere.
 
 ## Milestone 3: Production Hardening
 
-- [x] `cfctl maildesk-cf verify` reads live Cloudflare state and reports drift.
+- [x] Explicit profile/account-bound cfctl v2 capabilities read live Cloudflare
+      state and report drift.
 - [x] Local horizontal verifier emits a per-domain policy/readiness receipt.
 - [ ] DNS authentication checks cover SPF, DKIM, DMARC, MTA-STS, and TLS
       reporting when configured.
@@ -61,20 +62,20 @@ complete elsewhere.
 
 ### cfctl
 
-`cfctl` has a first-class `maildesk-cf` lifecycle surface. Production
+`cfctl` has cataloged v2 capabilities and PlanV2 lifecycle commands. Production
 provisioning is template-native when each component operation remains
-preview-gated through `cfctl`.
+capability-bound and plan-gated through `cfctl`.
 
 Required surfaces:
 
 - checked in this repo: desired-state schema for domains, aliases, Worker
   bindings, storage bindings, sender mode, and verification posture;
-- checked in this repo: non-mutating local proof hook that emits the
-  `cfctl maildesk-cf` plan/ack/verify handoff;
-- blocked outside this checkout: installed `cfctl` with the `maildesk-cf`
-  lifecycle surface, a healthy `cfctl doctor` lane, real account/domain desired
-  state, reviewed preview operation id, and post-mutation live readback;
-- still owned by `cfctl`: plan/apply/verify lifecycle, DNS, Email Routing,
+- checked in this repo: non-mutating local proof hook that emits the cfctl v2
+  discovery, PlanV2, and readback handoff;
+- blocked outside this checkout: installed `cfctl` with required catalog
+  capabilities, healthy version/doctor/agents-doctor results, real account and
+  domain desired state, reviewed operation ID, and post-mutation live readback;
+- still owned by `cfctl`: call/plan/approve/run/status lifecycle, DNS, Email Routing,
   sender-domain readback, D1, R2, Queue, Worker, and secret provisioning;
 - still required for production closeout: verification receipt that avoids
   broad live sends.

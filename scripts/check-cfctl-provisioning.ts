@@ -2,6 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 import {
+  CFCTL_COMMAND_CONTRACT_VERSION,
+  provisioningDiscoveryCommands,
+} from "./cfctl-v2-command-contract";
+import {
   isRepositoryRelativePath,
   canonicalWorkerConfigFailure,
   type WranglerConfigFormat,
@@ -97,10 +101,26 @@ const receipt = {
     provisioning_contract_ready: true,
     live_mutation_ready: false,
   },
-  cfctl_commands: lifecycleCommands(desiredStateDisplayPath),
+  cfctl_handoff: {
+    schema_version: CFCTL_COMMAND_CONTRACT_VERSION,
+    discovery_commands: provisioningDiscoveryCommands(desiredStateDisplayPath),
+    read_contract: {
+      profile: "explicit",
+      account: "selected_profile_account",
+      capability: "resolved_and_catalog_inspected",
+      envelope: "ResultEnvelopeV2",
+    },
+    mutation_contract: {
+      plan: "cfctl call creates one hash-bound PlanV2 operation",
+      review: "inspect the exact operation with cfctl plans show",
+      approval: "approve the reviewed operation id with cfctl plans approve",
+      execution: "run the approved operation id with cfctl plans run",
+      verification: "inspect cfctl plans status and perform the capability-specific readback",
+    },
+  },
   resources: resourceSummary(desiredState),
   protected_actions: [
-    "cfctl maildesk-cf provision --ack-plan <operation-id>",
+    "approval and execution of a reviewed PlanV2 operation id",
     "targeted inbound or outbound live mail probes",
   ],
   outside_checkout_blockers: outsideCheckoutBlockers(),
@@ -109,12 +129,12 @@ const receipt = {
 if (jsonOutput) {
   console.log(JSON.stringify(receipt, null, 2));
 } else {
-  console.log("cfctl maildesk-cf provisioning contract ready");
+  console.log("cfctl v2 Maildesk provisioning contract ready");
   console.log(`schema ${receipt.schema_path}`);
   console.log(`desired_state ${receipt.desired_state_path}`);
   console.log("");
-  for (const command of receipt.cfctl_commands) {
-    console.log(command);
+  for (const command of receipt.cfctl_handoff.discovery_commands) {
+    console.log(command.argv.join(" "));
   }
   console.log("");
   console.log("outside_checkout_blockers");
@@ -316,16 +336,6 @@ function validateWranglerBuildCommand(
   if (containmentFailure) failures.push(`${prefix}.config ${containmentFailure}`);
 }
 
-function lifecycleCommands(desiredStatePath: string): string[] {
-  return [
-    "cfctl doctor",
-    `cfctl maildesk-cf diff --file ${desiredStatePath}`,
-    `cfctl maildesk-cf provision --file ${desiredStatePath} --plan`,
-    `cfctl maildesk-cf provision --file ${desiredStatePath} --ack-plan <operation-id>`,
-    `cfctl maildesk-cf verify --file ${desiredStatePath}`,
-  ];
-}
-
 function resourceSummary(desired: DesiredState) {
   return {
     domains: desired.domains.map((domain) => domain.name).sort(),
@@ -371,11 +381,12 @@ function emailRoutingAliases(desired: DesiredState): string[] {
 
 function outsideCheckoutBlockers(): string[] {
   return [
-    "install or update cfctl with the maildesk-cf lifecycle surface",
+    "install or update cfctl with the required v2 catalog capabilities",
     "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
-    "run cfctl doctor with a healthy credential lane before planning",
-    "review the cfctl provision preview and provide its operation id before --ack-plan",
-    "run targeted cfctl maildesk-cf verify and mail proof readbacks after mutation",
+    "run cfctl version, doctor, and agents doctor before governed discovery",
+    "bind every live call to an explicit profile, selected account, capability, and exact selectors",
+    "review the immutable PlanV2 operation before approval and execution",
+    "run capability-specific post-change readback and targeted mail proof after mutation",
   ];
 }
 

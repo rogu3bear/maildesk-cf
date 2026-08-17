@@ -50,29 +50,23 @@ Email Routing desired state.
 
 ## 3. Cloudflare Provisioning
 
-Provision through `cfctl`, using plan and acknowledge phases for mutations:
+Provision through cfctl v2, using capability resolution and PlanV2 for each
+bounded mutation:
 
 ```bash
 bun run check:cfctl-provisioning -- --desired-state config/desired-state.local.json
-cfctl doctor
-cfctl maildesk-cf provision --file config/desired-state.local.json --plan
-cfctl maildesk-cf provision --file config/desired-state.local.json --ack-plan <operation-id>
-cfctl maildesk-cf verify --file config/desired-state.local.json
+cfctl version --json
+cfctl doctor --json
+cfctl agents doctor --json
+cfctl resolve "read Maildesk current state for config/desired-state.local.json without mutation" --json
 ```
 
 Keep desired state in ignored private files and verify every mutation with
-readback. The local check proves the file is usable by the lifecycle surface;
-the `cfctl` plan and verify steps still require the operator's configured
-account, credentials, and reviewed operation id. If the composite plan emits
-component commands, run those through the named primitive surface. For example:
-
-```bash
-cfctl apply email.routing_rule upsert --zone example.com \
-  --name founders@example.com \
-  --service maildesk-cf-router \
-  --plan
-cfctl apply sender_domain enable --zone example.com --name example.com --plan
-```
+readback. The local check proves the file satisfies the app-side contract. Use
+`cfctl catalog show` and `cfctl guide` for the selected capability, then run the
+exact capability/profile/account/selector-bound call. A mutating call creates a
+plan. Review it with `cfctl plans show`; approval, execution, status, and
+post-change readback remain separate protected steps.
 
 ## 4. Runtime Config
 
@@ -148,5 +142,5 @@ To enable Resend, set both desired-state `sender.mode` and
 and build `MAILDESK_VERIFIED_SENDER_DOMAINS` from Resend domain readback.
 Production preflight also accepts `RESEND` as a local compatibility alias for
 existing ignored environment files. Resend sender-domain blockers are repaired
-in Resend and refreshed through provider readback; they do not use
-`cfctl sender_domain --ack-plan`.
+in Resend and refreshed through provider readback; they do not use a Cloudflare
+PlanV2 mutation.

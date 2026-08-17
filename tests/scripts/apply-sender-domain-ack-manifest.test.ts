@@ -6,238 +6,133 @@ import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
 
-describe("sender-domain ack manifest applier", () => {
-  test("dry-runs reviewed ack commands without invoking cfctl", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-ack-apply-"));
-    const manifestPath = join(dir, "ack-manifest.json");
-    const logPath = join(dir, "cfctl-calls.log");
-    const cfctl = fakeCfctl(logPath);
-
-    writeJson(manifestPath, {
-      items: [
-        {
-          ok: true,
-          performed: false,
-          lane: "global",
-          zone: "tenant.example.com",
-          target: "tenant.example.com",
-          operation_id: "op-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-        },
-      ],
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/apply-sender-domain-ack-manifest.ts",
-        "--",
-        "--manifest",
-        manifestPath,
-        "--cfctl",
-        cfctl,
-        "--json",
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-      },
-    );
-
+describe("sender-domain PlanV2 executor", () => {
+  test("dry-runs reviewed plans without invoking cfctl", () => {
+    const setup = fixture([planItem("tenant.example.com", "op-tenant")]);
+    const result = run(setup, []);
     expect(result.status).toBe(0);
-    expect(existsSync(logPath)).toBe(false);
-    const summary = JSON.parse(result.stdout) as {
-      mode?: string;
-      ready_count?: number;
-      applied_count?: number;
-      dry_run_count?: number;
-      results?: Array<{ status?: string; domain?: string; operation_id?: string }>;
-    };
-    expect(summary).toMatchObject({
+    expect(existsSync(setup.logPath)).toBe(false);
+    expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "dry_run",
       ready_count: 1,
-      applied_count: 0,
+      executed_count: 0,
       dry_run_count: 1,
-    });
-    expect(summary.results?.[0]).toMatchObject({
-      status: "dry_run",
-      domain: "tenant.example.com",
-      operation_id: "op-tenant",
+      results: [{
+        status: "dry_run",
+        domain: "tenant.example.com",
+        operation_id: "op-tenant",
+        lifecycle: { run: ["cfctl", "plans", "run", "op-tenant", "--json"] },
+      }],
     });
   });
 
-  test("execute mode requires an explicit ack-plan confirmation", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-ack-apply-"));
-    const manifestPath = join(dir, "ack-manifest.json");
-    const logPath = join(dir, "cfctl-calls.log");
-    const cfctl = fakeCfctl(logPath);
-
-    writeJson(manifestPath, {
-      items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "op-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-        },
-      ],
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/apply-sender-domain-ack-manifest.ts",
-        "--",
-        "--manifest",
-        manifestPath,
-        "--cfctl",
-        cfctl,
-        "--execute",
-        "--json",
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-      },
-    );
-
+  test("execute mode requires an explicit PlanV2 confirmation", () => {
+    const setup = fixture([planItem("tenant.example.com", "op-tenant")]);
+    const result = run(setup, ["--execute"]);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("missing --confirm-ack-plan for --execute");
-    expect(existsSync(logPath)).toBe(false);
+    expect(result.stderr).toContain("missing --confirm-plan for --execute");
+    expect(existsSync(setup.logPath)).toBe(false);
   });
 
-  test("executes reviewed ack commands only when explicitly confirmed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-ack-apply-"));
-    const manifestPath = join(dir, "ack-manifest.json");
-    const logPath = join(dir, "cfctl-calls.log");
-    const cfctl = fakeCfctl(logPath);
-
-    writeJson(manifestPath, {
-      items: [
-        {
-          ok: true,
-          performed: false,
-          target: "tenant.example.com",
-          operation_id: "op-tenant",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-        },
-      ],
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/apply-sender-domain-ack-manifest.ts",
-        "--",
-        "--manifest",
-        manifestPath,
-        "--cfctl",
-        cfctl,
-        "--execute",
-        "--confirm-ack-plan",
-        "--json",
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-      },
-    );
-
-    expect(result.status).toBe(0);
-    expect(readFileSync(logPath, "utf8")).toContain(
-      "lane=global args=apply sender_domain enable --zone tenant.example.com --name tenant.example.com --ack-plan op-tenant",
-    );
-    const summary = JSON.parse(result.stdout) as {
-      mode?: string;
-      applied_count?: number;
-      results?: Array<{ status?: string; domain?: string; operation_id?: string }>;
-    };
-    expect(summary).toMatchObject({
+  test("shows, approves, runs, and checks the exact reviewed operation", () => {
+    const setup = fixture([planItem("tenant.example.com", "op-tenant")]);
+    const result = run(setup, ["--execute", "--confirm-plan"]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(setup.logPath, "utf8").trim().split("\n")).toEqual([
+      "plans show op-tenant --json",
+      "plans approve op-tenant --yes --json",
+      "plans run op-tenant --json",
+      "plans status op-tenant --json",
+    ]);
+    expect(JSON.parse(result.stdout)).toMatchObject({
       mode: "execute",
-      applied_count: 1,
-    });
-    expect(summary.results?.[0]).toMatchObject({
-      status: "applied",
-      domain: "tenant.example.com",
-      operation_id: "op-tenant",
+      executed_count: 1,
+      results: [{ status: "executed", domain: "tenant.example.com", operation_id: "op-tenant" }],
     });
   });
 
-  test("bulk execute requires an explicit bulk ack-plan confirmation", () => {
-    const dir = mkdtempSync(join(tmpdir(), "maildesk-ack-apply-"));
-    const manifestPath = join(dir, "ack-manifest.json");
-    const logPath = join(dir, "cfctl-calls.log");
-    const cfctl = fakeCfctl(logPath);
-
-    writeJson(manifestPath, {
-      items: [
-        {
-          ok: true,
-          performed: false,
-          target: "alpha.example.com",
-          operation_id: "op-alpha",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone alpha.example.com --name alpha.example.com --ack-plan op-alpha",
-        },
-        {
-          ok: true,
-          performed: false,
-          target: "bravo.example.com",
-          operation_id: "op-bravo",
-          ack_command:
-            "CF_TOKEN_LANE=global cfctl apply sender_domain enable --zone bravo.example.com --name bravo.example.com --ack-plan op-bravo",
-        },
-      ],
-    });
-
-    const result = spawnSync(
-      "bun",
-      [
-        "run",
-        "scripts/apply-sender-domain-ack-manifest.ts",
-        "--",
-        "--manifest",
-        manifestPath,
-        "--cfctl",
-        cfctl,
-        "--execute",
-        "--confirm-ack-plan",
-        "--all",
-        "--json",
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-      },
-    );
-
+  test("bulk execute requires an explicit bulk PlanV2 confirmation", () => {
+    const setup = fixture([
+      planItem("alpha.example.com", "op-alpha"),
+      planItem("bravo.example.com", "op-bravo"),
+    ]);
+    const result = run(setup, ["--execute", "--confirm-plan", "--all"]);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("missing --confirm-bulk-ack-plan for bulk --execute");
-    expect(existsSync(logPath)).toBe(false);
+    expect(result.stderr).toContain("missing --confirm-bulk-plan for bulk --execute");
+    expect(existsSync(setup.logPath)).toBe(false);
+  });
+
+  test("fails closed when plans show returns a different PlanV2 content hash", () => {
+    const setup = fixture([planItem("tenant.example.com", "op-tenant")], "d");
+    const result = run(setup, ["--execute", "--confirm-plan"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("PlanV2 show envelope mismatch");
+    expect(readFileSync(setup.logPath, "utf8").trim().split("\n")).toEqual([
+      "plans show op-tenant --json",
+    ]);
   });
 });
 
-function fakeCfctl(logPath: string): string {
+function fixture(items: unknown[], planHashCharacter = "c") {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-plan-execute-"));
+  const manifestPath = join(dir, "plan-manifest.json");
+  const logPath = join(dir, "cfctl-calls.log");
+  writeJson(manifestPath, { schema_version: 2, items });
+  return { manifestPath, logPath, cfctl: fakeCfctl(logPath, planHashCharacter) };
+}
+
+function planItem(target: string, operationId: string) {
+  return {
+    schema_version: 2,
+    ok: true,
+    performed: false,
+    capability_id: "email-sending-subdomains-create-sending-subdomain",
+    profile_id: "profile-example",
+    account_id: "account-example",
+    zone_id: `zone-${target}`,
+    target,
+    operation_id: operationId,
+    plan_content_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    evidence_hashes: ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    plan_expires_at: "2099-01-01T00:00:00Z",
+  };
+}
+
+function run(
+  setup: { manifestPath: string; logPath: string; cfctl: string },
+  extra: string[],
+) {
+  return spawnSync(
+    "bun",
+    [
+      "run",
+      "scripts/apply-sender-domain-ack-manifest.ts",
+      "--",
+      "--manifest",
+      setup.manifestPath,
+      "--cfctl",
+      setup.cfctl,
+      ...extra,
+      "--json",
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+}
+
+function fakeCfctl(logPath: string, planHashCharacter: string): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-fake-cfctl-"));
   const path = join(dir, "cfctl");
   writeFileSync(
     path,
     `#!/bin/sh
-printf 'lane=%s args=%s\\n' "$CF_TOKEN_LANE" "$*" >> ${JSON.stringify(logPath)}
-cat <<JSON
-{
-  "ok": true,
-  "performed": true,
-  "operation_id": "applied-op"
-}
-JSON
+printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
+performed=false
+if [ "$1" = "plans" ] && [ "$2" = "run" ]; then performed=true; fi
+if [ "$1" = "plans" ] && [ "$2" = "show" ]; then
+  printf '%s\n' '{"schema_version":2,"ok":true,"performed":false,"capability_id":"email-sending-subdomains-create-sending-subdomain","operation_id":"op-tenant","result":{"plan_v2":{"schema_version":2,"content_hash":"sha256:${planHashCharacter.repeat(64)}","plan":{"schema_version":1,"operation_id":"op-tenant","profile_id":"profile-example","account_id":"account-example","capability":{"id":"email-sending-subdomains-create-sending-subdomain"},"targets":{"selectors":{"zone_id":"zone-tenant.example.com"},"account_id":"account-example"},"input":{"selectors":{"zone_id":"zone-tenant.example.com"},"query":{},"body":{"name":"tenant.example.com"}}}}},"error":null}'
+else
+  printf '{"schema_version":2,"ok":true,"performed":%s,"operation_id":"%s","error":null}\n' "$performed" "$3"
+fi
 `,
   );
   chmodSync(path, 0o700);
