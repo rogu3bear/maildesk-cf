@@ -185,7 +185,9 @@ const senderMode = senderModeOrDefault(desiredState.sender?.mode);
 const useResend = senderMode === "resend" && !args.includes("--no-resend");
 const routerService = desiredState.workers.relay_router.script_name;
 const cfctlProfile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
-const MAX_EMAIL_ROUTING_PAGE_PROBES = 100;
+const EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION = 1;
+const EMAIL_ROUTING_RULE_PAGE_SIZE = 50;
+const EMAIL_ROUTING_RULE_MAX_PAGES = 100;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
@@ -382,22 +384,32 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     }
     zones.push(desiredDomain.name);
 
+    const expectedAliases = [
+      ...(desiredDomain.role_aliases ?? []),
+      ...(desiredDomain.personal_aliases ?? []),
+    ];
     let aliases: string[] = [];
     if (desiredDomain.inbound_mx_provider === "cloudflare_email_routing") {
-      const routingPages = collectEmailRoutingRules(
+      const routingProjection = collectEmailRoutingRules(
         "email-routing-routing-rules-list-routing-rules",
         profileId,
         accountId,
         [["zone_id", zoneId]],
       );
-      receipts.push(...routingPages.receipts);
-      if (!routingPages.ok || !routingPages.records) {
+      receipts.push(...routingProjection.receipts);
+      if (!routingProjection.ok || !routingProjection.records) {
         return incompleteReadback(profileId, accountId, receipts);
       }
-      const routingRecords = routingPages.records;
-      aliases = routingRecords
-        .filter((rule) => rule.enabled !== false && routesToMaildesk(rule as RoutingRule, routerService))
-        .map((rule) => localPart(stringField(rule, ["recipient"]) ?? matcherValue(rule as RoutingRule)))
+      const expectedAliasByHash = new Map(expectedAliases.map((alias) => [
+        sha256Identity(`${alias}@${desiredDomain.name}`),
+        alias,
+      ]));
+      aliases = routingProjection.records
+        .filter((rule) => rule.enabled && projectedRuleRoutesToMaildesk(rule, routerService))
+        .flatMap((rule) => rule.matchers
+          .filter((matcher) => matcher.field === "to")
+          .map((matcher) => matcher.value_sha256))
+        .map((identity) => identity ? expectedAliasByHash.get(identity) : undefined)
         .filter((alias): alias is string => Boolean(alias))
         .sort();
       emailRouting[desiredDomain.name] = {
@@ -446,10 +458,6 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       if (!catchAllCall.ok) return incompleteReadback(profileId, accountId, receipts);
       const catchAllRule = decodeCatchAllRule(catchAllCall.result);
       if (!catchAllRule) return malformedReadback(profileId, accountId, receipts, catchAllCall.receipt);
-      const expectedAliases = [
-        ...(desiredDomain.role_aliases ?? []),
-        ...(desiredDomain.personal_aliases ?? []),
-      ];
       domains[desiredDomain.name] = {
         email_routing: settings.enabled === true ? "ok" : "drift",
         catch_all: desiredDomain.catch_all === true
@@ -767,79 +775,56 @@ function collectEmailRoutingRules(
   profileId: string,
   accountId: string,
   selectors: Array<[string, string]>,
-): { ok: boolean; records?: Array<Record<string, unknown>>; receipts: CfctlReadReceipt[] } {
-  const perPage = 50;
-  const receipts: CfctlReadReceipt[] = [];
-  const records: Array<Record<string, unknown>> = [];
+): { ok: boolean; records?: EmailRoutingRule[]; receipts: CfctlReadReceipt[] } {
+  const call = cfctlCall(capabilityId, profileId, accountId, selectors);
+  const receipts = [call.receipt];
+  if (!call.ok) return { ok: false, receipts };
 
-  for (let page = 1; page <= MAX_EMAIL_ROUTING_PAGE_PROBES; page += 1) {
-    const call = cfctlCall(
-      capabilityId,
-      profileId,
-      accountId,
-      selectors,
-      [["page", String(page)], ["per_page", String(perPage)]],
-    );
-    receipts.push(call.receipt);
-    if (!call.ok) return { ok: false, receipts };
-
-    const pageRecords = decodePlainRecords(call.result, validRoutingRule);
-    if (!pageRecords) {
-      call.receipt.ok = false;
-      call.receipt.error_code = "CFCTL_RESULT_SHAPE_MALFORMED";
-      return { ok: false, receipts };
-    }
-    if (pageRecords.length > perPage) {
-      call.receipt.ok = false;
-      call.receipt.error_code = "CFCTL_PAGINATION_PAGE_OVERSIZED";
-      return { ok: false, receipts };
-    }
-
-    const resultInfo = isRecord(call.result) ? call.result.result_info : undefined;
-    if (resultInfo !== undefined && !isRecord(resultInfo)) {
-      call.receipt.ok = false;
-      call.receipt.error_code = "CFCTL_PAGINATION_MALFORMED";
-      return { ok: false, receipts };
-    }
-    if (page === 1 && isRecord(resultInfo)) {
-      const pagination = paginationStatus(call.result, { kind: "page", per_page: perPage });
-      if (pagination.summary) call.receipt.pagination = pagination.summary;
-      if (
-        !pagination.ok ||
-        pagination.summary?.kind !== "page" ||
-        pagination.summary.total_pages !== 1 ||
-        pagination.summary.total_count !== pageRecords.length
-      ) {
-        call.receipt.ok = false;
-        call.receipt.error_code = pagination.error_code ?? "CFCTL_PAGINATION_MALFORMED";
-        return { ok: false, receipts };
-      }
-      return { ok: true, records: pageRecords, receipts };
-    }
-    if (page > 1 && resultInfo !== undefined) {
-      call.receipt.ok = false;
-      call.receipt.error_code = "CFCTL_PAGINATION_MALFORMED";
-      return { ok: false, receipts };
-    }
-
-    const terminal = pageRecords.length === 0;
-    call.receipt.pagination = {
-      kind: "page_probe",
-      page,
-      per_page: perPage,
-      item_count: pageRecords.length,
-      terminal,
-    };
-    if (terminal) return { ok: true, records, receipts };
-    records.push(...pageRecords);
+  const projection = decodeEmailRoutingRuleSet(call.result);
+  if (!projection) {
+    call.receipt.ok = false;
+    call.receipt.error_code = "CFCTL_RESULT_SHAPE_MALFORMED";
+    return { ok: false, receipts };
   }
+  call.receipt.pagination = {
+    kind: "page_probe",
+    per_page: projection.page_size,
+    total_pages: projection.pages,
+    total_count: projection.rule_count,
+    item_count: projection.rule_count,
+    terminal: projection.complete,
+  };
+  return { ok: true, records: projection.rules, receipts };
+}
 
-  const receipt = receipts.at(-1);
-  if (receipt) {
-    receipt.ok = false;
-    receipt.error_code = "CFCTL_PAGINATION_LIMIT_EXCEEDED";
-  }
-  return { ok: false, receipts };
+function decodeEmailRoutingRuleSet(value: unknown): EmailRoutingRuleSet | null {
+  if (!isRecord(value) || !isRecord(value.result)) return null;
+  const projection = value.result;
+  if (
+    projection.schema_version !== EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION ||
+    projection.complete !== true ||
+    projection.page_size !== EMAIL_ROUTING_RULE_PAGE_SIZE ||
+    typeof projection.pages !== "number" ||
+    !Number.isInteger(projection.pages) ||
+    projection.pages < 1 ||
+    projection.pages > EMAIL_ROUTING_RULE_MAX_PAGES ||
+    typeof projection.rule_count !== "number" ||
+    !Number.isInteger(projection.rule_count) ||
+    projection.rule_count < 0 ||
+    projection.rule_count > (projection.pages - 1) * EMAIL_ROUTING_RULE_PAGE_SIZE ||
+    !Array.isArray(projection.rules) ||
+    projection.rule_count !== projection.rules.length
+  ) return null;
+  const rules = projection.rules.filter(isRecord);
+  if (rules.length !== projection.rules.length || !rules.every(validProjectedRoutingRule)) return null;
+  return {
+    schema_version: EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION,
+    complete: true,
+    page_size: EMAIL_ROUTING_RULE_PAGE_SIZE,
+    pages: projection.pages,
+    rule_count: projection.rule_count,
+    rules: rules as unknown as EmailRoutingRule[],
+  };
 }
 
 function paginationStatus(value: unknown, contract: PaginationContract): {
@@ -1032,19 +1017,38 @@ function validZoneRecord(value: Record<string, unknown>): boolean {
     typeof value.status === "string";
 }
 
-function validRoutingRule(value: Record<string, unknown>): boolean {
-  if (typeof value.enabled !== "boolean" || !Array.isArray(value.actions)) return false;
-  const recipientValid = typeof value.recipient === "string";
-  const matchersValid = Array.isArray(value.matchers) && value.matchers.every((matcher) =>
-    isRecord(matcher) && typeof matcher.field === "string" && typeof matcher.value === "string"
-  );
+function validProjectedRoutingRule(value: Record<string, unknown>): boolean {
+  if (
+    typeof value.enabled !== "boolean" ||
+    !Array.isArray(value.matchers) ||
+    value.matchers.length === 0 ||
+    !Array.isArray(value.actions) ||
+    value.actions.length === 0
+  ) return false;
+  const matchersValid = value.matchers.every((matcher) => {
+    if (!isRecord(matcher) || typeof matcher.matcher_type !== "string" || matcher.matcher_type.length === 0) {
+      return false;
+    }
+    const fieldPresent = typeof matcher.field === "string" && matcher.field.length > 0;
+    const identityPresent = typeof matcher.value_sha256 === "string" &&
+      /^sha256:[a-f0-9]{64}$/.test(matcher.value_sha256);
+    return (matcher.field === undefined && matcher.value_sha256 === undefined) ||
+      (fieldPresent && identityPresent);
+  });
   const actionsValid = value.actions.every((action) =>
     isRecord(action) &&
-    typeof action.type === "string" &&
-    (action.value === undefined ||
-      (Array.isArray(action.value) && action.value.every((entry) => typeof entry === "string")))
+    typeof action.action_type === "string" &&
+    action.action_type.length > 0 &&
+    Array.isArray(action.worker_targets) &&
+    action.worker_targets.every((entry) => typeof entry === "string" && entry.length > 0) &&
+    typeof action.value_count === "number" &&
+    Number.isInteger(action.value_count) &&
+    action.value_count >= action.worker_targets.length &&
+    (action.action_type === "worker"
+      ? action.value_count === action.worker_targets.length
+      : action.worker_targets.length === 0)
   );
-  return (recipientValid || matchersValid) && actionsValid;
+  return matchersValid && actionsValid;
 }
 
 function validDnsRecord(value: Record<string, unknown>): boolean {
@@ -1426,8 +1430,10 @@ function routesToMaildesk(rule: RoutingRule, routerService: string): boolean {
   });
 }
 
-function matcherValue(rule: RoutingRule): string | undefined {
-  return rule.matchers?.find((matcher) => matcher.field === "to")?.value;
+function projectedRuleRoutesToMaildesk(rule: EmailRoutingRule, routerService: string): boolean {
+  return rule.actions.some((action) =>
+    action.action_type === "worker" && action.worker_targets.includes(routerService)
+  );
 }
 
 function localPart(address: string | undefined): string | undefined {
@@ -1462,6 +1468,10 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function sha256Identity(value: string): string {
+  return `sha256:${sha256(value)}`;
+}
+
 function relativePath(path: string): string {
   return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 }
@@ -1471,6 +1481,29 @@ interface RoutingRule {
   enabled?: boolean;
   matchers?: Array<{ field?: string; value?: string }>;
   actions?: Array<{ type?: string; value?: string[] }>;
+}
+
+interface EmailRoutingRuleSet {
+  schema_version: 1;
+  complete: true;
+  page_size: 50;
+  pages: number;
+  rule_count: number;
+  rules: EmailRoutingRule[];
+}
+
+interface EmailRoutingRule {
+  enabled: boolean;
+  matchers: Array<{
+    matcher_type: string;
+    field?: string;
+    value_sha256?: string;
+  }>;
+  actions: Array<{
+    action_type: string;
+    worker_targets: string[];
+    value_count: number;
+  }>;
 }
 
 interface GoogleResourceSearch {

@@ -182,13 +182,17 @@ A missing profile, denied call, malformed envelope, binding mismatch, missing
 required zone, or partial capability set makes the collector exit nonzero after
 writing `cfctl_readback.complete: false`. Catalog-declared page and cursor
 metadata is part of that contract: malformed metadata, a declared nonterminal
-page, or a continuation cursor is rejected rather than silently truncated. The
-Email Routing rules endpoint is the one bounded exception for an otherwise
-valid envelope that omits `result_info`: the collector requests explicit page
-numbers until it receives an empty terminal page, rejects any page above the
-declared 50-item limit, and fails after 100 page probes instead of processing an
-unbounded collection. The receipt retains one performed read and bounded
-page/item summary per probe. Other absent pagination metadata remains malformed.
+page, or a continuation cursor is rejected rather than silently truncated.
+Email Routing rules are the narrower typed case: cfctl owns the provider page
+probes and returns one complete, versioned `EmailRoutingRuleSetV1` projection.
+The collector accepts only schema version 1, the fixed 50-item page size, at
+most 100 pages, a rule count that fits the completed-page capacity, and typed
+rules whose count is exact. It never requests provider pages or consumes raw
+matcher and action values. Instead it hashes each expected full alias locally,
+compares only `field: "to"` identities, and retains only matched expected
+aliases plus Worker topology. Incomplete projections, legacy raw rule arrays,
+invalid matcher hashes, suppressed Worker targets, or inconsistent counts are
+malformed evidence. Other absent pagination metadata remains malformed.
 The verifier does not allow partial
 D1, `/readyz`, or provider evidence to turn that incomplete governed readback
 into `live_evidence_present: true`. When no profile is configured, the public
