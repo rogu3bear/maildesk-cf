@@ -92,12 +92,14 @@ interface CfctlReadReceipt {
   evidence_hashes: string[];
   error_code?: string;
   pagination?: {
-    kind: "page" | "cursor";
+    kind: "page" | "cursor" | "page_probe";
     page?: number;
     per_page?: number;
     total_pages?: number;
     total_count?: number;
     cursor_present?: boolean;
+    item_count?: number;
+    terminal?: boolean;
   };
 }
 
@@ -183,6 +185,7 @@ const senderMode = senderModeOrDefault(desiredState.sender?.mode);
 const useResend = senderMode === "resend" && !args.includes("--no-resend");
 const routerService = desiredState.workers.relay_router.script_name;
 const cfctlProfile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
+const MAX_EMAIL_ROUTING_PAGE_PROBES = 100;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
@@ -381,18 +384,17 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
 
     let aliases: string[] = [];
     if (desiredDomain.inbound_mx_provider === "cloudflare_email_routing") {
-      const routingCall = cfctlCall(
+      const routingPages = collectEmailRoutingRules(
         "email-routing-routing-rules-list-routing-rules",
         profileId,
         accountId,
         [["zone_id", zoneId]],
-        [["page", "1"], ["per_page", "50"]],
-        { kind: "page", per_page: 50 },
       );
-      receipts.push(routingCall.receipt);
-      if (!routingCall.ok) return incompleteReadback(profileId, accountId, receipts);
-      const routingRecords = decodePageRecords(routingCall, validRoutingRule);
-      if (!routingRecords) return malformedReadback(profileId, accountId, receipts, routingCall.receipt);
+      receipts.push(...routingPages.receipts);
+      if (!routingPages.ok || !routingPages.records) {
+        return incompleteReadback(profileId, accountId, receipts);
+      }
+      const routingRecords = routingPages.records;
       aliases = routingRecords
         .filter((rule) => rule.enabled !== false && routesToMaildesk(rule as RoutingRule, routerService))
         .map((rule) => localPart(stringField(rule, ["recipient"]) ?? matcherValue(rule as RoutingRule)))
@@ -760,6 +762,86 @@ function cfctlCall(
   return { ok, result: ok ? envelope?.result : undefined, receipt };
 }
 
+function collectEmailRoutingRules(
+  capabilityId: string,
+  profileId: string,
+  accountId: string,
+  selectors: Array<[string, string]>,
+): { ok: boolean; records?: Array<Record<string, unknown>>; receipts: CfctlReadReceipt[] } {
+  const perPage = 50;
+  const receipts: CfctlReadReceipt[] = [];
+  const records: Array<Record<string, unknown>> = [];
+
+  for (let page = 1; page <= MAX_EMAIL_ROUTING_PAGE_PROBES; page += 1) {
+    const call = cfctlCall(
+      capabilityId,
+      profileId,
+      accountId,
+      selectors,
+      [["page", String(page)], ["per_page", String(perPage)]],
+    );
+    receipts.push(call.receipt);
+    if (!call.ok) return { ok: false, receipts };
+
+    const pageRecords = decodePlainRecords(call.result, validRoutingRule);
+    if (!pageRecords) {
+      call.receipt.ok = false;
+      call.receipt.error_code = "CFCTL_RESULT_SHAPE_MALFORMED";
+      return { ok: false, receipts };
+    }
+    if (pageRecords.length > perPage) {
+      call.receipt.ok = false;
+      call.receipt.error_code = "CFCTL_PAGINATION_PAGE_OVERSIZED";
+      return { ok: false, receipts };
+    }
+
+    const resultInfo = isRecord(call.result) ? call.result.result_info : undefined;
+    if (resultInfo !== undefined && !isRecord(resultInfo)) {
+      call.receipt.ok = false;
+      call.receipt.error_code = "CFCTL_PAGINATION_MALFORMED";
+      return { ok: false, receipts };
+    }
+    if (page === 1 && isRecord(resultInfo)) {
+      const pagination = paginationStatus(call.result, { kind: "page", per_page: perPage });
+      if (pagination.summary) call.receipt.pagination = pagination.summary;
+      if (
+        !pagination.ok ||
+        pagination.summary?.kind !== "page" ||
+        pagination.summary.total_pages !== 1 ||
+        pagination.summary.total_count !== pageRecords.length
+      ) {
+        call.receipt.ok = false;
+        call.receipt.error_code = pagination.error_code ?? "CFCTL_PAGINATION_MALFORMED";
+        return { ok: false, receipts };
+      }
+      return { ok: true, records: pageRecords, receipts };
+    }
+    if (page > 1 && resultInfo !== undefined) {
+      call.receipt.ok = false;
+      call.receipt.error_code = "CFCTL_PAGINATION_MALFORMED";
+      return { ok: false, receipts };
+    }
+
+    const terminal = pageRecords.length === 0;
+    call.receipt.pagination = {
+      kind: "page_probe",
+      page,
+      per_page: perPage,
+      item_count: pageRecords.length,
+      terminal,
+    };
+    if (terminal) return { ok: true, records, receipts };
+    records.push(...pageRecords);
+  }
+
+  const receipt = receipts.at(-1);
+  if (receipt) {
+    receipt.ok = false;
+    receipt.error_code = "CFCTL_PAGINATION_LIMIT_EXCEEDED";
+  }
+  return { ok: false, receipts };
+}
+
 function paginationStatus(value: unknown, contract: PaginationContract): {
   ok: boolean;
   error_code?: string;
@@ -780,6 +862,15 @@ function paginationStatus(value: unknown, contract: PaginationContract): {
       ...(cursorPresent ? { error_code: "CFCTL_PAGINATION_INCOMPLETE" } : {}),
       summary: { kind: "cursor", cursor_present: cursorPresent },
     };
+  }
+
+  for (const cursor of [info.cursor, isRecord(info.cursors) ? info.cursors.after : info.cursors]) {
+    if (cursor !== undefined && cursor !== null && typeof cursor !== "string") {
+      return { ok: false, error_code: "CFCTL_PAGINATION_MALFORMED" };
+    }
+    if (typeof cursor === "string" && cursor.length > 0) {
+      return { ok: false, error_code: "CFCTL_PAGINATION_INCOMPLETE" };
+    }
   }
 
   const page = integerField(info, "page");

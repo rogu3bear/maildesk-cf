@@ -181,9 +181,15 @@ it does not copy raw provider responses into the receipt metadata.
 A missing profile, denied call, malformed envelope, binding mismatch, missing
 required zone, or partial capability set makes the collector exit nonzero after
 writing `cfctl_readback.complete: false`. Catalog-declared page and cursor
-metadata is part of that contract: absent or malformed metadata, a nonterminal
-page, or a continuation cursor is rejected rather than silently truncated; the
-receipt retains only bounded page/item counts or cursor presence. The verifier does not allow partial
+metadata is part of that contract: malformed metadata, a declared nonterminal
+page, or a continuation cursor is rejected rather than silently truncated. The
+Email Routing rules endpoint is the one bounded exception for an otherwise
+valid envelope that omits `result_info`: the collector requests explicit page
+numbers until it receives an empty terminal page, rejects any page above the
+declared 50-item limit, and fails after 100 page probes instead of processing an
+unbounded collection. The receipt retains one performed read and bounded
+page/item summary per probe. Other absent pagination metadata remains malformed.
+The verifier does not allow partial
 D1, `/readyz`, or provider evidence to turn that incomplete governed readback
 into `live_evidence_present: true`. When no profile is configured, the public
 template remains non-mutating and reports that governed Cloudflare readback was
