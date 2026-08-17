@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 
-type Status = "ok" | "drift" | "missing" | "not_checked";
+type Status = "ok" | "drift" | "missing" | "not_checked" | "not_applicable";
 
 interface PolicyFile {
   domains: Record<string, PolicyDomain>;
@@ -66,6 +66,11 @@ interface LiveEvidence {
   inbound_proofs?: Record<string, ProofEvidence>;
   outbound_proofs?: Record<string, ProofEvidence>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
+  cfctl_readback?: {
+    required?: boolean;
+    attempted?: boolean;
+    complete?: boolean;
+  };
 }
 
 interface ActivePolicyEvidence {
@@ -114,8 +119,10 @@ interface ProofEvidence {
   from_identity?: string;
   provider?: string;
   external_receipt_path?: string;
+  external_receipt_sha256?: string;
   provider_message_id?: string;
   operator_count?: number;
+  operator_set_sha256?: string;
   policy_sha256?: string;
   provider_message_ids?: string[];
   provider_accepted_at?: string;
@@ -133,6 +140,7 @@ interface CfctlMaildeskEvidence {
 
 interface CfctlMaildeskDomainEvidence {
   email_routing?: Status;
+  catch_all?: Status;
   aliases?: Record<string, Status>;
   dns_authentication?: Record<string, Status>;
 }
@@ -150,6 +158,7 @@ interface DomainRow {
   zone_held: Status;
   role_aliases_wired: Status;
   personal_aliases_wired: Status;
+  catch_all_wired: Status;
   inbound_mx: Status;
   r2_policy: Status;
   worker_bindings: Status;
@@ -178,11 +187,11 @@ interface EvidenceSummary {
   inbound: {
     status: string | null;
     envelope_to: string | null;
-    forwarded_to: string[];
     default_reply_identity: string | null;
     raw_r2_key: string | null;
     provider: string | null;
     external_receipt_path: string | null;
+    external_receipt_sha256: string | null;
     audit_event_at: string | null;
     operator_count: number | null;
     policy_sha256: string | null;
@@ -207,6 +216,7 @@ interface ReceiptGap {
     | "zone_held"
     | "role_aliases_wired"
     | "personal_aliases_wired"
+    | "catch_all_wired"
     | "inbound_mx"
     | "r2_policy"
     | "worker_bindings"
@@ -246,17 +256,19 @@ const edgeFailures = rows.filter((row) =>
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.catch_all_wired,
     row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
     row.d1_queue,
-  ].some((status) => status !== "ok"),
+  ].some((status) => !readinessSatisfied(status)),
 );
 const mailFailures = rows.filter((row) =>
   [
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.catch_all_wired,
     row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
@@ -264,7 +276,7 @@ const mailFailures = rows.filter((row) =>
     row.inbound_proof,
     row.outbound_sender,
     row.outbound_proof,
-  ].some((status) => status !== "ok"),
+  ].some((status) => !readinessSatisfied(status)),
 );
 const receipt = {
   generated_at: new Date().toISOString(),
@@ -280,7 +292,7 @@ const receipt = {
     live_evidence_present: hasLiveEvidence(evidence),
   },
   gaps,
-  rows,
+  rows: rows.map(receiptRow),
 };
 
 if (jsonOutput) {
@@ -358,6 +370,7 @@ function buildRows(
       zone_held: checkZone(live, domainName),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
+      catch_all_wired: checkCatchAll(desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
       inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
       r2_policy: checkR2Policy(live, localPolicySha256, localProjection),
       worker_bindings: checkWorkerBindings(live),
@@ -381,6 +394,7 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
     "zone_held",
     "role_aliases_wired",
     "personal_aliases_wired",
+    "catch_all_wired",
     "inbound_mx",
     "r2_policy",
     "worker_bindings",
@@ -392,7 +406,7 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
 
   return rows.flatMap((row) =>
     fields
-      .filter((field) => row[field] !== "ok")
+      .filter((field) => !readinessSatisfied(row[field]))
       .map((field) => ({
         domain: row.domain,
         field,
@@ -464,6 +478,14 @@ function checkRouting(actual: string[] | undefined, expected: string[] | undefin
   if (!expected) return "missing";
   if (!actual) return "not_checked";
   return expected.every((alias) => actual.includes(alias)) ? "ok" : "missing";
+}
+
+function checkCatchAll(
+  desiredDomain: DesiredDomain | undefined,
+  cfctlDomain: CfctlMaildeskDomainEvidence | undefined,
+): Status {
+  if (!desiredDomain) return "missing";
+  return cfctlDomain?.catch_all ?? "not_checked";
 }
 
 function routingEvidenceFromCfctl(
@@ -680,12 +702,18 @@ function proofMatchesRoute(
   }
   if (proof.forward_errors && proof.forward_errors.length > 0) return "drift";
   if (requireRawR2Key && !proof.raw_r2_key) return "drift";
-  if (!requireRawR2Key && !proof.provider && !proof.external_receipt_path) return "drift";
-  if (!proof.forwarded_to) return "drift";
-
-  const actualRecipients = proof.forwarded_to.map(normalizeMailbox);
-  const expectedRecipients = expectedOperators.map(normalizeMailbox);
-  return expectedRecipients.every((recipient) => actualRecipients.includes(recipient)) ? "ok" : "drift";
+  if (!requireRawR2Key) {
+    const expectedRecipients = unique(expectedOperators.map(normalizeMailbox)).sort();
+    return proof.operator_count === expectedRecipients.length &&
+        proof.operator_set_sha256 === sha256(JSON.stringify(expectedRecipients)) &&
+        typeof proof.external_receipt_path === "string" &&
+        typeof proof.external_receipt_sha256 === "string" &&
+        /^[a-f0-9]{64}$/.test(proof.external_receipt_sha256) &&
+        typeof proof.audit_event_at === "string"
+      ? "ok"
+      : "drift";
+  }
+  return "ok";
 }
 
 function proofMatchesSink(proof: ProofEvidence, requireRawR2Key: boolean): Status {
@@ -817,11 +845,11 @@ function evidenceSummary(
     inbound: {
       status: inbound?.status ?? null,
       envelope_to: inbound?.envelope_to ?? inbound?.alias ?? null,
-      forwarded_to: inbound?.forwarded_to ?? [],
       default_reply_identity: inbound?.default_reply_identity ?? null,
       raw_r2_key: inbound?.raw_r2_key ?? null,
       provider: inbound?.provider ?? null,
       external_receipt_path: inbound?.external_receipt_path ?? null,
+      external_receipt_sha256: inbound?.external_receipt_sha256 ?? null,
       audit_event_at: inbound?.audit_event_at ?? null,
       operator_count: inbound?.operator_count ?? null,
       policy_sha256: inbound?.policy_sha256 ?? null,
@@ -839,8 +867,58 @@ function evidenceSummary(
   };
 }
 
+function receiptRow(row: DomainRow) {
+  return {
+    domain: row.domain,
+    operator_count: row.operators.length,
+    reply_identity_count: row.reply_identities.length,
+    route_counts: {
+      role_alias: row.routes.filter((route) => route.kind === "role_alias").length,
+      personal_alias: row.routes.filter((route) => route.kind === "personal_alias").length,
+    },
+    sender_domain: row.sender_domain,
+    inbound_mx_records: row.inbound_mx_records,
+    inbound_mx_provider: row.inbound_mx_provider,
+    evidence: {
+      inbound: {
+        status: row.evidence.inbound.status,
+        provider: row.evidence.inbound.provider,
+        external_receipt_sha256: row.evidence.inbound.external_receipt_sha256,
+        audit_event_at: row.evidence.inbound.audit_event_at,
+        operator_count: row.evidence.inbound.operator_count,
+        policy_sha256: row.evidence.inbound.policy_sha256,
+        provider_message_ids: row.evidence.inbound.provider_message_ids,
+        provider_accepted_at: row.evidence.inbound.provider_accepted_at,
+        inbox_verified_at: row.evidence.inbound.inbox_verified_at,
+      },
+      outbound: {
+        status: row.evidence.outbound.status,
+        provider: row.evidence.outbound.provider,
+        provider_message_id: row.evidence.outbound.provider_message_id,
+        audit_event_at: row.evidence.outbound.audit_event_at,
+      },
+    },
+    policy_desired: row.policy_desired,
+    zone_held: row.zone_held,
+    role_aliases_wired: row.role_aliases_wired,
+    personal_aliases_wired: row.personal_aliases_wired,
+    catch_all_wired: row.catch_all_wired,
+    inbound_mx: row.inbound_mx,
+    r2_policy: row.r2_policy,
+    worker_bindings: row.worker_bindings,
+    d1_queue: row.d1_queue,
+    inbound_proof: row.inbound_proof,
+    outbound_sender: row.outbound_sender,
+    outbound_proof: row.outbound_proof,
+  };
+}
+
 function same(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function readinessSatisfied(status: Status): boolean {
+  return status === "ok" || status === "not_applicable";
 }
 
 function unique(values: string[]): string[] {
@@ -862,17 +940,153 @@ function normalizeMailbox(address: string): string {
 }
 
 function hasLiveEvidence(live: LiveEvidence): boolean {
+  if (live.cfctl_readback?.required === true && live.cfctl_readback.complete !== true) {
+    return false;
+  }
   return Boolean(
-    live.zones ||
-      live.email_routing ||
-      live.dns_mx ||
-      live.active_policy ||
-      live.readyz ||
-      live.d1 ||
-      live.sender_domains ||
-      live.inbound_proofs ||
-      live.outbound_proofs,
+    hasStringArray(live.zones) ||
+      hasRoutingEvidence(live.email_routing) ||
+      hasStringArrayMap(live.dns_mx) ||
+      hasActivePolicyEvidence(live.active_policy) ||
+      hasReadyzEvidence(live.readyz) ||
+      hasD1Evidence(live.d1) ||
+      hasSenderDomainEvidence(live.sender_domains) ||
+      hasInboundProofEvidence(live.inbound_proofs) ||
+      hasOutboundProofEvidence(live.outbound_proofs),
   );
+}
+
+function hasActivePolicyEvidence(value: ActivePolicyEvidence | undefined): boolean {
+  if (!value) return false;
+  const digests = [
+    value.active_policy_sha256,
+    value.object_sha256,
+    value.projection_policy_sha256,
+    value.active_desired_state_sha256,
+    value.active_projection_sha256,
+  ];
+  const keys = [value.active_policy_r2_key, value.revision_r2_key, value.object_key];
+  const counts = [
+    value.expected_domain_count,
+    value.expected_route_count,
+    value.projected_domain_count,
+    value.projected_route_count,
+  ];
+  return digests.every((digest) => typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest)) &&
+    keys.every((key) => typeof key === "string" && key.length > 0) &&
+    counts.every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0);
+}
+
+function hasStringArray(value: unknown[] | undefined): boolean {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((entry) => typeof entry === "string" && entry.length > 0);
+}
+
+function hasRoutingEvidence(value: Record<string, RoutingEvidence> | undefined): boolean {
+  if (!value || Object.keys(value).length === 0) return false;
+  return Object.entries(value).every(([domain, routing]) =>
+    domain.length > 0 &&
+    Array.isArray(routing.role_aliases) &&
+    routing.role_aliases.every((alias) => typeof alias === "string" && alias.length > 0) &&
+    Array.isArray(routing.personal_aliases) &&
+    routing.personal_aliases.every((alias) => typeof alias === "string" && alias.length > 0)
+  );
+}
+
+function hasStringArrayMap(value: Record<string, string[]> | undefined): boolean {
+  if (!value || Object.keys(value).length === 0) return false;
+  return Object.entries(value).every(([key, entries]) =>
+    key.length > 0 &&
+    Array.isArray(entries) &&
+    entries.every((entry) => typeof entry === "string" && entry.length > 0)
+  );
+}
+
+function hasReadyzEvidence(value: LiveEvidence["readyz"]): boolean {
+  return Boolean(
+    value &&
+    typeof value.ok === "boolean" &&
+    Array.isArray(value.checks) &&
+    value.checks.length > 0 &&
+    value.checks.every((check) =>
+      check &&
+      typeof check.name === "string" &&
+      check.name.length > 0 &&
+      typeof check.ok === "boolean" &&
+      (check.detail === undefined || typeof check.detail === "string")
+    ),
+  );
+}
+
+function hasD1Evidence(value: D1Evidence | undefined): boolean {
+  if (!value) return false;
+  const tablesValid = Array.isArray(value.tables) && value.tables.length > 0 &&
+    value.tables.every((table) => typeof table === "string" && table.length > 0);
+  const counts = value.audit_event_counts;
+  const countsValid = Boolean(counts && Object.keys(counts).length > 0 &&
+    Object.entries(counts).every(([action, count]) =>
+      action.length > 0 && typeof count === "number" && Number.isInteger(count) && count >= 0
+    ));
+  return tablesValid || countsValid;
+}
+
+function hasSenderDomainEvidence(value: Record<string, string> | string[] | undefined): boolean {
+  if (Array.isArray(value)) return hasStringArray(value);
+  return Boolean(value && Object.keys(value).length > 0 &&
+    Object.entries(value).every(([domain, status]) =>
+      domain.length > 0 && typeof status === "string" && status.length > 0
+    ));
+}
+
+function hasInboundProofEvidence(value: Record<string, ProofEvidence> | undefined): boolean {
+  if (!value) return false;
+  return Object.entries(value).some(([domain, proof]) => {
+    if (!proof || !isOkProofStatus(proof.status)) return false;
+    const target = proof.envelope_to ?? proof.alias;
+    const mailbox = target ? parseMailbox(target) : null;
+    if (!mailbox || mailbox.domain !== domain || typeof proof.provider !== "string") return false;
+    if (proof.provider === "cloudflare_email_service") {
+      return (proof.route_kind === "role_alias" ||
+          proof.route_kind === "personal_alias" ||
+          proof.route_kind === "sink") &&
+        typeof proof.operator_count === "number" &&
+        Number.isInteger(proof.operator_count) &&
+        proof.operator_count >= 0 &&
+        typeof proof.policy_sha256 === "string" &&
+        /^[a-f0-9]{64}$/.test(proof.policy_sha256) &&
+        Array.isArray(proof.provider_message_ids) &&
+        proof.provider_message_ids.every((id) => typeof id === "string" && id.length > 0) &&
+        typeof proof.provider_accepted_at === "string" &&
+        typeof proof.inbox_verified_at === "string" &&
+        typeof proof.default_reply_identity === "string";
+    }
+    return typeof proof.operator_count === "number" &&
+      Number.isInteger(proof.operator_count) &&
+      proof.operator_count >= 0 &&
+      typeof proof.operator_set_sha256 === "string" &&
+      /^[a-f0-9]{64}$/.test(proof.operator_set_sha256) &&
+      typeof proof.default_reply_identity === "string" &&
+      typeof proof.external_receipt_path === "string" &&
+      typeof proof.external_receipt_sha256 === "string" &&
+      /^[a-f0-9]{64}$/.test(proof.external_receipt_sha256) &&
+      typeof proof.audit_event_at === "string";
+  });
+}
+
+function hasOutboundProofEvidence(value: Record<string, ProofEvidence> | undefined): boolean {
+  if (!value) return false;
+  return Object.entries(value).some(([domain, proof]) => {
+    if (!proof || !isOkProofStatus(proof.status) || typeof proof.from_identity !== "string") {
+      return false;
+    }
+    const mailbox = parseMailbox(proof.from_identity);
+    return Boolean(
+      mailbox &&
+      mailbox.domain === domain &&
+      typeof proof.provider === "string" &&
+      (typeof proof.provider_message_id === "string" || typeof proof.audit_event_at === "string"),
+    );
+  });
 }
 
 function relativePath(path: string): string {
@@ -887,6 +1101,7 @@ function printTable(tableRows: DomainRow[]) {
     "zone",
     "roles",
     "personal",
+    "catch_all",
     "mx",
     "r2",
     "bindings",
@@ -896,11 +1111,12 @@ function printTable(tableRows: DomainRow[]) {
   ];
   const values = tableRows.map((row) => [
     row.domain,
-    row.operators.join(","),
+    String(row.operators.length),
     row.policy_desired,
     row.zone_held,
     row.role_aliases_wired,
     row.personal_aliases_wired,
+    row.catch_all_wired,
     row.inbound_mx,
     row.r2_policy,
     row.worker_bindings,
