@@ -474,7 +474,7 @@ JSON
     expect(JSON.parse(mismatchedGoogleVerification.stdout).rows[0]?.inbound_proof).toBe("drift");
   }, 15_000);
 
-  test("an incomplete governed readback exits nonzero and records no live edge evidence", () => {
+  test("a nonzero governed readback preserves its bound failure envelope", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-collect-evidence-failed-"));
     const cfctl = join(dir, "cfctl");
     const wrangler = join(dir, "wrangler");
@@ -485,7 +485,7 @@ JSON
       `#!/bin/sh
 case "$*" in
   "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -537,6 +537,55 @@ esac
       verification_state: "failed",
       evidence_hashes: [],
       error_code: "CFCTL_LIVE_UNAUTHORIZED",
+    });
+
+    const unboundOut = join(dir, "unbound-evidence.json");
+    writeFileSync(
+      cfctl,
+      `#!/bin/sh
+case "$*" in
+  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"other-profile","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
+  *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(cfctl, 0o755);
+    const unboundResult = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        "config/policy.example.json",
+        "--desired-state",
+        "config/desired-state.example.json",
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--out",
+        unboundOut,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+      },
+    );
+
+    expect(unboundResult.status).toBe(1);
+    const unboundEvidence = JSON.parse(readFileSync(unboundOut, "utf8")) as {
+      cfctl_readback?: {
+        receipts: Array<{ performed: boolean; error_code?: string }>;
+      };
+    };
+    expect(unboundEvidence.cfctl_readback?.receipts.at(-1)).toMatchObject({
+      performed: false,
+      error_code: "CFCTL_ENVELOPE_BINDING_MISMATCH",
     });
   });
 
