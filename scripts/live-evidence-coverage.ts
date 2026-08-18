@@ -71,8 +71,11 @@ export function coverageDomainSha256(domain: string): string {
 export function domainSelectedByCoverage(
   coverage: CfctlReadbackCoverage | undefined,
   domain: string,
+  expectedDesiredStateSha256: string,
+  expectedDomains: string[],
 ): boolean {
   if (!coverage || coverage.mode !== "canary") return true;
+  if (!validReadbackCoverage(coverage, expectedDesiredStateSha256, expectedDomains)) return true;
   return coverage.selected_domain_sha256s.includes(coverageDomainSha256(domain));
 }
 

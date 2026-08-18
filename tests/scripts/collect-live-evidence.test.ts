@@ -573,6 +573,174 @@ JSON
     }
   }, 20_000);
 
+  test("canary scope excludes unselected Google Workspace and D1 proof domains", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-provider-scope-"));
+    const fixture = createCoverageFixture(dir);
+    const desired = JSON.parse(readFileSync(fixture.desiredPath, "utf8")) as {
+      domains: Array<{ name: string; inbound_mx_provider: string }>;
+    };
+    desired.domains[0]!.inbound_mx_provider = "google_workspace";
+    desired.domains[2]!.inbound_mx_provider = "google_workspace";
+    writeJson(fixture.desiredPath, desired);
+
+    const cfctl = join(dir, "cfctl-provider-scope");
+    const wrangler = join(dir, "wrangler-provider-scope");
+    const googleAdmin = join(dir, "google-admin-provider-scope");
+    const cfctlLog = join(dir, "cfctl-provider-scope.log");
+    const providerLog = join(dir, "provider-scope.log");
+    const out = join(dir, "provider-scope.json");
+    writeCoverageCfctl(cfctl);
+    writeFileSync(
+      wrangler,
+      `#!/bin/sh
+echo "$*" >> "$MAILDESK_TEST_PROVIDER_LOG"
+case "$*" in
+  *"last_inbound_provider_accepted_at"*) echo '${JSON.stringify([{ results: [
+    {
+      route_address: `inbox@${fixture.domains[0]}`,
+      route_kind: "role_alias",
+      operator_count: 1,
+      reply_identity: `inbox@${fixture.domains[0]}`,
+      policy_sha256: "a".repeat(64),
+      last_inbound_provider_accepted_at: "2026-08-18T00:00:00.000Z",
+      last_inbound_provider_message_ids_json: '["selected-inbound"]',
+      last_inbox_verified_at: "2026-08-18T00:01:00.000Z",
+    },
+    {
+      route_address: `inbox@${fixture.domains[2]}`,
+      route_kind: "role_alias",
+      operator_count: 1,
+      reply_identity: `inbox@${fixture.domains[2]}`,
+      policy_sha256: "a".repeat(64),
+      last_inbound_provider_accepted_at: "2026-08-18T00:00:00.000Z",
+      last_inbound_provider_message_ids_json: '["unselected-inbound"]',
+      last_inbox_verified_at: "2026-08-18T00:01:00.000Z",
+    },
+  ] }])}' ;;
+  *"outbound_reply_delivered"*) echo '${JSON.stringify([{ results: [
+    {
+      detail_json: JSON.stringify({
+        fromIdentity: `inbox@${fixture.domains[0]}`,
+        result: { provider: "cloudflare_email_service", providerMessageId: "selected-outbound" },
+      }),
+      created_at: "2026-08-18T00:02:00.000Z",
+    },
+    {
+      detail_json: JSON.stringify({
+        fromIdentity: `inbox@${fixture.domains[2]}`,
+        result: { provider: "cloudflare_email_service", providerMessageId: "unselected-outbound" },
+      }),
+      created_at: "2026-08-18T00:02:00.000Z",
+    },
+  ] }])}' ;;
+  *) echo '[{"results":[]}]' ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      googleAdmin,
+      `#!/bin/sh
+echo "$*" >> "$MAILDESK_TEST_PROVIDER_LOG"
+target="$4"
+echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"id\":\"workspace:group:$target\",\"type\":\"workspace.group\"},{\"type\":\"workspace.group_membership\",\"record\":{\"email\":\"operator@example.com\"}}]}"
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(wrangler, 0o755);
+    chmodSync(googleAdmin, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        fixture.policyPath,
+        "--desired-state",
+        fixture.desiredPath,
+        "--scope-manifest",
+        fixture.scopeManifestPath,
+        "--cfctl",
+        cfctl,
+        "--wrangler",
+        wrangler,
+        "--google-admin",
+        googleAdmin,
+        "--out",
+        out,
+        "--no-resend",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MAILDESK_CFCTL_PROFILE: "profile-example",
+          MAILDESK_TEST_CFCTL_LOG: cfctlLog,
+          MAILDESK_TEST_PROVIDER_LOG: providerLog,
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    const providerCalls = readFileSync(providerLog, "utf8");
+    expect(providerCalls).toContain(fixture.domains[0]!);
+    expect(providerCalls).toContain(fixture.domains[1]!);
+    expect(providerCalls).not.toContain(fixture.domains[2]!);
+    const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      inbound_proofs?: Record<string, unknown>;
+      outbound_proofs?: Record<string, unknown>;
+    };
+    expect(Object.keys(evidence.inbound_proofs ?? {})).toEqual([fixture.domains[0]!]);
+    expect(Object.keys(evidence.outbound_proofs ?? {})).toEqual([fixture.domains[0]!]);
+  }, 20_000);
+
+  test("canary scope rejects Resend's account-global domain listing before execution", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-resend-scope-"));
+    const fixture = createCoverageFixture(dir);
+    const desired = JSON.parse(readFileSync(fixture.desiredPath, "utf8")) as Record<string, unknown>;
+    desired.sender = { mode: "resend", candidate_domains: fixture.domains.slice(0, 2) };
+    writeJson(fixture.desiredPath, desired);
+    const resend = join(dir, "resend");
+    const resendLog = join(dir, "resend.log");
+    writeFileSync(resend, `#!/bin/sh\necho "$*" >> "$MAILDESK_TEST_RESEND_LOG"\n`, { mode: 0o755 });
+    chmodSync(resend, 0o755);
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/collect-live-evidence.ts",
+        "--",
+        "--policy",
+        fixture.policyPath,
+        "--desired-state",
+        fixture.desiredPath,
+        "--scope-manifest",
+        fixture.scopeManifestPath,
+        "--wrangler",
+        "/bin/false",
+        "--out",
+        join(dir, "resend-scope.json"),
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH ?? ""}`,
+          MAILDESK_TEST_RESEND_LOG: resendLog,
+        },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Resend domain listing is account-global");
+    expect(() => readFileSync(resendLog, "utf8")).toThrow();
+  });
+
   test("a second selected-zone denial preserves the bound failure without completing the transaction", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-denial-"));
     const fixture = createCoverageFixture(dir);
@@ -585,7 +753,12 @@ JSON
       cfctl_readback: {
         transaction_complete: boolean;
         complete: boolean;
-        coverage: { selected_scope_complete: boolean; failed_capability_ids: string[] };
+        coverage: {
+          selected_scope_complete: boolean;
+          successful_capability_ids: string[];
+          failed_capability_ids: string[];
+          missing_capability_ids: string[];
+        };
         receipts: Array<{ capability_id: string; error_code?: string; performed: boolean }>;
       };
     };
@@ -602,6 +775,19 @@ JSON
       performed: true,
       error_code: "CFCTL_LIVE_UNAUTHORIZED",
     }));
+    const coverage = evidence.cfctl_readback.coverage;
+    expect(coverage.successful_capability_ids).not.toContain(
+      "email-routing-routing-rules-list-routing-rules",
+    );
+    expect(new Set([
+      ...coverage.successful_capability_ids,
+      ...coverage.failed_capability_ids,
+      ...coverage.missing_capability_ids,
+    ]).size).toBe(
+      coverage.successful_capability_ids.length +
+        coverage.failed_capability_ids.length +
+        coverage.missing_capability_ids.length,
+    );
   }, 20_000);
 
   test("full inventory completion remains below dark acceptance", () => {

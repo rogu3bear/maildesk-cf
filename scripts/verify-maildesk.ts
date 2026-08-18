@@ -257,7 +257,12 @@ const localProjection = collectLocalProjection(policyPath, desiredStatePath);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
 const rows = buildRows(policy, desiredState, evidence, policySha256, localProjection);
-const gaps = buildGaps(rows, evidence);
+const gaps = buildGaps(
+  rows,
+  evidence,
+  localProjection.desired_state_sha256,
+  desiredState.domains.map((domain) => domain.name),
+);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
 const edgeFailures = rows.filter((row) =>
   [
@@ -321,7 +326,7 @@ if (jsonOutput) {
   console.log(`mail_ready ${receipt.status.mail_ready}`);
 }
 
-if (localFailures.length > 0 || (requireLive && mailFailures.length > 0)) {
+if (localFailures.length > 0 || (requireLive && receipt.status.mail_ready !== true)) {
   process.exit(1);
 }
 
@@ -381,7 +386,12 @@ function buildRows(
       inbound_mx_provider: inboundMxProvider(live.dns_mx?.[domainName]),
       evidence: evidenceSummary(live.inbound_proofs?.[domainName], live.outbound_proofs?.[domainName]),
       policy_desired: comparePolicyAndDesired(policyDomain, desiredDomain),
-      zone_held: checkZone(live, domainName),
+      zone_held: checkZone(
+        live,
+        domainName,
+        localProjection.desired_state_sha256,
+        desired.domains.map((domain) => domain.name),
+      ),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
       catch_all_wired: checkCatchAll(desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
@@ -402,7 +412,12 @@ function buildRows(
   });
 }
 
-function buildGaps(rows: DomainRow[], live: LiveEvidence): ReceiptGap[] {
+function buildGaps(
+  rows: DomainRow[],
+  live: LiveEvidence,
+  expectedDesiredStateSha256: string,
+  expectedDomains: string[],
+): ReceiptGap[] {
   const fields: Array<ReceiptGap["field"]> = [
     "policy_desired",
     "zone_held",
@@ -421,7 +436,12 @@ function buildGaps(rows: DomainRow[], live: LiveEvidence): ReceiptGap[] {
   return rows.flatMap((row) =>
     fields
       .filter((field) =>
-        field === "policy_desired" || domainSelectedByCoverage(live.cfctl_readback?.coverage, row.domain)
+        field === "policy_desired" || domainSelectedByCoverage(
+          live.cfctl_readback?.coverage,
+          row.domain,
+          expectedDesiredStateSha256,
+          expectedDomains,
+        )
       )
       .filter((field) => !readinessSatisfied(row[field]))
       .map((field) => ({
@@ -483,8 +503,18 @@ function checkIncludes(values: string[] | undefined, expected: string): Status {
   return values.includes(expected) ? "ok" : "missing";
 }
 
-function checkZone(live: LiveEvidence, domainName: string): Status {
-  if (!domainSelectedByCoverage(live.cfctl_readback?.coverage, domainName)) return "not_checked";
+function checkZone(
+  live: LiveEvidence,
+  domainName: string,
+  expectedDesiredStateSha256: string,
+  expectedDomains: string[],
+): Status {
+  if (!domainSelectedByCoverage(
+    live.cfctl_readback?.coverage,
+    domainName,
+    expectedDesiredStateSha256,
+    expectedDomains,
+  )) return "not_checked";
   const zone = checkIncludes(live.zones, domainName);
   if (zone === "ok") return "ok";
   const cfctlDomain = live.cfctl_maildesk?.domains?.[domainName];

@@ -45,6 +45,76 @@ describe("maildesk verifier", () => {
     expect(readbackAuthorizesReadiness(readback, fileSha256(desiredPath), domains)).toBe(false);
   });
 
+  test("forged canary coverage suppresses no domain gaps", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-forged-canary-"));
+    const policyPath = join(dir, "policy.json");
+    const desiredPath = join(dir, "desired-state.json");
+    const evidencePath = join(dir, "evidence.json");
+    const domains = ["selected.example.com", "unselected.example.com"];
+    writeJson(policyPath, {
+      domains: Object.fromEntries(domains.map((domain) => [domain, {
+        role_aliases: {
+          inbox: {
+            operators: ["operator@example.com"],
+            reply_identity: `inbox@${domain}`,
+            allowed_reply_identities: [`inbox@${domain}`],
+          },
+        },
+        personal_aliases: {},
+      }])),
+    });
+    writeJson(desiredPath, {
+      ...canonicalTopology(),
+      domains: domains.map((name) => ({
+        name,
+        role_aliases: ["inbox"],
+        personal_aliases: [],
+        catch_all: false,
+        inbound_mx_provider: "cloudflare_email_routing",
+      })),
+      sender: { mode: "disabled", candidate_domains: [] },
+    });
+    writeJson(evidencePath, {
+      generated_at: "2026-08-18T00:00:00.000Z",
+      cfctl_readback: {
+        required: true,
+        attempted: true,
+        transaction_complete: true,
+        complete: false,
+        coverage: {
+          mode: "canary",
+          desired_state_sha256: "f".repeat(64),
+          selected_domain_sha256s: [coverageDomainSha256(domains[0]!)],
+        },
+      },
+    });
+
+    const result = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        policyPath,
+        "--desired-state",
+        desiredPath,
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      gaps: Array<{ domain: string; readiness: string }>;
+    };
+    expect(receipt.gaps.some((gap) =>
+      gap.domain === domains[1] && gap.readiness !== "local"
+    )).toBe(true);
+  });
+
   test("the tracked canonical desired state verifies local policy without inferring edge readiness", () => {
     const result = spawnSync(
       "bun",
@@ -597,6 +667,36 @@ describe("maildesk verifier", () => {
     });
     expect(receipt.rows[0]?.outbound_sender).toBe("ok");
     expect(receipt.rows[0]?.outbound_proof).toBe("ok");
+
+    const inventoryEvidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+      cfctl_readback: CfctlReadbackAuthority;
+    };
+    inventoryEvidence.cfctl_readback = inventoryReadback(desiredPath, ["tenant.example.com"]);
+    writeJson(evidencePath, inventoryEvidence);
+    const requireLive = spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        policyPath,
+        "--desired-state",
+        desiredPath,
+        "--evidence",
+        evidencePath,
+        "--require-live",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(requireLive.status).toBe(1);
+    const inventoryReceipt = JSON.parse(requireLive.stdout) as {
+      status: { mail_ready: boolean };
+      gaps: unknown[];
+    };
+    expect(inventoryReceipt.status.mail_ready).toBe(false);
+    expect(inventoryReceipt.gaps).toHaveLength(0);
   });
 
   test("uses Resend sender-domain readback only for resend mode", () => {
@@ -785,6 +885,38 @@ function authoritativeReadback(desiredPath: string, domains: string[]): CfctlRea
       desired_scope_complete: true,
       acceptance_complete: true,
       blockers: [],
+    },
+  };
+}
+
+function inventoryReadback(desiredPath: string, domains: string[]): CfctlReadbackAuthority {
+  const desiredStateSha256 = fileSha256(desiredPath);
+  const domainHashes = domains.map(coverageDomainSha256).sort();
+  return {
+    required: true,
+    attempted: true,
+    transaction_complete: true,
+    complete: false,
+    coverage: {
+      mode: "full_desired_state",
+      profile: "inventory_v1",
+      desired_state_sha256: desiredStateSha256,
+      expected_domain_count: domains.length,
+      selected_domain_count: domains.length,
+      observed_domain_count: domains.length,
+      selected_domain_sha256s: domainHashes,
+      observed_domain_sha256s: domainHashes,
+      required_capability_ids: [],
+      successful_capability_ids: [],
+      failed_capability_ids: [],
+      missing_capability_ids: [],
+      required_acceptance_surfaces: [],
+      successful_acceptance_surfaces: [],
+      missing_acceptance_surfaces: [],
+      selected_scope_complete: true,
+      desired_scope_complete: true,
+      acceptance_complete: false,
+      blockers: [{ code: "ACCEPTANCE_PROFILE_INVENTORY_ONLY" }],
     },
   };
 }
