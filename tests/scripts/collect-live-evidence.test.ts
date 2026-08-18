@@ -492,6 +492,13 @@ JSON
   test("a two-domain canary transaction stays partial against fourteen desired domains", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-canary-"));
     const fixture = createCoverageFixture(dir);
+    const desired = JSON.parse(readFileSync(fixture.desiredPath, "utf8")) as Record<string, unknown>;
+    const senderCandidateDomains = fixture.domains.slice(0, 4);
+    desired.sender = {
+      mode: "cloudflare_email_service",
+      candidate_domains: senderCandidateDomains,
+    };
+    writeJson(fixture.desiredPath, desired);
     const { result, out, log } = runCoverageCollection(fixture, dir, { canary: true });
 
     expect(result.status).toBe(0);
@@ -513,7 +520,14 @@ JSON
       cfctl_maildesk: {
         edge_ready: boolean;
         domains: Record<string, { email_routing: string; catch_all: string }>;
+        sender_domains?: Record<string, string>;
       };
+      zones?: string[];
+      email_routing?: Record<string, unknown>;
+      dns_mx?: Record<string, unknown>;
+      sender_domains?: Record<string, string>;
+      inbound_proofs?: Record<string, unknown>;
+      outbound_proofs?: Record<string, unknown>;
     };
     expect(evidence.cfctl_readback).toMatchObject({
       transaction_complete: true,
@@ -530,11 +544,29 @@ JSON
       },
     });
     expect(evidence.cfctl_maildesk.edge_ready).toBe(false);
+    const selectedDomains = fixture.domains.slice(0, 2);
+    expect(evidence.zones).toEqual(selectedDomains);
+    expect(Object.keys(evidence.email_routing ?? {})).toEqual(selectedDomains);
+    expect(Object.keys(evidence.dns_mx ?? {})).toEqual(selectedDomains);
+    expect(Object.keys(evidence.cfctl_maildesk.domains)).toEqual(selectedDomains);
+    expect(Object.keys(evidence.cfctl_maildesk.sender_domains ?? {})).toEqual(
+      senderCandidateDomains.filter((domain) => selectedDomains.includes(domain)),
+    );
+    const domainMaps = [
+      evidence.email_routing ?? {},
+      evidence.dns_mx ?? {},
+      evidence.cfctl_maildesk.domains,
+      evidence.cfctl_maildesk.sender_domains ?? {},
+      evidence.sender_domains ?? {},
+      evidence.inbound_proofs ?? {},
+      evidence.outbound_proofs ?? {},
+    ];
     for (const domain of fixture.domains.slice(2)) {
-      expect(evidence.cfctl_maildesk.domains[domain]).toMatchObject({
-        email_routing: "not_checked",
-        catch_all: "not_checked",
-      });
+      expect(evidence.zones).not.toContain(domain);
+      for (const domainMap of domainMaps) expect(domainMap[domain]).toBeUndefined();
+    }
+    for (const domain of senderCandidateDomains.filter((domain) => !selectedDomains.includes(domain))) {
+      expect(evidence.cfctl_maildesk.sender_domains?.[domain]).toBeUndefined();
     }
     const zoneCalls = readFileSync(log, "utf8").split("\n")
       .filter((line) => line.includes("call zones-get"));
@@ -1626,6 +1658,7 @@ case "$*" in
   *"call dns-records-for-a-zone-list-dns-records"*) printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"%s","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}\n' "$domain" "$domain" "$domain" ;;
   *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
   *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
+  *"call email-sending-subdomains-list-sending-subdomains"*) printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-sending-subdomains-list-sending-subdomains","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"8".repeat(64)}"}],"result":{"result":[{"name":"%s","status":"verified"}]},"error":null}\n' "$domain" ;;
   *"call listWorkers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
   *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
   *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;

@@ -464,21 +464,6 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   const senderDomains: Record<string, Status> = {};
 
   const selectedDomainNames = new Set(readScope.selected_domains);
-  for (const desiredDomain of desiredState.domains) {
-    if (selectedDomainNames.has(desiredDomain.name)) continue;
-    domains[desiredDomain.name] = {
-      email_routing: "not_checked",
-      catch_all: "not_checked",
-      aliases: Object.fromEntries([
-        ...(desiredDomain.role_aliases ?? []),
-        ...(desiredDomain.personal_aliases ?? []),
-      ].map((alias) => [`${alias}@${desiredDomain.name}`, "not_checked"])),
-    };
-    if ((desiredState.sender?.candidate_domains ?? []).includes(desiredDomain.name)) {
-      senderDomains[desiredDomain.name] = "not_checked";
-    }
-  }
-
   for (const desiredDomain of desiredState.domains
     .filter((domain) => selectedDomainNames.has(domain.name))
     .sort((left, right) => left.name.localeCompare(right.name))) {
