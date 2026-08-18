@@ -741,33 +741,42 @@ function cfctlCall(
     "--json",
   ];
   const result = spawnSync(cfctlBin, commandArgs, { cwd: root, encoding: "utf8" });
-  const envelope = result.status === 0 ? parseJson<CfctlEnvelope>(result.stdout) : null;
+  const envelope = parseJson<CfctlEnvelope>(result.status === 0 ? result.stdout : result.stderr);
+  const boundEnvelope =
+    envelope?.schema_version === 2 &&
+      envelope.capability_id === capabilityId &&
+      envelope.profile_id === profileId &&
+      envelope.account_id === accountId
+      ? envelope
+      : null;
   const bindingOk = Boolean(
     result.status === 0 &&
-    envelope?.schema_version === 2 &&
-    envelope?.ok === true &&
-    envelope.performed === true &&
-    envelope.capability_id === capabilityId &&
-    envelope.profile_id === profileId &&
-    envelope.account_id === accountId &&
-    !envelope.error &&
-    receiptFromEnvelope(capabilityId, envelope).evidence_hashes.length > 0,
+    boundEnvelope?.ok === true &&
+    boundEnvelope.performed === true &&
+    !boundEnvelope.error &&
+    receiptFromEnvelope(capabilityId, boundEnvelope).evidence_hashes.length > 0,
   );
-  const receipt = envelope
-    ? receiptFromEnvelope(capabilityId, envelope)
-    : failureReceipt(capabilityId, false, "CFCTL_COMMAND_FAILED");
-  const pagination = paginationStatus(envelope?.result, paginationContract);
+  const receipt = boundEnvelope
+    ? receiptFromEnvelope(capabilityId, boundEnvelope)
+    : failureReceipt(
+      capabilityId,
+      false,
+      !envelope
+        ? "CFCTL_COMMAND_FAILED"
+        : envelope.schema_version !== 2
+          ? "CFCTL_ENVELOPE_VERSION_MISMATCH"
+          : "CFCTL_ENVELOPE_BINDING_MISMATCH",
+    );
+  const pagination = paginationStatus(boundEnvelope?.result, paginationContract);
   if (pagination.summary) receipt.pagination = pagination.summary;
   const ok = bindingOk && pagination.ok;
   if (!ok && !receipt.error_code) {
     receipt.ok = false;
-    receipt.error_code = envelope?.schema_version !== 2
-      ? "CFCTL_ENVELOPE_VERSION_MISMATCH"
-      : bindingOk
-        ? pagination.error_code ?? "CFCTL_PAGINATION_MALFORMED"
-        : "CFCTL_ENVELOPE_BINDING_MISMATCH";
+    receipt.error_code = bindingOk
+      ? pagination.error_code ?? "CFCTL_PAGINATION_MALFORMED"
+      : "CFCTL_ENVELOPE_BINDING_MISMATCH";
   }
-  return { ok, result: ok ? envelope?.result : undefined, receipt };
+  return { ok, result: ok ? boundEnvelope?.result : undefined, receipt };
 }
 
 function collectEmailRoutingRules(
