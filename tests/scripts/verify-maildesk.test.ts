@@ -115,6 +115,122 @@ describe("maildesk verifier", () => {
     )).toBe(true);
   });
 
+  test("valid canary coverage ignores unselected domain evidence across verifier consumers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-canary-noninterference-"));
+    const policyPath = join(dir, "policy.json");
+    const desiredPath = join(dir, "desired-state.json");
+    const baselineEvidencePath = join(dir, "baseline-evidence.json");
+    const taintedEvidencePath = join(dir, "tainted-evidence.json");
+    const domains = ["selected.example.com", "unselected.example.com"];
+    const [selectedDomain, unselectedDomain] = domains as [string, string];
+    writeJson(policyPath, {
+      domains: Object.fromEntries(domains.map((domain) => [domain, {
+        role_aliases: {
+          inbox: {
+            operators: ["operator@example.com"],
+            reply_identity: `inbox@${domain}`,
+            allowed_reply_identities: [`inbox@${domain}`],
+          },
+        },
+        personal_aliases: {},
+      }])),
+    });
+    writeJson(desiredPath, {
+      ...canonicalTopology(),
+      domains: domains.map((name) => ({
+        name,
+        role_aliases: ["inbox"],
+        personal_aliases: [],
+        catch_all: false,
+        inbound_mx_provider: "cloudflare_email_routing",
+      })),
+      sender: { mode: "cloudflare_email_service", candidate_domains: domains },
+    });
+    const readback = canaryReadback(desiredPath, domains, [selectedDomain]);
+    writeJson(baselineEvidencePath, {
+      generated_at: "2026-08-18T00:00:00.000Z",
+      cfctl_readback: readback,
+    });
+    writeJson(taintedEvidencePath, {
+      generated_at: "2026-08-18T00:00:00.000Z",
+      zones: [unselectedDomain],
+      email_routing: {
+        [unselectedDomain]: { role_aliases: ["inbox"], personal_aliases: [] },
+      },
+      dns_mx: {
+        [unselectedDomain]: [
+          "route1.mx.cloudflare.net",
+          "route2.mx.cloudflare.net",
+          "route3.mx.cloudflare.net",
+        ],
+      },
+      sender_domains: { [unselectedDomain]: "verified" },
+      inbound_proofs: {
+        [unselectedDomain]: {
+          status: "ok",
+          envelope_to: `inbox@${unselectedDomain}`,
+          route_kind: "role_alias",
+          operator_count: 1,
+          policy_sha256: fileSha256(policyPath),
+          provider_message_ids: ["unselected-inbound"],
+          provider_accepted_at: "2026-08-18T00:01:00.000Z",
+          inbox_verified_at: "2026-08-18T00:02:00.000Z",
+          default_reply_identity: `inbox@${unselectedDomain}`,
+          provider: "cloudflare_email_service",
+        },
+      },
+      outbound_proofs: {
+        [unselectedDomain]: {
+          status: "delivered",
+          from_identity: `inbox@${unselectedDomain}`,
+          provider: "cloudflare_email_service",
+          provider_message_id: "unselected-outbound",
+        },
+      },
+      cfctl_maildesk: {
+        domains: {
+          [unselectedDomain]: {
+            email_routing: "ok",
+            catch_all: "ok",
+            aliases: { [`inbox@${unselectedDomain}`]: "ok" },
+          },
+        },
+        sender_domains: { [unselectedDomain]: "ok" },
+      },
+      cfctl_readback: readback,
+    });
+
+    const verify = (evidencePath: string) => spawnSync(
+      "bun",
+      [
+        "run",
+        "scripts/verify-maildesk.ts",
+        "--",
+        "--policy",
+        policyPath,
+        "--desired-state",
+        desiredPath,
+        "--evidence",
+        evidencePath,
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    const baselineResult = verify(baselineEvidencePath);
+    const taintedResult = verify(taintedEvidencePath);
+    expect(baselineResult.status).toBe(0);
+    expect(taintedResult.status).toBe(0);
+    const baseline = JSON.parse(baselineResult.stdout) as {
+      status: Record<string, boolean>;
+      gaps: unknown[];
+      rows: Array<Record<string, unknown> & { domain: string }>;
+    };
+    const tainted = JSON.parse(taintedResult.stdout) as typeof baseline;
+    expect(tainted.status).toEqual(baseline.status);
+    expect(tainted.gaps).toEqual(baseline.gaps);
+    expect(tainted.rows).toEqual(baseline.rows);
+  });
+
   test("the tracked canonical desired state verifies local policy without inferring edge readiness", () => {
     const result = spawnSync(
       "bun",
@@ -917,6 +1033,45 @@ function inventoryReadback(desiredPath: string, domains: string[]): CfctlReadbac
       desired_scope_complete: true,
       acceptance_complete: false,
       blockers: [{ code: "ACCEPTANCE_PROFILE_INVENTORY_ONLY" }],
+    },
+  };
+}
+
+function canaryReadback(
+  desiredPath: string,
+  domains: string[],
+  selectedDomains: string[],
+): CfctlReadbackAuthority {
+  const selectedHashes = selectedDomains.map(coverageDomainSha256).sort();
+  return {
+    required: true,
+    attempted: true,
+    transaction_complete: true,
+    complete: false,
+    coverage: {
+      mode: "canary",
+      profile: "inventory_v1",
+      desired_state_sha256: fileSha256(desiredPath),
+      scope_manifest_sha256: "c".repeat(64),
+      expected_domain_count: domains.length,
+      selected_domain_count: selectedDomains.length,
+      observed_domain_count: selectedDomains.length,
+      selected_domain_sha256s: selectedHashes,
+      observed_domain_sha256s: selectedHashes,
+      required_capability_ids: [],
+      successful_capability_ids: [],
+      failed_capability_ids: [],
+      missing_capability_ids: [],
+      required_acceptance_surfaces: [],
+      successful_acceptance_surfaces: [],
+      missing_acceptance_surfaces: [],
+      selected_scope_complete: true,
+      desired_scope_complete: false,
+      acceptance_complete: false,
+      blockers: [
+        { code: "PARTIAL_DESIRED_SCOPE" },
+        { code: "ACCEPTANCE_PROFILE_INVENTORY_ONLY" },
+      ],
     },
   };
 }

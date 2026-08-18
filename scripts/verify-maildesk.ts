@@ -6,6 +6,7 @@ import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mod
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 import {
   type CfctlReadbackCoverage,
+  coverageDomainSha256,
   domainSelectedByCoverage,
   readbackAuthorizesReadiness,
   validReadbackCoverage,
@@ -364,52 +365,131 @@ function buildRows(
   localProjection: LocalProjectionEvidence,
 ): DomainRow[] {
   const desiredByDomain = new Map(desired.domains.map((domain) => [domain.name, domain]));
+  const expectedDomains = desired.domains.map((domain) => domain.name);
+  const coverageLive = liveEvidenceForCoverage(
+    live,
+    localProjection.desired_state_sha256,
+    expectedDomains,
+  );
   const domainNames = unique([
     ...Object.keys(policyFile.domains),
-    ...desired.domains.map((domain) => domain.name),
-    ...(live.zones ?? []),
+    ...expectedDomains,
+    ...(coverageLive.zones ?? []),
   ]).sort();
   return domainNames.map((domainName) => {
     const policyDomain = policyFile.domains[domainName];
     const desiredDomain = desiredByDomain.get(domainName);
+    const domainLive = liveEvidenceForDomain(
+      coverageLive,
+      domainName,
+      localProjection.desired_state_sha256,
+      expectedDomains,
+    );
     const routingEvidence =
-      live.email_routing?.[domainName] ??
-      routingEvidenceFromCfctl(domainName, desiredDomain, live.cfctl_maildesk?.domains?.[domainName]);
+      domainLive.email_routing?.[domainName] ??
+      routingEvidenceFromCfctl(domainName, desiredDomain, domainLive.cfctl_maildesk?.domains?.[domainName]);
 
     return {
       domain: domainName,
       operators: policyDomain ? domainOperators(policyDomain) : [],
       reply_identities: policyDomain ? replyIdentities(policyDomain) : [],
       routes: policyDomain ? domainRoutes(domainName, policyDomain, routingEvidence) : [],
-      sender_domain: senderSummary(domainName, desired, live),
-      inbound_mx_records: normalizedMxRecords(live.dns_mx?.[domainName]),
-      inbound_mx_provider: inboundMxProvider(live.dns_mx?.[domainName]),
-      evidence: evidenceSummary(live.inbound_proofs?.[domainName], live.outbound_proofs?.[domainName]),
+      sender_domain: senderSummary(domainName, desired, domainLive),
+      inbound_mx_records: normalizedMxRecords(domainLive.dns_mx?.[domainName]),
+      inbound_mx_provider: inboundMxProvider(domainLive.dns_mx?.[domainName]),
+      evidence: evidenceSummary(domainLive.inbound_proofs?.[domainName], domainLive.outbound_proofs?.[domainName]),
       policy_desired: comparePolicyAndDesired(policyDomain, desiredDomain),
       zone_held: checkZone(
-        live,
+        domainLive,
         domainName,
         localProjection.desired_state_sha256,
-        desired.domains.map((domain) => domain.name),
+        expectedDomains,
       ),
       role_aliases_wired: checkRouting(routingEvidence?.role_aliases, desiredDomain?.role_aliases),
       personal_aliases_wired: checkRouting(routingEvidence?.personal_aliases, desiredDomain?.personal_aliases),
-      catch_all_wired: checkCatchAll(desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
-      inbound_mx: checkInboundMx(live.dns_mx?.[domainName], desiredDomain, live.cfctl_maildesk?.domains?.[domainName]),
-      r2_policy: checkR2Policy(live, localPolicySha256, localProjection),
-      worker_bindings: checkWorkerBindings(live),
-      d1_queue: checkD1Queue(live),
+      catch_all_wired: checkCatchAll(desiredDomain, domainLive.cfctl_maildesk?.domains?.[domainName]),
+      inbound_mx: checkInboundMx(
+        domainLive.dns_mx?.[domainName],
+        desiredDomain,
+        domainLive.cfctl_maildesk?.domains?.[domainName],
+      ),
+      r2_policy: checkR2Policy(domainLive, localPolicySha256, localProjection),
+      worker_bindings: checkWorkerBindings(domainLive),
+      d1_queue: checkD1Queue(domainLive),
       inbound_proof: checkInboundProof(
         domainName,
         policyDomain,
         desiredDomain,
-        live.inbound_proofs?.[domainName],
+        domainLive.inbound_proofs?.[domainName],
         localPolicySha256,
       ),
-      outbound_sender: checkSender(domainName, desired, live),
-      outbound_proof: checkOutboundProof(domainName, desired, live.outbound_proofs?.[domainName]),
+      outbound_sender: checkSender(domainName, desired, domainLive),
+      outbound_proof: checkOutboundProof(domainName, desired, domainLive.outbound_proofs?.[domainName]),
     };
   });
+}
+
+function liveEvidenceForCoverage(
+  live: LiveEvidence,
+  expectedDesiredStateSha256: string,
+  expectedDomains: string[],
+): LiveEvidence {
+  const coverage = live.cfctl_readback?.coverage;
+  if (
+    coverage?.mode !== "canary" ||
+    !validReadbackCoverage(coverage, expectedDesiredStateSha256, expectedDomains)
+  ) return live;
+  const selected = (domain: string) => coverage.selected_domain_sha256s.includes(coverageDomainSha256(domain));
+  const zones = live.zones?.filter(selected);
+  const senderDomains = Array.isArray(live.sender_domains)
+    ? live.sender_domains.filter(selected)
+    : selectDomainEvidence(live.sender_domains, selected);
+  return {
+    ...live,
+    zones: zones && zones.length > 0 ? zones : undefined,
+    email_routing: selectDomainEvidence(live.email_routing, selected),
+    dns_mx: selectDomainEvidence(live.dns_mx, selected),
+    sender_domains: Array.isArray(senderDomains) && senderDomains.length === 0 ? undefined : senderDomains,
+    inbound_proofs: selectDomainEvidence(live.inbound_proofs, selected),
+    outbound_proofs: selectDomainEvidence(live.outbound_proofs, selected),
+    cfctl_maildesk: live.cfctl_maildesk
+      ? {
+        ...live.cfctl_maildesk,
+        domains: selectDomainEvidence(live.cfctl_maildesk.domains, selected),
+        sender_domains: selectDomainEvidence(live.cfctl_maildesk.sender_domains, selected),
+      }
+      : undefined,
+  };
+}
+
+function liveEvidenceForDomain(
+  live: LiveEvidence,
+  domain: string,
+  expectedDesiredStateSha256: string,
+  expectedDomains: string[],
+): LiveEvidence {
+  if (domainSelectedByCoverage(
+    live.cfctl_readback?.coverage,
+    domain,
+    expectedDesiredStateSha256,
+    expectedDomains,
+  )) return live;
+  return {
+    ...live,
+    zones: undefined,
+    email_routing: undefined,
+    dns_mx: undefined,
+    sender_domains: undefined,
+    inbound_proofs: undefined,
+    outbound_proofs: undefined,
+    cfctl_maildesk: live.cfctl_maildesk
+      ? {
+        ...live.cfctl_maildesk,
+        domains: undefined,
+        sender_domains: undefined,
+      }
+      : undefined,
+  };
 }
 
 function buildGaps(
@@ -1005,17 +1085,32 @@ function hasLiveEvidence(live: LiveEvidence, localProjection: LocalProjectionEvi
       return false;
     }
   }
-  return Boolean(
-    hasStringArray(live.zones) ||
-      hasRoutingEvidence(live.email_routing) ||
-      hasStringArrayMap(live.dns_mx) ||
-      hasActivePolicyEvidence(live.active_policy) ||
-      hasReadyzEvidence(live.readyz) ||
-      hasD1Evidence(live.d1) ||
-      hasSenderDomainEvidence(live.sender_domains) ||
-      hasInboundProofEvidence(live.inbound_proofs) ||
-      hasOutboundProofEvidence(live.outbound_proofs),
+  const expectedDomains = desiredState.domains.map((domain) => domain.name);
+  const coverageLive = liveEvidenceForCoverage(
+    live,
+    localProjection.desired_state_sha256,
+    expectedDomains,
   );
+  return Boolean(
+    hasStringArray(coverageLive.zones) ||
+      hasRoutingEvidence(coverageLive.email_routing) ||
+      hasStringArrayMap(coverageLive.dns_mx) ||
+      hasActivePolicyEvidence(coverageLive.active_policy) ||
+      hasReadyzEvidence(coverageLive.readyz) ||
+      hasD1Evidence(coverageLive.d1) ||
+      hasSenderDomainEvidence(coverageLive.sender_domains) ||
+      hasInboundProofEvidence(coverageLive.inbound_proofs) ||
+      hasOutboundProofEvidence(coverageLive.outbound_proofs),
+  );
+}
+
+function selectDomainEvidence<T>(
+  value: Record<string, T> | undefined,
+  selected: (domain: string) => boolean,
+): Record<string, T> | undefined {
+  if (!value) return undefined;
+  const entries = Object.entries(value).filter(([domain]) => selected(domain));
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function hasActivePolicyEvidence(value: ActivePolicyEvidence | undefined): boolean {
