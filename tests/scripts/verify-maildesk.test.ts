@@ -4,10 +4,47 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  type CfctlReadbackAuthority,
+  DARK_ACCEPTANCE_CAPABILITY_IDS,
+  DARK_ACCEPTANCE_SURFACES,
+  coverageDomainSha256,
+  readbackAuthorizesReadiness,
+} from "../../scripts/live-evidence-coverage";
 
 const root = resolve(import.meta.dir, "../..");
 
 describe("maildesk verifier", () => {
+  test("full coverage cannot substitute arbitrary domain hashes for the desired set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-domain-binding-"));
+    const desiredPath = join(dir, "desired-state.json");
+    const desired = JSON.parse(
+      readFileSync(resolve(root, "config/desired-state.example.json"), "utf8"),
+    ) as { domains: Array<{ name: string }> };
+    writeJson(desiredPath, desired);
+    const domains = desired.domains.map((domain) => domain.name);
+    const readback = authoritativeReadback(desiredPath, domains);
+    const forged = "f".repeat(64);
+    if (!readback.coverage) throw new Error("authoritative fixture lacks coverage");
+    readback.coverage.selected_domain_sha256s = [forged];
+    readback.coverage.observed_domain_sha256s = [forged];
+
+    expect(readbackAuthorizesReadiness(readback, fileSha256(desiredPath), domains)).toBe(false);
+  });
+
+  test("full coverage cannot omit a required capability from every result class", () => {
+    const desiredPath = resolve(root, "config/desired-state.example.json");
+    const desired = JSON.parse(readFileSync(desiredPath, "utf8")) as {
+      domains: Array<{ name: string }>;
+    };
+    const domains = desired.domains.map((domain) => domain.name);
+    const readback = authoritativeReadback(desiredPath, domains);
+    if (!readback.coverage) throw new Error("authoritative fixture lacks coverage");
+    readback.coverage.successful_capability_ids.pop();
+
+    expect(readbackAuthorizesReadiness(readback, fileSha256(desiredPath), domains)).toBe(false);
+  });
+
   test("the tracked canonical desired state verifies local policy without inferring edge readiness", () => {
     const result = spawnSync(
       "bun",
@@ -316,7 +353,7 @@ describe("maildesk verifier", () => {
     expect(receipt.rows[0]?.inbound_proof).toBe("drift");
   });
 
-  test("uses cfctl lifecycle evidence for edge readiness without hiding sender drift", () => {
+  test("legacy complete evidence cannot authorize edge readiness", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const policyPath = join(dir, "policy.json");
     const desiredPath = join(dir, "desired-state.json");
@@ -353,6 +390,11 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      cfctl_readback: {
+        required: true,
+        attempted: true,
+        complete: true,
+      },
       active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
@@ -424,7 +466,7 @@ describe("maildesk verifier", () => {
       rows: Array<{ outbound_sender: string }>;
     };
 
-    expect(receipt.status.edge_ready).toBe(true);
+    expect(receipt.status.edge_ready).toBe(false);
     expect(receipt.status.mail_ready).toBe(false);
     expect(receipt.gaps.filter((gap) => gap.readiness === "edge")).toHaveLength(0);
     expect(receipt.gaps).toContainEqual({
@@ -474,6 +516,7 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      cfctl_readback: authoritativeReadback(desiredPath, ["tenant.example.com"]),
       active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
@@ -593,6 +636,7 @@ describe("maildesk verifier", () => {
     });
     writeJson(evidencePath, {
       generated_at: "2026-07-01T00:00:00.000Z",
+      cfctl_readback: authoritativeReadback(desiredPath, ["tenant.example.com"]),
       active_policy: activePolicyEvidence(policyPath, desiredPath),
       cfctl_maildesk: {
         edge_ready: true,
@@ -708,6 +752,40 @@ function activePolicyEvidence(policyPath: string, desiredPath: string) {
     projected_route_count: projection.routes,
     active_desired_state_sha256: projection.desired_state_sha256,
     active_projection_sha256: projection.projection_sha256,
+  };
+}
+
+function authoritativeReadback(desiredPath: string, domains: string[]): CfctlReadbackAuthority {
+  const desiredStateSha256 = fileSha256(desiredPath);
+  const domainHashes = domains.map(coverageDomainSha256).sort();
+  const capabilities = [...DARK_ACCEPTANCE_CAPABILITY_IDS].sort();
+  const surfaces = [...DARK_ACCEPTANCE_SURFACES];
+  return {
+    required: true,
+    attempted: true,
+    transaction_complete: true,
+    complete: true,
+    coverage: {
+      mode: "full_desired_state",
+      profile: "dark_acceptance_v1",
+      desired_state_sha256: desiredStateSha256,
+      expected_domain_count: domains.length,
+      selected_domain_count: domains.length,
+      observed_domain_count: domains.length,
+      selected_domain_sha256s: domainHashes,
+      observed_domain_sha256s: domainHashes,
+      required_capability_ids: capabilities,
+      successful_capability_ids: capabilities,
+      failed_capability_ids: [],
+      missing_capability_ids: [],
+      required_acceptance_surfaces: surfaces,
+      successful_acceptance_surfaces: surfaces,
+      missing_acceptance_surfaces: [],
+      selected_scope_complete: true,
+      desired_scope_complete: true,
+      acceptance_complete: true,
+      blockers: [],
+    },
   };
 }
 

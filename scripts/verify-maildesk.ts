@@ -4,6 +4,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
+import {
+  type CfctlReadbackCoverage,
+  domainSelectedByCoverage,
+  readbackAuthorizesReadiness,
+  validReadbackCoverage,
+} from "./live-evidence-coverage";
 
 type Status = "ok" | "drift" | "missing" | "not_checked" | "not_applicable";
 
@@ -69,7 +75,9 @@ interface LiveEvidence {
   cfctl_readback?: {
     required?: boolean;
     attempted?: boolean;
+    transaction_complete?: boolean;
     complete?: boolean;
+    coverage?: CfctlReadbackCoverage;
   };
 }
 
@@ -249,7 +257,7 @@ const localProjection = collectLocalProjection(policyPath, desiredStatePath);
 const evidence = evidencePath ? readJson<LiveEvidence>(resolve(root, evidencePath)) : {};
 const policySha256 = sha256(policyText);
 const rows = buildRows(policy, desiredState, evidence, policySha256, localProjection);
-const gaps = buildGaps(rows);
+const gaps = buildGaps(rows, evidence);
 const localFailures = rows.filter((row) => row.policy_desired !== "ok");
 const edgeFailures = rows.filter((row) =>
   [
@@ -278,6 +286,12 @@ const mailFailures = rows.filter((row) =>
     row.outbound_proof,
   ].some((status) => !readinessSatisfied(status)),
 );
+const liveEvidencePresent = hasLiveEvidence(evidence, localProjection);
+const readinessAuthorized = readbackAuthorizesReadiness(
+  evidence.cfctl_readback,
+  localProjection.desired_state_sha256,
+  desiredState.domains.map((domain) => domain.name),
+);
 const receipt = {
   generated_at: new Date().toISOString(),
   policy_path: relativePath(policyPath),
@@ -287,9 +301,9 @@ const receipt = {
   local_projection: localProjection,
   status: {
     local_truth_ok: localFailures.length === 0,
-    edge_ready: edgeFailures.length === 0 && hasLiveEvidence(evidence),
-    mail_ready: mailFailures.length === 0 && hasLiveEvidence(evidence),
-    live_evidence_present: hasLiveEvidence(evidence),
+    edge_ready: edgeFailures.length === 0 && readinessAuthorized,
+    mail_ready: mailFailures.length === 0 && readinessAuthorized,
+    live_evidence_present: liveEvidencePresent,
   },
   gaps,
   rows: rows.map(receiptRow),
@@ -388,7 +402,7 @@ function buildRows(
   });
 }
 
-function buildGaps(rows: DomainRow[]): ReceiptGap[] {
+function buildGaps(rows: DomainRow[], live: LiveEvidence): ReceiptGap[] {
   const fields: Array<ReceiptGap["field"]> = [
     "policy_desired",
     "zone_held",
@@ -406,6 +420,9 @@ function buildGaps(rows: DomainRow[]): ReceiptGap[] {
 
   return rows.flatMap((row) =>
     fields
+      .filter((field) =>
+        field === "policy_desired" || domainSelectedByCoverage(live.cfctl_readback?.coverage, row.domain)
+      )
       .filter((field) => !readinessSatisfied(row[field]))
       .map((field) => ({
         domain: row.domain,
@@ -467,6 +484,7 @@ function checkIncludes(values: string[] | undefined, expected: string): Status {
 }
 
 function checkZone(live: LiveEvidence, domainName: string): Status {
+  if (!domainSelectedByCoverage(live.cfctl_readback?.coverage, domainName)) return "not_checked";
   const zone = checkIncludes(live.zones, domainName);
   if (zone === "ok") return "ok";
   const cfctlDomain = live.cfctl_maildesk?.domains?.[domainName];
@@ -494,6 +512,8 @@ function routingEvidenceFromCfctl(
   cfctlDomain: CfctlMaildeskDomainEvidence | undefined,
 ): RoutingEvidence | undefined {
   if (!desiredDomain || !cfctlDomain?.aliases) return undefined;
+  const statuses = Object.values(cfctlDomain.aliases);
+  if (statuses.length > 0 && statuses.every((status) => status === "not_checked")) return undefined;
   const okAlias = (alias: string) => cfctlDomain.aliases?.[`${alias}@${domainName}`] === "ok";
   return {
     role_aliases: desiredDomain.role_aliases.filter(okAlias),
@@ -757,7 +777,7 @@ function checkSender(domainName: string, desired: DesiredState, live: LiveEviden
 }
 
 function senderStatus(status: Status): Status {
-  return status === "ok" ? "ok" : status === "missing" ? "missing" : "drift";
+  return status;
 }
 
 function checkOutboundProof(domainName: string, desired: DesiredState, proof: ProofEvidence | undefined): Status {
@@ -939,9 +959,21 @@ function normalizeMailbox(address: string): string {
   return address.trim().toLowerCase();
 }
 
-function hasLiveEvidence(live: LiveEvidence): boolean {
-  if (live.cfctl_readback?.required === true && live.cfctl_readback.complete !== true) {
-    return false;
+function hasLiveEvidence(live: LiveEvidence, localProjection: LocalProjectionEvidence): boolean {
+  const readback = live.cfctl_readback;
+  if (readback?.required === true) {
+    if (readback.coverage) {
+      if (
+        readback.transaction_complete !== true ||
+        !validReadbackCoverage(
+          readback.coverage,
+          localProjection.desired_state_sha256,
+          desiredState.domains.map((domain) => domain.name),
+        )
+      ) return false;
+    } else if (readback.complete !== true) {
+      return false;
+    }
   }
   return Boolean(
     hasStringArray(live.zones) ||
