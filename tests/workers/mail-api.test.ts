@@ -5,6 +5,40 @@ import mailApiWorker from "../../workers/mail-api/src/index";
 import { operatorDeliveryConfig } from "../../workers/shared/contracts";
 
 describe("mail API outbound sender modes", () => {
+  test("work-item Queue audit projection allowlists body-free fields", async () => {
+    const db = new D1Recorder();
+    const batch = new MessageBatchRecorder([{
+      kind: "inbound_work_item_received",
+      messageId: "message-work-item",
+      deliveryId: "delivery-work-item",
+      queueRef: "support-intake",
+      routeRef: "route:example.net:security",
+      destinationRef: "queue:support",
+      accountableRef: "team:support",
+      rawR2Key: "raw/2026/08/work-item.eml",
+      receivedAt: "2026-08-19T00:00:00.000Z",
+      body: "PRIVATE-WORK-ITEM-BODY",
+      headers: { "x-private": "PRIVATE-HEADER" },
+    }]);
+
+    await mailApiWorker.queue(batch as unknown as MessageBatch<MailJob>, {
+      DB: db,
+    } as unknown as Env);
+
+    expect(batch.ackCount).toBe(1);
+    expect(db.auditDetail("inbound_work_item_received")).toEqual({
+      kind: "inbound_work_item_received",
+      messageId: "message-work-item",
+      deliveryId: "delivery-work-item",
+      queueRef: "support-intake",
+      routeRef: "route:example.net:security",
+      destinationRef: "queue:support",
+      accountableRef: "team:support",
+      rawR2Key: "raw/2026/08/work-item.eml",
+      receivedAt: "2026-08-19T00:00:00.000Z",
+    });
+  });
+
   test("an inbound result recovery job projects provider outcomes and cleans the spool without sending", async () => {
     const db = new D1Recorder();
     const email = new SendEmailRecorder("must-not-send");

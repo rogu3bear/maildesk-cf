@@ -4,8 +4,19 @@ import {
 } from "../../generated/router-wasm/maildesk_router.js";
 
 export interface RouterPolicy {
+  policy_version?: 1 | 2;
   default_reply_mode: "role_first" | "personal_first";
+  accountables?: Record<string, { kind: "team" }>;
+  destinations?: Record<string, DestinationPolicy>;
   domains: Record<string, DomainPolicy>;
+}
+
+export interface DestinationPolicy {
+  accountable_ref: string;
+  target:
+    | { kind: "mailbox"; recipients: string[] }
+    | { kind: "work_queue"; queue_ref: string };
+  fallback_destination_ref?: string;
 }
 
 export interface DomainPolicy {
@@ -15,7 +26,8 @@ export interface DomainPolicy {
 }
 
 export interface RoleAliasPolicy {
-  operators: string[];
+  operators?: string[];
+  destination_ref?: string;
   reply_identity: string;
   allowed_reply_identities?: string[];
   sink?: boolean;
@@ -47,6 +59,20 @@ export interface RouteDecision {
   operators: string[];
   defaultReplyIdentity: string;
   allowedReplyIdentities: string[];
+  disposition?: RouteDisposition;
+}
+
+export interface RouteDisposition {
+  routeRef: string;
+  candidates: DispositionCandidate[];
+}
+
+export interface DispositionCandidate {
+  destinationRef: string;
+  accountableRef: string;
+  target:
+    | { kind: "mailbox"; recipients: string[] }
+    | { kind: "work_queue"; queueRef: string };
 }
 
 export interface ReplyAuthorization {
@@ -159,7 +185,7 @@ function mapRouteDecision(value: Record<string, unknown>): RouteDecision {
     throw new Error(`invalid Rust route kind: ${routeKind}`);
   }
 
-  return {
+  const decision: RouteDecision = {
     domain: requireString(value, "domain"),
     localPart: requireString(value, "local_part"),
     routeKind,
@@ -167,6 +193,44 @@ function mapRouteDecision(value: Record<string, unknown>): RouteDecision {
     defaultReplyIdentity: requireString(value, "default_reply_identity"),
     allowedReplyIdentities: requireStringArray(value, "allowed_reply_identities"),
   };
+  if (value.disposition !== undefined) {
+    decision.disposition = mapRouteDisposition(value.disposition);
+  }
+  return decision;
+}
+
+function mapRouteDisposition(value: unknown): RouteDisposition {
+  if (!isRecord(value) || !Array.isArray(value.candidates)) {
+    throw new Error("Rust router disposition must contain candidates");
+  }
+  return {
+    routeRef: requireString(value, "route_ref"),
+    candidates: value.candidates.map((candidate) => mapDispositionCandidate(candidate)),
+  };
+}
+
+function mapDispositionCandidate(value: unknown): DispositionCandidate {
+  if (!isRecord(value) || !isRecord(value.target)) {
+    throw new Error("Rust router disposition candidate must contain a target");
+  }
+  const kind = requireString(value.target, "kind");
+  const base = {
+    destinationRef: requireString(value, "destination_ref"),
+    accountableRef: requireString(value, "accountable_ref"),
+  };
+  if (kind === "mailbox") {
+    return {
+      ...base,
+      target: { kind, recipients: requireStringArray(value.target, "recipients") },
+    };
+  }
+  if (kind === "work_queue") {
+    return {
+      ...base,
+      target: { kind, queueRef: requireString(value.target, "queue_ref") },
+    };
+  }
+  throw new Error(`invalid Rust disposition target kind: ${kind}`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -6,6 +6,38 @@ import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dir, "../..");
 
+test("routing policy v2 projects mailbox fallbacks without changing the digest-bound store", () => {
+  const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-v2-"));
+  try {
+    const desiredPath = join(directory, "desired.json");
+    const outputSql = join(directory, "projection.sql");
+    writeFileSync(desiredPath, JSON.stringify({
+      storage: { d1_database: "maildesk-test" },
+      domains: [
+        { name: "example.com", inbound_mx_provider: "cloudflare_email_routing", role_aliases: ["security"], personal_aliases: [] },
+        { name: "example.net", inbound_mx_provider: "cloudflare_email_routing", role_aliases: ["security"], personal_aliases: [] },
+      ],
+    }));
+
+    const result = spawnSync("bun", [
+      "scripts/sync-route-policy.ts",
+      "--policy", "tests/fixtures/routing-policy-v2.json",
+      "--desired-state", desiredPath,
+      "--out", outputSql,
+    ], { cwd: root, encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    const summary = JSON.parse(result.stdout) as { routes: number; policy_r2_key: string };
+    expect(summary.routes).toBe(2);
+    expect(summary.policy_r2_key).toMatch(/^config\/policy\/[a-f0-9]{64}\.json$/);
+    const sql = readFileSync(outputSql, "utf8");
+    expect(sql).toContain("operator@example.org");
+    expect(sql).toContain("active_policy_sha256");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("private-scale policy projection activates one immutable revision atomically", () => {
   const directory = mkdtempSync(join(tmpdir(), "maildesk-policy-batches-"));
   try {

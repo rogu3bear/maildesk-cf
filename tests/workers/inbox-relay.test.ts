@@ -84,6 +84,64 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   );
 });
 
+test("inbox relay honors a primary v2 work queue instead of sending its mailbox fallback", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const jobs: unknown[] = [];
+  const v2Policy = JSON.parse(
+    await Bun.file(new URL("../fixtures/routing-policy-v2.json", import.meta.url)).text(),
+  ) as RouterPolicy;
+  const env = relayEnv(db, deliveries, v2Policy);
+  delete (env as unknown as { RAW_MAIL?: R2Bucket }).RAW_MAIL;
+  env.MAIL_JOBS = { send: async (job: unknown) => { jobs.push(job); } } as unknown as Queue;
+  const message = inboundMessage(
+    "sender@example.org",
+    "security@example.net",
+    mime({ from: "sender@example.org", messageId: "<queue-inbox-relay@example.org>" }),
+  );
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toEqual([]);
+  expect(message.forwarded).toEqual([]);
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]).toMatchObject({
+    kind: "inbound_work_item_received",
+    queueRef: "support-intake",
+    destinationRef: "queue:support",
+    accountableRef: "team:support",
+  });
+  const healthProjection = db.calls.find((call) => call.sql.includes("UPDATE route_health SET last_inbound_at"));
+  expect(healthProjection?.sql).toContain("active_policy_sha256 = ?3");
+  expect(healthProjection?.bindings[2]).toBe(db.activePolicy?.sha256);
+});
+
+test("inbox relay rejects oversized v2 work items before Queue or Email effects", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const jobs: unknown[] = [];
+  const v2Policy = JSON.parse(
+    await Bun.file(new URL("../fixtures/routing-policy-v2.json", import.meta.url)).text(),
+  ) as RouterPolicy;
+  const env = relayEnv(db, deliveries, v2Policy);
+  delete (env as unknown as { RAW_MAIL?: R2Bucket }).RAW_MAIL;
+  env.MAIL_JOBS = { send: async (job: unknown) => { jobs.push(job); } } as unknown as Queue;
+  const message = inboundMessage(
+    "sender@example.org",
+    "security@example.net",
+    mime({ from: "sender@example.org", messageId: "<oversized-queue@example.org>" }),
+  );
+  message.rawSize = 5_242_881;
+
+  await mailRouterWorker.email(message, env, {} as ExecutionContext);
+
+  expect(message.rejected).toBe("maildesk relay accepts messages up to 5 MiB including attachments");
+  expect(deliveries).toEqual([]);
+  expect(jobs).toEqual([]);
+  expect(db.calls.some((call) => call.sql.includes("UPDATE route_health SET last_inbound_at"))).toBe(false);
+});
+
 test("inbox relay binds the external destination to the visible sender, not an untrusted Reply-To", async () => {
   const db = new RelayD1();
   const message = inboundMessage(
@@ -928,6 +986,9 @@ class RelayD1 {
         return { success: true, meta: { changes: 1 } };
       },
       first: async () => {
+        const activePolicy = this.activePolicy
+          ? JSON.parse(this.activePolicy.json) as RouterPolicy
+          : null;
         if (sql.includes("FROM inbound_recipient_deliveries") && sql.includes("operator_ref = ?2")) {
           return this.recipientDeliveries.find((row) =>
             row.delivery_id === call.bindings[0] && row.operator_ref === call.bindings[1]
@@ -937,16 +998,16 @@ class RelayD1 {
             this.inboundDelivery.fingerprint_sha256 === call.bindings[0]) {
           return this.inboundDelivery;
         }
-        return sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy
+        return sql.includes("SELECT rs.active_policy_sha256") && this.activePolicy && activePolicy
           ? {
             active_policy_sha256: this.activePolicy.sha256,
             active_policy_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
             revision_sha256: this.activePolicy.sha256,
             revision_r2_key: `config/policy/${this.activePolicy.sha256}.json`,
-            expected_domain_count: 1,
-            expected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
-            projected_route_count: policyRouteCount(JSON.parse(this.activePolicy.json) as RouterPolicy),
-            projected_domain_count: 1,
+            expected_domain_count: Object.keys(activePolicy.domains).length,
+            expected_route_count: policyRouteCount(activePolicy),
+            projected_route_count: policyRouteCount(activePolicy),
+            projected_domain_count: Object.keys(activePolicy.domains).length,
           }
           : null;
       },

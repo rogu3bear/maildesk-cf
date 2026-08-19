@@ -19,9 +19,18 @@ interface DesiredState {
 }
 
 interface RouterPolicy {
+  policy_version?: 1 | 2;
+  destinations?: Record<string, {
+    accountable_ref: string;
+    target:
+      | { kind: "mailbox"; recipients: string[] }
+      | { kind: "work_queue"; queue_ref: string };
+    fallback_destination_ref?: string;
+  }>;
   domains: Record<string, {
     role_aliases: Record<string, {
-      operators: string[];
+      operators?: string[];
+      destination_ref?: string;
       reply_identity: string;
       sink?: boolean;
     }>;
@@ -135,7 +144,7 @@ function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRo
         decisionKind,
         "role",
         desiredDomain.inbound_mx_provider,
-        route.sink ? [] : route.operators,
+        route.sink ? [] : routeOperators(policy, route),
         route.reply_identity,
       ));
     }
@@ -172,6 +181,26 @@ function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRo
     }
   }
   return routes.sort((a, b) => `${a.domain}\0${a.localPart}`.localeCompare(`${b.domain}\0${b.localPart}`));
+}
+
+function routeOperators(
+  policy: RouterPolicy,
+  route: { operators?: string[]; destination_ref?: string },
+): string[] {
+  if (route.destination_ref) {
+    const seen = new Set<string>();
+    let destinationRef: string | undefined = route.destination_ref;
+    while (destinationRef) {
+      if (seen.has(destinationRef)) fail(`destination fallback cycle includes: ${destinationRef}`);
+      seen.add(destinationRef);
+      const destination = policy.destinations?.[destinationRef];
+      if (!destination) fail(`destination is not configured: ${destinationRef}`);
+      if (destination.target.kind === "mailbox") return destination.target.recipients;
+      destinationRef = destination.fallback_destination_ref;
+    }
+    fail(`destination chain has no mailbox projection: ${route.destination_ref}`);
+  }
+  return route.operators ?? [];
 }
 
 function projectedRoute(

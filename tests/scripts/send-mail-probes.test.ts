@@ -7,6 +7,34 @@ import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dir, "../..");
 
 describe("mail probe sender", () => {
+  test("destination-backed v2 routes resolve their governed mailbox operator", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-probes-v2-"));
+    const planPath = join(dir, "plan.json");
+    writeJson(planPath, {
+      actions: [{
+        kind: "targeted_outbound_reply_probe",
+        domain: "example.net",
+        from_identity: "security@example.net",
+        description: "dry-run one v2 outbound proof",
+      }],
+    });
+
+    const result = spawnSync("bun", [
+      "run", "scripts/send-mail-probes.ts", "--",
+      "--kind", "outbound",
+      "--plan", planPath,
+      "--policy", "tests/fixtures/routing-policy-v2.json",
+      "--json",
+    ], { cwd: root, encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    const summary = JSON.parse(result.stdout) as { results: Array<{ status: string; from_identity: string }> };
+    expect(summary.results).toEqual([expect.objectContaining({
+      status: "dry_run",
+      from_identity: "security@example.net",
+    })]);
+  });
+
   test("dry-runs inbound probes without a Resend CLI dependency", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-probes-"));
     const planPath = join(dir, "plan.json");
