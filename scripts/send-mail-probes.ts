@@ -7,6 +7,12 @@ interface ProofPlan {
 }
 
 interface PolicyFile {
+  destinations?: Record<string, {
+    target:
+      | { kind: "mailbox"; recipients: string[] }
+      | { kind: "work_queue"; queue_ref: string };
+    fallback_destination_ref?: string;
+  }>;
   domains: Record<string, PolicyDomain>;
 }
 
@@ -16,7 +22,8 @@ interface PolicyDomain {
 }
 
 interface RoleAlias {
-  operators: string[];
+  operators?: string[];
+  destination_ref?: string;
   reply_identity: string;
   allowed_reply_identities: string[];
 }
@@ -253,12 +260,30 @@ function routeOperator(envelopeTo: string): string {
   const domainPolicy = mailbox ? policy.domains[mailbox.domain] : undefined;
   const route =
     mailbox && (domainPolicy?.role_aliases[mailbox.localPart] ?? domainPolicy?.personal_aliases[mailbox.localPart]);
-  const operator = route && "operators" in route ? route.operators[0] : route?.operator;
+  const operator = route && "reply_identity" in route && "operators" in route
+    ? roleOperators(route)[0]
+    : route && "destination_ref" in route
+      ? roleOperators(route)[0]
+      : route?.operator;
   if (!operator) {
     console.error(`no operator found for ${envelopeTo}`);
     process.exit(1);
   }
   return operator;
+}
+
+function roleOperators(route: RoleAlias): string[] {
+  if (!route.destination_ref) return route.operators ?? [];
+  const seen = new Set<string>();
+  let destinationRef: string | undefined = route.destination_ref;
+  while (destinationRef && !seen.has(destinationRef)) {
+    seen.add(destinationRef);
+    const destination = policy.destinations?.[destinationRef];
+    if (!destination) return [];
+    if (destination.target.kind === "mailbox") return destination.target.recipients;
+    destinationRef = destination.fallback_destination_ref;
+  }
+  return [];
 }
 
 function parseMailbox(address: string): { localPart: string; domain: string } | null {

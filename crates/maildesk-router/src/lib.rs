@@ -15,8 +15,40 @@ pub struct InboundMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouterPolicy {
+    #[serde(default)]
+    pub policy_version: Option<u32>,
     pub default_reply_mode: ReplyMode,
+    #[serde(default)]
+    pub accountables: BTreeMap<String, AccountablePolicy>,
+    #[serde(default)]
+    pub destinations: BTreeMap<String, DestinationPolicy>,
     pub domains: BTreeMap<String, DomainPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountablePolicy {
+    pub kind: AccountableKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountableKind {
+    Team,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestinationPolicy {
+    pub accountable_ref: String,
+    pub target: DestinationTarget,
+    #[serde(default)]
+    pub fallback_destination_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DestinationTarget {
+    Mailbox { recipients: Vec<String> },
+    WorkQueue { queue_ref: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +64,10 @@ pub struct DomainPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleAliasPolicy {
+    #[serde(default)]
     pub operators: Vec<String>,
+    #[serde(default)]
+    pub destination_ref: Option<String>,
     pub reply_identity: String,
     #[serde(default)]
     pub allowed_reply_identities: Vec<String>,
@@ -77,6 +112,21 @@ pub struct RouteDecision {
     pub operators: Vec<String>,
     pub default_reply_identity: String,
     pub allowed_reply_identities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<RouteDisposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteDisposition {
+    pub route_ref: String,
+    pub candidates: Vec<DispositionCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispositionCandidate {
+    pub destination_ref: String,
+    pub accountable_ref: String,
+    pub target: DestinationTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +173,18 @@ pub enum PolicyError {
     MissingRoleReplyIdentity(String, String),
     #[error("personal reply identity must match the alias address: {0}@{1}")]
     PersonalReplyIdentityMismatch(String, String),
+    #[error("unsupported policy version: {0}")]
+    UnsupportedPolicyVersion(u32),
+    #[error("destination is not configured: {0}")]
+    UnknownDestination(String),
+    #[error("accountable is not configured: {0}")]
+    UnknownAccountable(String),
+    #[error("destination fallback cycle includes: {0}")]
+    DestinationFallbackCycle(String),
+    #[error("invalid destination target: {0}")]
+    InvalidDestinationTarget(String),
+    #[error("destination chain has no mailbox fallback: {0}")]
+    MissingMailboxFallback(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,7 +225,7 @@ pub fn route_message(
         .ok_or_else(|| RouteError::UnknownDomain(domain.clone()))?;
 
     if let Some(role_policy) = domain_policy.role_aliases.get(&local_part) {
-        return role_decision(domain, local_part, role_policy);
+        return role_decision(policy, domain, local_part, role_policy);
     }
 
     if let Some(personal_policy) = domain_policy.personal_aliases.get(&local_part) {
@@ -215,6 +277,14 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
         return Err(PolicyError::EmptyPolicy);
     }
 
+    if let Some(version) = policy.policy_version {
+        if version != 1 && version != 2 {
+            return Err(PolicyError::UnsupportedPolicyVersion(version));
+        }
+    }
+
+    validate_destinations(policy)?;
+
     let mut route_count = 0usize;
     for (domain, domain_policy) in &policy.domains {
         if domain_policy.role_aliases.is_empty()
@@ -226,9 +296,10 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
 
         for (local_part, role_policy) in &domain_policy.role_aliases {
             let decision = route_for_policy_check(policy, local_part, domain)?;
-            if !decision
-                .allowed_reply_identities
-                .contains(&role_policy.reply_identity)
+            if role_policy.destination_ref.is_none()
+                && !decision
+                    .allowed_reply_identities
+                    .contains(&role_policy.reply_identity)
             {
                 return Err(PolicyError::MissingRoleReplyIdentity(
                     local_part.clone(),
@@ -276,6 +347,7 @@ pub fn route_message_json(request_json: &str) -> String {
     let result = serde_json::from_str::<RouteAdapterRequest>(request_json)
         .map_err(AdapterError::invalid_request)
         .and_then(|request| {
+            validate_policy(&request.policy).map_err(AdapterError::from_policy)?;
             route_message(&request.policy, &request.message).map_err(AdapterError::from_route)
         });
 
@@ -287,6 +359,7 @@ pub fn authorize_reply_json(request_json: &str) -> String {
     let result = serde_json::from_str::<ReplyAdapterRequest>(request_json)
         .map_err(AdapterError::invalid_request)
         .and_then(|request| {
+            validate_policy(&request.policy).map_err(AdapterError::from_policy)?;
             let decision = route_message(
                 &request.policy,
                 &InboundMessage {
@@ -347,6 +420,13 @@ impl AdapterError {
             message: error.to_string(),
         }
     }
+
+    fn from_policy(error: PolicyError) -> Self {
+        Self {
+            kind: "invalid_policy".to_string(),
+            message: error.to_string(),
+        }
+    }
 }
 
 fn route_for_policy_check(
@@ -367,6 +447,7 @@ fn route_for_policy_check(
 }
 
 fn role_decision(
+    policy: &RouterPolicy,
     domain: String,
     local_part: String,
     role_policy: &RoleAliasPolicy,
@@ -384,6 +465,30 @@ fn role_decision(
             operators: Vec::new(),
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
+            disposition: None,
+        });
+    }
+
+    if let Some(destination_ref) = &role_policy.destination_ref {
+        let candidates = destination_candidates(policy, destination_ref);
+        let operators = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.target {
+                DestinationTarget::Mailbox { recipients } => Some(recipients.clone()),
+                DestinationTarget::WorkQueue { .. } => None,
+            })
+            .unwrap_or_default();
+        return Ok(RouteDecision {
+            disposition: Some(RouteDisposition {
+                route_ref: format!("route:{domain}:{local_part}"),
+                candidates,
+            }),
+            domain,
+            local_part,
+            route_kind: RouteKind::RoleAlias,
+            operators,
+            default_reply_identity: role_policy.reply_identity.clone(),
+            allowed_reply_identities,
         });
     }
 
@@ -398,6 +503,7 @@ fn role_decision(
         operators: role_policy.operators.clone(),
         default_reply_identity: role_policy.reply_identity.clone(),
         allowed_reply_identities,
+        disposition: None,
     })
 }
 
@@ -419,6 +525,7 @@ fn catch_all_decision(
             operators: Vec::new(),
             default_reply_identity: catch_all_policy.reply_identity.clone(),
             allowed_reply_identities,
+            disposition: None,
         });
     }
 
@@ -433,6 +540,7 @@ fn catch_all_decision(
         operators: catch_all_policy.operators.clone(),
         default_reply_identity: catch_all_policy.reply_identity.clone(),
         allowed_reply_identities,
+        disposition: None,
     })
 }
 
@@ -452,7 +560,103 @@ fn personal_decision(
         operators: vec![personal_policy.operator.clone()],
         default_reply_identity: personal_policy.reply_identity.clone(),
         allowed_reply_identities: vec![personal_policy.reply_identity.clone()],
+        disposition: None,
     })
+}
+
+fn destination_candidates(policy: &RouterPolicy, initial_ref: &str) -> Vec<DispositionCandidate> {
+    let mut candidates = Vec::new();
+    let mut current_ref = Some(initial_ref);
+    let mut visited = BTreeSet::new();
+    while let Some(destination_ref) = current_ref {
+        if !visited.insert(destination_ref.to_string()) {
+            break;
+        }
+        let Some(destination) = policy.destinations.get(destination_ref) else {
+            break;
+        };
+        candidates.push(DispositionCandidate {
+            destination_ref: destination_ref.to_string(),
+            accountable_ref: destination.accountable_ref.clone(),
+            target: destination.target.clone(),
+        });
+        current_ref = destination.fallback_destination_ref.as_deref();
+    }
+    candidates
+}
+
+fn validate_destinations(policy: &RouterPolicy) -> Result<(), PolicyError> {
+    for (destination_ref, destination) in &policy.destinations {
+        if !policy
+            .accountables
+            .contains_key(&destination.accountable_ref)
+        {
+            return Err(PolicyError::UnknownAccountable(
+                destination.accountable_ref.clone(),
+            ));
+        }
+        match &destination.target {
+            DestinationTarget::Mailbox { recipients } if recipients.is_empty() => {
+                return Err(PolicyError::InvalidDestinationTarget(
+                    destination_ref.clone(),
+                ));
+            }
+            DestinationTarget::Mailbox { recipients } => {
+                if recipients
+                    .iter()
+                    .any(|recipient| normalize_mailbox(recipient).is_err())
+                {
+                    return Err(PolicyError::InvalidDestinationTarget(
+                        destination_ref.clone(),
+                    ));
+                }
+            }
+            DestinationTarget::WorkQueue { queue_ref } if queue_ref.trim().is_empty() => {
+                return Err(PolicyError::InvalidDestinationTarget(
+                    destination_ref.clone(),
+                ));
+            }
+            DestinationTarget::WorkQueue { .. } => {}
+        }
+        if let Some(fallback_ref) = &destination.fallback_destination_ref {
+            if !policy.destinations.contains_key(fallback_ref) {
+                return Err(PolicyError::UnknownDestination(fallback_ref.clone()));
+            }
+        }
+    }
+
+    for start in policy.destinations.keys() {
+        let mut current = Some(start.as_str());
+        let mut visited = BTreeSet::new();
+        while let Some(destination_ref) = current {
+            if !visited.insert(destination_ref.to_string()) {
+                return Err(PolicyError::DestinationFallbackCycle(
+                    destination_ref.to_string(),
+                ));
+            }
+            current = policy
+                .destinations
+                .get(destination_ref)
+                .and_then(|destination| destination.fallback_destination_ref.as_deref());
+        }
+    }
+
+    for domain_policy in policy.domains.values() {
+        for role in domain_policy.role_aliases.values() {
+            if let Some(destination_ref) = &role.destination_ref {
+                if !policy.destinations.contains_key(destination_ref) {
+                    return Err(PolicyError::UnknownDestination(destination_ref.clone()));
+                }
+                if !destination_candidates(policy, destination_ref)
+                    .iter()
+                    .any(|candidate| matches!(candidate.target, DestinationTarget::Mailbox { .. }))
+                {
+                    return Err(PolicyError::MissingMailboxFallback(destination_ref.clone()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn split_mailbox(address: &str) -> Result<(String, String), RouteError> {
@@ -679,7 +883,10 @@ mod tests {
             },
         );
         let policy = RouterPolicy {
+            policy_version: None,
             default_reply_mode: ReplyMode::RoleFirst,
+            accountables: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             domains,
         };
         assert_eq!(validate_policy(&policy)?, 1);
@@ -757,12 +964,128 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn routing_policy_v2_resolves_same_local_part_by_domain_with_body_free_disposition(
+    ) -> Result<(), serde_json::Error> {
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/routing-policy-v2.json"
+        ))?;
+
+        let mailbox_response: serde_json::Value = serde_json::from_str(&route_message_json(
+            &serde_json::json!({
+                "policy": policy,
+                "message": {
+                    "envelope_to": "security@example.com",
+                    "header_from": "sender@example.org",
+                    "message_id": "<mailbox-route@example.org>",
+                    "subject": "Mailbox route"
+                }
+            })
+            .to_string(),
+        ))?;
+        let queue_response: serde_json::Value = serde_json::from_str(&route_message_json(
+            &serde_json::json!({
+                "policy": policy,
+                "message": {
+                    "envelope_to": "security@example.net",
+                    "header_from": "sender@example.org",
+                    "message_id": "<queue-route@example.org>",
+                    "subject": "Queue route"
+                }
+            })
+            .to_string(),
+        ))?;
+
+        assert_eq!(mailbox_response["status"], "ok");
+        assert_eq!(mailbox_response["value"]["domain"], "example.com");
+        assert_eq!(
+            mailbox_response["value"]["disposition"]["candidates"][0]["destination_ref"],
+            "mailbox:security"
+        );
+        assert_eq!(
+            mailbox_response["value"]["disposition"]["candidates"][0]["target"]["kind"],
+            "mailbox"
+        );
+        assert_eq!(queue_response["status"], "ok");
+        assert_eq!(queue_response["value"]["domain"], "example.net");
+        assert_eq!(
+            queue_response["value"]["disposition"]["candidates"][0]["destination_ref"],
+            "queue:support"
+        );
+        assert_eq!(
+            queue_response["value"]["disposition"]["candidates"][1]["destination_ref"],
+            "mailbox:support"
+        );
+        assert!(queue_response.to_string().contains("team:support"));
+        assert!(!queue_response.to_string().contains("Mailbox route"));
+        Ok(())
+    }
+
+    #[test]
+    fn routing_policy_v2_rejects_destination_fallback_cycles() -> Result<(), serde_json::Error> {
+        let policy: RouterPolicy = serde_json::from_value(serde_json::json!({
+            "policy_version": 2,
+            "default_reply_mode": "role_first",
+            "accountables": { "team:ops": { "kind": "team" } },
+            "destinations": {
+                "queue:a": {
+                    "accountable_ref": "team:ops",
+                    "target": { "kind": "work_queue", "queue_ref": "queue-a" },
+                    "fallback_destination_ref": "queue:b"
+                },
+                "queue:b": {
+                    "accountable_ref": "team:ops",
+                    "target": { "kind": "work_queue", "queue_ref": "queue-b" },
+                    "fallback_destination_ref": "queue:a"
+                }
+            },
+            "domains": {
+                "example.com": {
+                    "role_aliases": {
+                        "ops": {
+                            "destination_ref": "queue:a",
+                            "reply_identity": "ops@example.com"
+                        }
+                    },
+                    "personal_aliases": {}
+                }
+            }
+        }))?;
+
+        let error = validate_policy(&policy).expect_err("fallback cycle must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "destination fallback cycle includes: queue:a"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn routing_policy_v2_requires_a_terminal_mailbox_projection() -> Result<(), serde_json::Error> {
+        let mut policy: RouterPolicy = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/routing-policy-v2.json"
+        ))?;
+        policy
+            .destinations
+            .get_mut("queue:support")
+            .expect("fixture queue destination")
+            .fallback_destination_ref = None;
+
+        let error = validate_policy(&policy).expect_err("queue-only routes cannot be activated");
+        assert_eq!(
+            error.to_string(),
+            "destination chain has no mailbox fallback: queue:support"
+        );
+        Ok(())
+    }
+
     fn sink_policy() -> RouterPolicy {
         let mut role_aliases = BTreeMap::new();
         role_aliases.insert(
             "dmarc".to_string(),
             RoleAliasPolicy {
                 operators: vec![],
+                destination_ref: None,
                 reply_identity: "dmarc@example.com".to_string(),
                 allowed_reply_identities: vec![],
                 sink: true,
@@ -780,7 +1103,10 @@ mod tests {
         );
 
         RouterPolicy {
+            policy_version: None,
             default_reply_mode: ReplyMode::RoleFirst,
+            accountables: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             domains,
         }
     }
@@ -791,6 +1117,7 @@ mod tests {
             "info".to_string(),
             RoleAliasPolicy {
                 operators: vec!["operator-a@example.com".to_string()],
+                destination_ref: None,
                 reply_identity: "info@example.com".to_string(),
                 allowed_reply_identities: vec!["operator-a@example.com".to_string()],
                 sink: false,
@@ -813,7 +1140,10 @@ mod tests {
         );
 
         RouterPolicy {
+            policy_version: None,
             default_reply_mode: ReplyMode::RoleFirst,
+            accountables: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             domains,
         }
     }
@@ -827,6 +1157,7 @@ mod tests {
                     "operator-a@example.com".to_string(),
                     "operator-b@example.com".to_string(),
                 ],
+                destination_ref: None,
                 reply_identity: "founders@example.com".to_string(),
                 allowed_reply_identities: vec![
                     "operator-a@example.com".to_string(),
@@ -856,7 +1187,10 @@ mod tests {
         );
 
         RouterPolicy {
+            policy_version: None,
             default_reply_mode: ReplyMode::RoleFirst,
+            accountables: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             domains,
         }
     }

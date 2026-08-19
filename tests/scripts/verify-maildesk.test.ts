@@ -294,6 +294,38 @@ describe("maildesk verifier", () => {
     });
   });
 
+  test("destination-backed v2 role aliases remain consumable by the horizontal verifier", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-v2-"));
+    const desiredPath = join(dir, "desired.json");
+    writeJson(desiredPath, {
+      ...canonicalTopology(),
+      domains: ["example.com", "example.net"].map((name) => ({
+        name,
+        role_aliases: ["security"],
+        personal_aliases: [],
+        catch_all: false,
+        inbound_mx_provider: "cloudflare_email_routing",
+      })),
+      sender: { mode: "disabled", candidate_domains: [] },
+    });
+
+    const result = spawnSync("bun", [
+      "run", "scripts/verify-maildesk.ts", "--",
+      "--policy", "tests/fixtures/routing-policy-v2.json",
+      "--desired-state", desiredPath,
+      "--json",
+    ], { cwd: root, encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    const receipt = JSON.parse(result.stdout) as {
+      rows: Array<{ domain: string; operator_count: number }>;
+    };
+    expect(receipt.rows.map((row) => [row.domain, row.operator_count])).toEqual([
+      ["example.com", 1],
+      ["example.net", 1],
+    ]);
+  });
+
   test("policy bucket existence and a matching legacy local digest cannot stand in for active R2 readback", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-"));
     const evidencePath = join(dir, "evidence.json");

@@ -1,0 +1,62 @@
+{
+  "policy_version": 2,
+  "default_reply_mode": "role_first",
+  "accountables": {
+    "team:security": {
+      "kind": "team"
+    },
+    "team:support": {
+      "kind": "team"
+    }
+  },
+  "destinations": {
+    "mailbox:security": {
+      "accountable_ref": "team:security",
+      "target": {
+        "kind": "mailbox",
+        "recipients": [
+          "operator@example.org"
+        ]
+      }
+    },
+    "queue:support": {
+      "accountable_ref": "team:support",
+      "target": {
+        "kind": "work_queue",
+        "queue_ref": "support-intake"
+      },
+      "fallback_destination_ref": "mailbox:support"
+    },
+    "mailbox:support": {
+      "accountable_ref": "team:support",
+      "target": {
+        "kind": "mailbox",
+        "recipients": [
+          "operator@example.org"
+        ]
+      }
+    }
+  },
+  "domains": {
+    "example.com": {
+      "role_aliases": {
+        "security": {
+          "destination_ref": "mailbox:security",
+          "reply_identity": "security@example.com",
+          "allowed_reply_identities": []
+        }
+      },
+      "personal_aliases": {}
+    },
+    "example.net": {
+      "role_aliases": {
+        "security": {
+          "destination_ref": "queue:support",
+          "reply_identity": "security@example.net",
+          "allowed_reply_identities": []
+        }
+      },
+      "personal_aliases": {}
+    }
+  }
+}

@@ -891,7 +891,9 @@ const ACK: QueueDisposition = { kind: "ack" };
 // Stable idempotency base for a job: the inbound deliveryId (set by the router)
 // or the outbound messageId. Returns undefined for jobs without one (no dedup).
 function dedupeBase(job: MailJob): string | undefined {
-  if (job.kind === "inbound_email_received") return job.deliveryId;
+  if (job.kind === "inbound_email_received" || job.kind === "inbound_work_item_received") {
+    return job.deliveryId;
+  }
   if (job.kind === "outbound_reply_requested") return job.messageId;
   if (job.kind === "inbox_reply_received") return job.attemptId;
   return undefined;
@@ -915,6 +917,19 @@ async function auditDetailForJob(job: MailJob, env: Env): Promise<unknown> {
       relayId: job.relayId,
       operator,
       operatorMessageId: job.operatorMessageId,
+      receivedAt: job.receivedAt,
+    };
+  }
+  if (job.kind === "inbound_work_item_received") {
+    return {
+      kind: job.kind,
+      messageId: job.messageId,
+      deliveryId: job.deliveryId,
+      queueRef: job.queueRef,
+      routeRef: job.routeRef,
+      destinationRef: job.destinationRef,
+      accountableRef: job.accountableRef,
+      rawR2Key: job.rawR2Key,
       receivedAt: job.receivedAt,
     };
   }
@@ -1176,10 +1191,14 @@ function outboundPrivacyFailure(job: OutboundReplyRequestedJob, policy: RouterPo
   const operators = new Set<string>();
   for (const domain of Object.values(policy.domains)) {
     for (const route of Object.values(domain.role_aliases)) {
-      for (const operator of route.operators) operators.add(normalizeMailbox(operator));
+      for (const operator of route.operators ?? []) operators.add(normalizeMailbox(operator));
     }
     for (const route of Object.values(domain.personal_aliases)) operators.add(normalizeMailbox(route.operator));
     for (const operator of domain.catch_all?.operators ?? []) operators.add(normalizeMailbox(operator));
+  }
+  for (const destination of Object.values(policy.destinations ?? {})) {
+    if (destination.target.kind !== "mailbox") continue;
+    for (const recipient of destination.target.recipients) operators.add(normalizeMailbox(recipient));
   }
   const outwardHeaders = canonicalConversationHeaders(job);
   const visible = [

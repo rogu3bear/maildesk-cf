@@ -74,11 +74,117 @@ async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<
   }
 
   if (config.mode === "inbox_relay") {
+    if (boundRoute.route.disposition) {
+      const selected = selectWebDeskDisposition(boundRoute.route, env);
+      if (!selected) {
+        message.setReject("maildesk route has no available destination");
+        return;
+      }
+      if (selected.target.kind === "work_queue") {
+        await acceptInboxWorkQueue(
+          message,
+          boundRoute.route,
+          boundRoute.policySha256,
+          selected,
+          env,
+        );
+        return;
+      }
+      await acceptInboxRelay(message, {
+        ...boundRoute,
+        route: { ...boundRoute.route, operators: selected.target.recipients },
+      }, env);
+      return;
+    }
     await acceptInboxRelay(message, boundRoute, env);
     return;
   }
 
   await acceptWebDesk(message, boundRoute.route, env);
+}
+
+async function acceptInboxWorkQueue(
+  message: ForwardableEmailMessage,
+  route: RouteDecision,
+  policySha256: string,
+  selected: SelectedWebDeskDisposition,
+  env: Env,
+): Promise<void> {
+  if (selected.target.kind !== "work_queue") {
+    message.setReject("maildesk work queue disposition is invalid");
+    return;
+  }
+  if (!env.RELAY_SPOOL || !env.MAIL_JOBS) {
+    message.setReject("maildesk work queue storage is not configured");
+    return;
+  }
+  if (message.rawSize > operatorDeliveryConfig(env).maxEncodedMessageBytes) {
+    message.setReject("maildesk relay accepts messages up to 5 MiB including attachments");
+    return;
+  }
+  let rawBytes: ArrayBuffer;
+  try {
+    rawBytes = await new Response(message.raw).arrayBuffer();
+  } catch {
+    message.setReject("maildesk could not read the work item");
+    return;
+  }
+  const fingerprint = await sha256Hex([
+    normalizeMailbox(message.from),
+    normalizeMailbox(message.to),
+    await sha256Hex(rawBytes),
+  ].join("\0"));
+  const deliveryId = `work-item:${fingerprint}`;
+  const messageId = message.headers.get("message-id") ?? `<${deliveryId}@maildesk.invalid>`;
+  const receivedAt = new Date().toISOString();
+  const rawR2Key = relaySpoolKey(deliveryId, receivedAt);
+  const routeId = stableId("route", route.domain, route.localPart);
+  try {
+    await env.RELAY_SPOOL.put(rawR2Key, rawBytes, {
+      httpMetadata: { contentType: MIME_CONTENT_TYPE },
+      customMetadata: { retentionClass: "relay-spool", deliveryId },
+    });
+    const projected = await env.DB.prepare(
+      "UPDATE route_health SET last_inbound_at = ?1, updated_at = CURRENT_TIMESTAMP WHERE route_id = ?2 AND policy_sha256 = ?3 AND EXISTS (SELECT 1 FROM runtime_state rs WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?3)",
+    ).bind(receivedAt, routeId, policySha256).run();
+    if (Number(projected.meta?.changes ?? 0) !== 1) {
+      throw new Error("active work queue route is unavailable");
+    }
+    await recordAudit(
+      env,
+      `${deliveryId}:route_disposition_selected`,
+      null,
+      "system",
+      "route_disposition_selected",
+      {
+        routeRef: selected.routeRef,
+        destinationRef: selected.destinationRef,
+        accountableRef: selected.accountableRef,
+        targetKind: selected.target.kind,
+        fallbackUsed: selected.fallbackUsed,
+        policySha256,
+      },
+    );
+  } catch {
+    await env.RELAY_SPOOL.delete(rawR2Key).catch(() => undefined);
+    message.setReject("maildesk could not durably admit the work item");
+    return;
+  }
+  try {
+    await env.MAIL_JOBS.send({
+      kind: "inbound_work_item_received",
+      messageId,
+      deliveryId,
+      queueRef: selected.target.queueRef,
+      routeRef: selected.routeRef,
+      destinationRef: selected.destinationRef,
+      accountableRef: selected.accountableRef,
+      rawR2Key,
+      receivedAt,
+    });
+  } catch {
+    message.setReject("maildesk could not durably queue the work item");
+  }
 }
 
 async function acceptInboxRelay(
@@ -559,11 +665,26 @@ async function acceptWebDesk(
   message: ForwardableEmailMessage,
   route: RouteDecision,
   env: Env,
+  preselected?: SelectedWebDeskDisposition,
 ): Promise<void> {
+  if (!env.RAW_MAIL) {
+    message.setReject("maildesk raw archive storage is not configured");
+    return;
+  }
+  const selected = preselected ?? selectWebDeskDisposition(route, env);
+  if (!selected) {
+    message.setReject("maildesk route has no available destination");
+    return;
+  }
+  const effectiveRoute: RouteDecision = selected.target.kind === "mailbox"
+    ? { ...route, operators: selected.target.recipients }
+    : { ...route, operators: [] };
   const messageId = message.headers.get("message-id") ?? crypto.randomUUID();
   const deliveryId = crypto.randomUUID();
   const rawR2Key = rawMailKey(messageId, deliveryId);
-  const forwardResults = await forwardToOperators(message, route);
+  const forwardResults = selected.target.kind === "mailbox"
+    ? await forwardToOperators(message, effectiveRoute)
+    : [];
   let rawBytes: ArrayBuffer;
   try {
     rawBytes = await new Response(message.raw).arrayBuffer();
@@ -571,25 +692,46 @@ async function acceptWebDesk(
       httpMetadata: { contentType: MIME_CONTENT_TYPE },
       customMetadata: { retentionClass: "archive" },
     });
-    await persistWebDeskMetadata(message, messageId, deliveryId, rawR2Key, route, forwardResults, env);
+    await persistWebDeskMetadata(
+      message,
+      messageId,
+      deliveryId,
+      rawR2Key,
+      effectiveRoute,
+      forwardResults,
+      selected,
+      env,
+    );
   } catch {
     structuredError("maildesk metadata persist failed", { deliveryId });
     return;
   }
 
   try {
-    await env.MAIL_JOBS.send({
+    if (selected.target.kind === "work_queue") {
+      await env.MAIL_JOBS.send({
+        kind: "inbound_work_item_received",
+        messageId,
+        deliveryId,
+        queueRef: selected.target.queueRef,
+        routeRef: selected.routeRef,
+        destinationRef: selected.destinationRef,
+        accountableRef: selected.accountableRef,
+        rawR2Key,
+        receivedAt: new Date().toISOString(),
+      });
+    } else if (env.MAIL_JOBS) await env.MAIL_JOBS.send({
       kind: "inbound_email_received",
       messageId,
       deliveryId,
       envelopeTo: message.to,
       envelopeFrom: message.from,
-      routeKind: route.routeKind,
+      routeKind: effectiveRoute.routeKind,
       forwardedTo: forwardResults.filter((result) => result.ok).map((result) => result.operator),
       forwardErrors: forwardResults
         .filter((result) => !result.ok)
         .map((result) => ({ recipient: result.operator, error: result.errorCode ?? "forward_failed" })),
-      defaultReplyIdentity: route.defaultReplyIdentity,
+      defaultReplyIdentity: effectiveRoute.defaultReplyIdentity,
       rawR2Key,
       rawSize: rawBytes.byteLength,
       receivedAt: new Date().toISOString(),
@@ -597,6 +739,40 @@ async function acceptWebDesk(
   } catch {
     structuredError("web_desk_enqueue_failed", { deliveryId });
   }
+}
+
+type SelectedWebDeskDisposition = {
+  routeRef: string;
+  destinationRef: string;
+  accountableRef: string;
+  fallbackUsed: boolean;
+  target:
+    | { kind: "mailbox"; recipients: string[] }
+    | { kind: "work_queue"; queueRef: string };
+};
+
+function selectWebDeskDisposition(
+  route: RouteDecision,
+  env: Env,
+): SelectedWebDeskDisposition | null {
+  if (!route.disposition) {
+    return {
+      routeRef: `route:${route.domain}:${route.localPart}`,
+      destinationRef: `legacy:${route.domain}:${route.localPart}`,
+      accountableRef: "legacy:operators",
+      fallbackUsed: false,
+      target: { kind: "mailbox", recipients: route.operators },
+    };
+  }
+  for (const [index, candidate] of route.disposition.candidates.entries()) {
+    if (candidate.target.kind === "mailbox" && candidate.target.recipients.length > 0) {
+      return { ...candidate, routeRef: route.disposition.routeRef, fallbackUsed: index > 0 };
+    }
+    if (candidate.target.kind === "work_queue" && env.MAIL_JOBS) {
+      return { ...candidate, routeRef: route.disposition.routeRef, fallbackUsed: index > 0 };
+    }
+  }
+  return null;
 }
 
 async function persistInboxRelay(
@@ -1209,6 +1385,7 @@ async function persistWebDeskMetadata(
   rawR2Key: string,
   route: RouteDecision,
   results: OperatorDeliveryResult[],
+  disposition: SelectedWebDeskDisposition,
   env: Env,
 ): Promise<void> {
   const recipient = parseMailbox(message.to);
@@ -1254,6 +1431,22 @@ async function persistWebDeskMetadata(
     acceptedCount: results.filter((result) => result.ok).length,
     failedCount: results.filter((result) => !result.ok).length,
   });
+  if (route.disposition) {
+    await recordAudit(
+      env,
+      `${deliveryId}:route_disposition_selected`,
+      threadId,
+      "system",
+      "route_disposition_selected",
+      {
+        routeRef: disposition.routeRef,
+        destinationRef: disposition.destinationRef,
+        accountableRef: disposition.accountableRef,
+        targetKind: disposition.target.kind,
+        fallbackUsed: disposition.fallbackUsed,
+      },
+    );
+  }
 }
 
 async function forwardToOperators(

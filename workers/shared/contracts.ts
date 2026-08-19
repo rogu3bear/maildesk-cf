@@ -1,6 +1,6 @@
 export interface MaildeskEnv {
   DB: D1Database;
-  RAW_MAIL: R2Bucket;
+  RAW_MAIL?: R2Bucket;
   POLICY_STORE?: R2Bucket;
   RELAY_SPOOL?: R2Bucket;
   MAIL_JOBS: Queue<MailJob>;
@@ -25,6 +25,7 @@ export interface MaildeskEnv {
 
 export type MailJob =
   | InboundEmailReceivedJob
+  | InboundWorkItemReceivedJob
   | InboundEmailPersistedJob
   | InboundDeliveryResultJob
   | InboxReplyReceivedJob
@@ -99,6 +100,19 @@ export interface InboundEmailReceivedJob {
   rawR2Key: string;
   rawSize: number;
   storageError?: string;
+  receivedAt: string;
+}
+
+/** Body-free admission signal for a logical work queue selected by Rust policy. */
+export interface InboundWorkItemReceivedJob {
+  kind: "inbound_work_item_received";
+  messageId: string;
+  deliveryId: string;
+  queueRef: string;
+  routeRef: string;
+  destinationRef: string;
+  accountableRef: string;
+  rawR2Key: string;
   receivedAt: string;
 }
 

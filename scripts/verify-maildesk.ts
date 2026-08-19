@@ -15,7 +15,15 @@ import {
 type Status = "ok" | "drift" | "missing" | "not_checked" | "not_applicable";
 
 interface PolicyFile {
+  destinations?: Record<string, PolicyDestination>;
   domains: Record<string, PolicyDomain>;
+}
+
+interface PolicyDestination {
+  target:
+    | { kind: "mailbox"; recipients: string[] }
+    | { kind: "work_queue"; queue_ref: string };
+  fallback_destination_ref?: string;
 }
 
 interface PolicyDomain {
@@ -29,9 +37,10 @@ interface PolicyDomain {
 }
 
 interface RoleAlias {
-  operators: string[];
+  operators?: string[];
+  destination_ref?: string;
   reply_identity: string;
-  allowed_reply_identities: string[];
+  allowed_reply_identities?: string[];
   /** When true, mail is archived but never forwarded (e.g. dmarc@ reports). */
   sink?: boolean;
 }
@@ -391,9 +400,9 @@ function buildRows(
 
     return {
       domain: domainName,
-      operators: policyDomain ? domainOperators(policyDomain) : [],
+      operators: policyDomain ? domainOperators(policy, policyDomain) : [],
       reply_identities: policyDomain ? replyIdentities(policyDomain) : [],
-      routes: policyDomain ? domainRoutes(domainName, policyDomain, routingEvidence) : [],
+      routes: policyDomain ? domainRoutes(policy, domainName, policyDomain, routingEvidence) : [],
       sender_domain: senderSummary(domainName, desired, domainLive),
       inbound_mx_records: normalizedMxRecords(domainLive.dns_mx?.[domainName]),
       inbound_mx_provider: inboundMxProvider(domainLive.dns_mx?.[domainName]),
@@ -417,6 +426,7 @@ function buildRows(
       worker_bindings: checkWorkerBindings(domainLive),
       d1_queue: checkD1Queue(domainLive),
       inbound_proof: checkInboundProof(
+        policy,
         domainName,
         policyDomain,
         desiredDomain,
@@ -756,6 +766,7 @@ function requiredReadyzChecks(live: LiveEvidence, names: string[]): boolean {
 }
 
 function checkInboundProof(
+  policy: PolicyFile,
   domainName: string,
   policyDomain: PolicyDomain | undefined,
   desiredDomain: DesiredDomain | undefined,
@@ -774,6 +785,7 @@ function checkInboundProof(
   const roleAlias = policyDomain.role_aliases[mailbox.localPart];
   const provider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
   if (roleAlias) {
+    const operators = roleOperators(policy, roleAlias);
     if (roleAlias.sink) {
       return provider === "cloudflare_email_routing"
         ? proofMatchesInboxRelay(proof, "sink", 0, roleAlias.reply_identity, localPolicySha256)
@@ -783,11 +795,11 @@ function checkInboundProof(
       ? proofMatchesInboxRelay(
         proof,
         "role_alias",
-        roleAlias.operators.length,
+        operators.length,
         roleAlias.reply_identity,
         localPolicySha256,
       )
-      : proofMatchesRoute(proof, "role_alias", roleAlias.operators, roleAlias.reply_identity, false);
+      : proofMatchesRoute(proof, "role_alias", operators, roleAlias.reply_identity, false);
   }
 
   const personalAlias = policyDomain.personal_aliases[mailbox.localPart];
@@ -903,19 +915,20 @@ function checkOutboundProof(domainName: string, desired: DesiredState, proof: Pr
   return proof.provider || proof.provider_message_id || proof.audit_event_at ? "ok" : "drift";
 }
 
-function domainOperators(domain: PolicyDomain): string[] {
-  return unique(Object.values(domain.role_aliases).flatMap((alias) => alias.operators)).sort();
+function domainOperators(policy: PolicyFile, domain: PolicyDomain): string[] {
+  return unique(Object.values(domain.role_aliases).flatMap((alias) => roleOperators(policy, alias))).sort();
 }
 
 function replyIdentities(domain: PolicyDomain): string[] {
   return unique([
     ...Object.values(domain.role_aliases).map((alias) => alias.reply_identity),
-    ...Object.values(domain.role_aliases).flatMap((alias) => alias.allowed_reply_identities),
+    ...Object.values(domain.role_aliases).flatMap((alias) => alias.allowed_reply_identities ?? []),
     ...Object.values(domain.personal_aliases).map((alias) => alias.reply_identity),
   ]).sort();
 }
 
 function domainRoutes(
+  policy: PolicyFile,
   domainName: string,
   domain: PolicyDomain,
   routingEvidence: RoutingEvidence | undefined,
@@ -923,9 +936,9 @@ function domainRoutes(
   const roleRoutes = Object.entries(domain.role_aliases).map(([alias, route]) => ({
     kind: "role_alias" as const,
     mailbox: `${alias}@${domainName}`,
-    operators: [...route.operators].sort(),
+    operators: roleOperators(policy, route).sort(),
     reply_identity: route.reply_identity,
-    allowed_reply_identities: [...route.allowed_reply_identities].sort(),
+    allowed_reply_identities: [...(route.allowed_reply_identities ?? [])].sort(),
     wired: checkRouting(routingEvidence?.role_aliases, [alias]),
   }));
   const personalRoutes = Object.entries(domain.personal_aliases).map(([alias, route]) => ({
@@ -937,6 +950,20 @@ function domainRoutes(
     wired: checkRouting(routingEvidence?.personal_aliases, [alias]),
   }));
   return [...roleRoutes, ...personalRoutes].sort((left, right) => left.mailbox.localeCompare(right.mailbox));
+}
+
+function roleOperators(policy: PolicyFile, route: RoleAlias): string[] {
+  if (!route.destination_ref) return route.operators ?? [];
+  const seen = new Set<string>();
+  let destinationRef: string | undefined = route.destination_ref;
+  while (destinationRef && !seen.has(destinationRef)) {
+    seen.add(destinationRef);
+    const destination = policy.destinations?.[destinationRef];
+    if (!destination) return [];
+    if (destination.target.kind === "mailbox") return destination.target.recipients;
+    destinationRef = destination.fallback_destination_ref;
+  }
+  return [];
 }
 
 function senderSummary(domainName: string, desired: DesiredState, live: LiveEvidence): SenderSummary {
