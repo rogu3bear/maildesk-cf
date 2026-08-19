@@ -26,6 +26,20 @@
       "config": "wrangler.routing-health.toml"
     }
   },
+  "access": {
+    "routing_health": {
+      "worker_role": "routing_health",
+      "application_name": "maildesk-routing-health",
+      "hostname": "routing-health.example.com",
+      "application_type": "self_hosted",
+      "path_scope": "all_routes",
+      "policy": {
+        "policy_name": "maildesk-routing-health-operators",
+        "decision": "allow",
+        "operator_group_id_env": "MAILDESK_ACCESS_OPERATOR_GROUP_ID"
+      }
+    }
+  },
   "storage": {
     "d1_database": "maildesk-cf-relay-db",
     "d1_preview_database": "maildesk-cf-preview-db",

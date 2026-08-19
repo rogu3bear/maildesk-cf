@@ -17,6 +17,7 @@ describe("dark deployment blueprint", () => {
     const plan = JSON.parse(result.stdout) as Record<string, any>;
     expect(plan.performed).toBe(false);
     expect(plan.operation_ids_created).toBe(false);
+    expect(plan.plan_ready).toBe(false);
     expect(plan.activation.required_dark_state).toBe("disabled/disabled");
     expect(plan.plan_sets).toHaveLength(2);
     expect(JSON.stringify(plan)).toContain("maildesk-cf-relay-db");
@@ -33,8 +34,111 @@ describe("dark deployment blueprint", () => {
     expect(JSON.stringify(plan)).not.toContain("access-application-and-policy-readback");
     expect(JSON.stringify(plan)).not.toMatch(/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/);
     expect(plan.explicit_exclusions).toContain("live inbound or outbound email probes");
+    expect(plan.access_requirement).toEqual({
+      worker_role: "routing_health",
+      hostname_source: "access.routing_health.hostname",
+      application_identity_source: "access.routing_health.application_name",
+      application_type: "self_hosted",
+      path_scope: "all_routes",
+      managed_policy_identity_source: "access.routing_health.policy.policy_name",
+      policy_decision: "allow",
+      operator_group_source: "access.routing_health.policy.operator_group_id_env",
+      runtime_jwt_validation: "required",
+    });
+    expect(plan.external_dependencies).toContainEqual(expect.objectContaining({
+      id: "cfctl-access-plan-v2",
+      status: "missing_capability",
+      desired_state_path: "access.routing_health",
+    }));
+    const accessDependency = plan.external_dependencies.find((entry: Record<string, unknown>) =>
+      entry.id === "cfctl-access-plan-v2"
+    );
+    expect(accessDependency.admission.application.fail_closed).toContain("duplicate_exact_matches");
+    expect(accessDependency.admission.application.fail_closed).toContain("overlapping_name_or_hostname_selectors");
+    expect(accessDependency.admission.managed_policy.fail_closed).toContain("multiple_policies_satisfy_managed_identity");
+    expect(accessDependency.preservation.unrelated_policies).toBe("preserve_exact_bytes_semantics_and_order");
+    expect(accessDependency.required_plan_v2_operations.map((operation: Record<string, unknown>) => [
+      operation.action,
+      operation.rollback,
+    ])).toEqual([
+      ["create_owned_self_hosted_whole_host", "delete_only_returned_app_id_in_separate_reviewed_plan"],
+      ["update_owned_self_hosted_whole_host", "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan"],
+      ["create_owned_operator_allow_policy", "delete_only_returned_policy_id_in_separate_reviewed_plan"],
+      ["update_owned_operator_allow_policy", "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan"],
+    ]);
+    expect(accessDependency.mutation_proof.retain).toEqual([
+      "operation_id", "content_hash", "app_id", "policy_id", "prior_state_digest",
+    ]);
+    expect(accessDependency.mutation_proof.mismatch).toBe("fail_closed");
+    expect(accessDependency.identity_continuity.application_create.must_equal).toContain(
+      "managed_policy.parent.app_id",
+    );
+    expect(accessDependency.identity_continuity.application_update.must_equal).toContain(
+      "application_update.rollback_target.app_id",
+    );
+    expect(accessDependency.identity_continuity.policy_create.parent_must_equal).toContain(
+      "policy_verification.result.app_id",
+    );
+    expect(accessDependency.identity_continuity.policy_create.must_equal).toContain(
+      "policy_create.rollback_target.policy_id",
+    );
+    expect(accessDependency.identity_continuity.policy_update.must_equal).toContain(
+      "policy_verification.result.app_id+policy_id",
+    );
+    expect(accessDependency.identity_continuity.failure).toEqual({
+      absent_or_unequal: "fail_closed",
+      selector_equivalent_wrong_id: "reject",
+      blocks: ["plan_ready", "live_mutation_ready", "post_apply_success", "edge_ready"],
+    });
+    const provisioning = spawnSync(
+      "bun",
+      ["run", "scripts/check-cfctl-provisioning.ts", "--", "--desired-state", "config/desired-state.example.json", "--json"],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(provisioning.status).toBe(0);
+    const provisioningReceipt = JSON.parse(provisioning.stdout) as Record<string, any>;
+    const { id: dependencyId, status: dependencyStatus, ...dependencyContract } = accessDependency;
+    const { status: handoffStatus, ...handoffContract } = provisioningReceipt.cfctl_handoff.access_capability_contract;
+    expect(dependencyId).toBe("cfctl-access-plan-v2");
+    expect(dependencyStatus).toBe("missing_capability");
+    expect(handoffStatus).toBe("external_dependency");
+    expect(dependencyContract).toEqual(handoffContract);
+    expect(JSON.stringify(plan)).not.toContain("routing-health.example.com");
     expect(JSON.stringify(plan)).not.toContain(["mlnavigator", "com"].join("."));
     expect(JSON.stringify(plan)).not.toContain(["windowdrop", "pro"].join("."));
+  });
+
+  test("fails closed on incomplete, desk-only, contradictory, or unmodeled Access desired state", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const cases: Array<[string, (desired: Record<string, any>) => void, string]> = [
+      ["missing", (desired) => delete desired.access, "access is required"],
+      ["partial", (desired) => delete desired.access.routing_health.hostname, "access.routing_health.hostname is required"],
+      ["missing-app-identity", (desired) => delete desired.access.routing_health.application_name, "access.routing_health.application_name is required"],
+      ["missing-policy-identity", (desired) => delete desired.access.routing_health.policy.policy_name, "access.routing_health.policy.policy_name is required"],
+      ["malformed-app-identity", (desired) => (desired.access.routing_health.application_name = "Maildesk Access"), "access.routing_health.application_name is required and must be a stable lowercase owned name"],
+      ["malformed-policy-identity", (desired) => (desired.access.routing_health.policy.policy_name = "Maildesk Policy"), "access.routing_health.policy.policy_name is required and must be a stable lowercase owned name"],
+      ["desk-only", (desired) => (desired.access.routing_health.path_scope = "desk_only"), "access.routing_health.path_scope must equal all_routes"],
+      ["contradictory", (desired) => (desired.access.routing_health.worker_role = "relay_router"), "access.routing_health.worker_role must equal routing_health"],
+      ["unmodeled", (desired) => (desired.access.routing_health.paths = ["/desk/*"]), "access.routing_health contains unmodeled fields: paths"],
+    ];
+    try {
+      for (const [name, mutate, expected] of cases) {
+        const desired = structuredClone(original);
+        mutate(desired);
+        const path = desiredFixturePath(`access-${name}`);
+        writeFileSync(resolve(root, path), JSON.stringify(desired));
+        const result = spawnSync("bun", ["run", "scripts/compile-dark-plan.ts", "--desired-state", path], {
+          cwd: root,
+          encoding: "utf8",
+        });
+        expect(result.status, name).not.toBe(0);
+        expect(result.stdout, name).toBe("");
+        expect(result.stderr, name).toContain(expected);
+        rmSync(resolve(root, path), { force: true });
+      }
+    } finally {
+      cleanupDesiredFixtures();
+    }
   });
 
   test("binds every D1 migration to cfctl's prefixed content digest", () => {

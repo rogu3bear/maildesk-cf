@@ -28,6 +28,7 @@ interface DesiredState {
     relay_outbound: DesiredWorker;
     routing_health: DesiredWorker;
   };
+  access: DesiredAccess;
   storage: {
     d1_database: string;
     d1_preview_database: string;
@@ -70,6 +71,21 @@ interface OperatorDeliveryConfig {
 interface DesiredWorker {
   script_name: string;
   config: string;
+}
+
+interface DesiredAccess {
+  routing_health: {
+    worker_role: "routing_health";
+    application_name: string;
+    hostname: string;
+    application_type: "self_hosted";
+    path_scope: "all_routes";
+    policy: {
+      policy_name: string;
+      decision: "allow";
+      operator_group_id_env: string;
+    };
+  };
 }
 
 const root = resolve(import.meta.dir, "..");
@@ -117,6 +133,7 @@ const receipt = {
       execution: "run the approved operation id with cfctl plans run",
       verification: "inspect cfctl plans status and perform the capability-specific readback",
     },
+    access_capability_contract: accessCapabilityContract(),
   },
   resources: resourceSummary(desiredState),
   protected_actions: [
@@ -173,6 +190,9 @@ function readDesiredState(path: string): DesiredState | null {
 function validateDesiredState(value: DesiredState) {
   const rootObject = asObject(value, "desired state");
   if (!rootObject) return;
+  rejectUnmodeledFields(rootObject, "desired state", [
+    "project", "domains", "workers", "access", "storage", "operator_delivery", "sender", "verification",
+  ]);
 
   const project = requireObject(rootObject, "project");
   if (project) {
@@ -217,6 +237,9 @@ function validateDesiredState(value: DesiredState) {
     validateWorker(requireObject(workers, "workers.relay_outbound"), "workers.relay_outbound", "mail-outbound");
     validateWorker(requireObject(workers, "workers.routing_health"), "workers.routing_health", "routing-health");
   }
+
+  const access = requireObject(rootObject, "access");
+  if (access) validateAccess(access);
 
   const storage = requireObject(rootObject, "storage");
   if (storage) {
@@ -296,6 +319,38 @@ function validateProcessingModes(operatorDelivery: Record<string, unknown>): voi
   requireEnum(operatorDelivery, "operator_delivery.reply_processing_mode", ["disabled", "enabled"]);
 }
 
+function validateAccess(access: Record<string, unknown>): void {
+  rejectUnmodeledFields(access, "access", ["routing_health"]);
+  const routingHealth = requireObject(access, "access.routing_health");
+  if (!routingHealth) return;
+  rejectUnmodeledFields(routingHealth, "access.routing_health", [
+    "worker_role", "application_name", "hostname", "application_type", "path_scope", "policy",
+  ]);
+  requireEnum(routingHealth, "access.routing_health.worker_role", ["routing_health"]);
+  const applicationName = requireString(routingHealth, "access.routing_health.application_name");
+  if (applicationName && !validOwnedName(applicationName)) {
+    failures.push("access.routing_health.application_name must be a stable lowercase owned name");
+  }
+  const hostname = requireString(routingHealth, "access.routing_health.hostname");
+  if (hostname && !validDomain(hostname)) {
+    failures.push("access.routing_health.hostname must be a valid domain");
+  }
+  requireEnum(routingHealth, "access.routing_health.application_type", ["self_hosted"]);
+  requireEnum(routingHealth, "access.routing_health.path_scope", ["all_routes"]);
+  const policy = requireObject(routingHealth, "access.routing_health.policy");
+  if (!policy) return;
+  rejectUnmodeledFields(policy, "access.routing_health.policy", ["policy_name", "decision", "operator_group_id_env"]);
+  const policyName = requireString(policy, "access.routing_health.policy.policy_name");
+  if (policyName && !validOwnedName(policyName)) {
+    failures.push("access.routing_health.policy.policy_name must be a stable lowercase owned name");
+  }
+  requireEnum(policy, "access.routing_health.policy.decision", ["allow"]);
+  const groupEnv = requireString(policy, "access.routing_health.policy.operator_group_id_env");
+  if (groupEnv && !/^[A-Z][A-Z0-9_]*$/.test(groupEnv)) {
+    failures.push("access.routing_health.policy.operator_group_id_env must be an uppercase environment variable name");
+  }
+}
+
 function validateWorker(
   worker: Record<string, unknown> | null,
   prefix: string,
@@ -349,6 +404,17 @@ function resourceSummary(desired: DesiredState) {
       desired.workers.relay_outbound.config,
       desired.workers.routing_health.config,
     ].sort(),
+    access: {
+      worker_role: desired.access.routing_health.worker_role,
+      hostname: "configured",
+      application_identity: "configured",
+      application_type: desired.access.routing_health.application_type,
+      path_scope: desired.access.routing_health.path_scope,
+      managed_policy_identity: "configured",
+      policy_decision: desired.access.routing_health.policy.decision,
+      operator_group_reference: "environment",
+      runtime_jwt_validation: "required",
+    },
     storage: [
       `d1:${desired.storage.d1_database}`,
       `d1-preview:${desired.storage.d1_preview_database}`,
@@ -382,12 +448,194 @@ function emailRoutingAliases(desired: DesiredState): string[] {
 function outsideCheckoutBlockers(): string[] {
   return [
     "install or update cfctl with the required v2 catalog capabilities",
+    "resolve and implement cfctl PlanV2 capabilities for Access application and policy reconciliation",
     "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
     "run cfctl version, doctor, and agents doctor before governed discovery",
     "bind every live call to an explicit profile, selected account, capability, and exact selectors",
     "review the immutable PlanV2 operation before approval and execution",
     "run capability-specific post-change readback and targeted mail proof after mutation",
   ];
+}
+
+function accessCapabilityContract() {
+  return {
+    status: "external_dependency",
+    desired_state_path: "access.routing_health",
+    required_read_capabilities: [
+      "access-applications-list-access-applications",
+      "access-applications-get-an-access-application",
+      "access-policies-list-access-app-policies",
+      "access-policies-get-an-access-policy",
+    ],
+    ownership: {
+      application_selector: ["application_name", "hostname"],
+      managed_policy_selector: ["policy_name", "operator_group_id"],
+      resolved_provider_ids: ["app_id", "policy_id"],
+      authority: "one_owned_application_and_one_owned_policy_only",
+    },
+    admission: {
+      application: {
+        collection_read: "access-applications-list-access-applications",
+        exact_match: ["application_name", "hostname"],
+        create_when: "zero_exact_and_zero_overlapping_candidates",
+        update_when: "one_exact_and_zero_overlapping_candidates",
+        fail_closed: [
+          "zero_exact_with_ambiguous_existing_candidates",
+          "duplicate_exact_matches",
+          "overlapping_name_or_hostname_selectors",
+          "missing_resolved_app_id_for_update",
+        ],
+      },
+      managed_policy: {
+        collection_read: "access-policies-list-access-app-policies",
+        exact_match: ["policy_name", "operator_group_id"],
+        create_when: "zero_exact_and_zero_overlapping_candidates",
+        update_when: "one_exact_and_zero_overlapping_candidates",
+        fail_closed: [
+          "zero_exact_with_ambiguous_existing_candidates",
+          "duplicate_exact_matches",
+          "overlapping_name_or_operator_group_selectors",
+          "multiple_policies_satisfy_managed_identity",
+          "missing_resolved_policy_id_for_update",
+        ],
+      },
+    },
+    preservation: {
+      unrelated_applications: "outside_reconciliation_authority",
+      unrelated_policies: "preserve_exact_bytes_semantics_and_order",
+      collection_replacement: "forbidden",
+      collection_deletion: "forbidden",
+      required_prior_state: [
+        "owned_application_full_snapshot",
+        "owned_policy_full_snapshot",
+        "unrelated_policy_content_hashes_in_order",
+      ],
+    },
+    required_plan_v2_operations: [
+      {
+        resource: "access_application",
+        action: "create_owned_self_hosted_whole_host",
+        capability_id: null,
+        selectors: ["account_id", "application_name", "hostname"],
+        body: ["application_name", "hostname", "application_type", "path_scope"],
+        rollback: "delete_only_returned_app_id_in_separate_reviewed_plan",
+      },
+      {
+        resource: "access_application",
+        action: "update_owned_self_hosted_whole_host",
+        capability_id: null,
+        selectors: ["account_id", "app_id"],
+        body: ["application_name", "hostname", "application_type", "path_scope"],
+        rollback: "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan",
+      },
+      {
+        resource: "access_policy",
+        action: "create_owned_operator_allow_policy",
+        capability_id: null,
+        selectors: ["account_id", "app_id", "policy_name", "operator_group_id"],
+        body: ["policy_name", "decision", "operator_group_id"],
+        rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan",
+      },
+      {
+        resource: "access_policy",
+        action: "update_owned_operator_allow_policy",
+        capability_id: null,
+        selectors: ["account_id", "app_id", "policy_id"],
+        body: ["policy_name", "decision", "operator_group_id"],
+        rollback: "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan",
+      },
+    ],
+    mutation_proof: {
+      retain: ["operation_id", "content_hash", "app_id", "policy_id", "prior_state_digest"],
+      exact_id_readback: [
+        "access-applications-get-an-access-application:app_id",
+        "access-policies-get-an-access-policy:app_id+policy_id",
+      ],
+      readiness_requires: [
+        "desired_app_state_at_resolved_app_id",
+        "desired_policy_state_at_resolved_app_id_and_policy_id",
+        "unrelated_policy_content_hashes_and_order_unchanged",
+      ],
+      mismatch: "fail_closed",
+    },
+    identity_continuity: {
+      equality: "byte_exact_provider_id",
+      application_create: {
+        source: "application_create.provider_result.app_id",
+        must_equal: [
+          "application_create.status.app_id",
+          "application_create.rollback_target.app_id",
+          "managed_policy.parent.app_id",
+          "application_verification.selector.app_id",
+          "application_verification.result.app_id",
+        ],
+      },
+      application_update: {
+        source: "application_admission.resolved_app_id",
+        must_equal: [
+          "application_update.prior_state.app_id",
+          "application_update.plan.app_id",
+          "application_update.review.app_id",
+          "application_update.approval.app_id",
+          "application_update.apply.app_id",
+          "application_update.status.app_id",
+          "application_update.rollback_target.app_id",
+          "managed_policy.parent.app_id",
+          "application_verification.selector.app_id",
+          "application_verification.result.app_id",
+        ],
+      },
+      policy_create: {
+        parent_source: "retained_application.app_id",
+        parent_must_equal: [
+          "policy_create.plan.app_id",
+          "policy_create.review.app_id",
+          "policy_create.approval.app_id",
+          "policy_create.apply.app_id",
+          "policy_create.status.app_id",
+          "policy_create.rollback_target.app_id",
+          "policy_verification.selector.app_id",
+          "policy_verification.result.app_id",
+        ],
+        source: "policy_create.provider_result.policy_id",
+        must_equal: [
+          "policy_create.status.policy_id",
+          "policy_create.rollback_target.policy_id",
+          "policy_verification.selector.policy_id",
+          "policy_verification.result.policy_id",
+        ],
+      },
+      policy_update: {
+        source: "policy_admission.resolved_app_id+resolved_policy_id",
+        must_equal: [
+          "policy_update.prior_state.app_id+policy_id",
+          "policy_update.plan.app_id+policy_id",
+          "policy_update.review.app_id+policy_id",
+          "policy_update.approval.app_id+policy_id",
+          "policy_update.apply.app_id+policy_id",
+          "policy_update.status.app_id+policy_id",
+          "policy_update.rollback_target.app_id+policy_id",
+          "policy_verification.selector.app_id+policy_id",
+          "policy_verification.result.app_id+policy_id",
+        ],
+      },
+      failure: {
+        absent_or_unequal: "fail_closed",
+        selector_equivalent_wrong_id: "reject",
+        blocks: ["plan_ready", "live_mutation_ready", "post_apply_success", "edge_ready"],
+      },
+    },
+    prohibited_bypasses: ["raw_http", "dashboard", "wrangler"],
+  };
+}
+
+function validOwnedName(value: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{0,127}$/.test(value);
+}
+
+function rejectUnmodeledFields(value: Record<string, unknown>, path: string, allowed: string[]): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key)).sort();
+  if (unexpected.length > 0) failures.push(`${path} contains unmodeled fields: ${unexpected.join(", ")}`);
 }
 
 function asObject(value: unknown, path: string): Record<string, unknown> | null {
