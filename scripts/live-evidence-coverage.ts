@@ -18,6 +18,7 @@ export const DARK_ACCEPTANCE_SURFACES = [
 export const DARK_ACCEPTANCE_CAPABILITY_IDS = [
   "access-applications-get-an-access-application",
   "access-policies-list-access-app-policies",
+  "access-policies-get-an-access-policy",
   "r2-get-bucket-lifecycle-configuration",
 ] as const;
 
@@ -31,6 +32,15 @@ export interface CfctlCoverageBlocker {
     | "PROVIDER_READ_FAILED";
   capability_id?: string;
   surface?: DarkAcceptanceSurface;
+}
+
+export interface AccessIdentityContinuityProof {
+  retained_app_id: string;
+  application_readback_app_id: string;
+  retained_policy_id: string;
+  policy_parent_app_id: string;
+  policy_readback_app_id: string;
+  policy_readback_policy_id: string;
 }
 
 export interface CfctlReadbackCoverage {
@@ -53,6 +63,7 @@ export interface CfctlReadbackCoverage {
   selected_scope_complete: boolean;
   desired_scope_complete: boolean;
   acceptance_complete: boolean;
+  access_identity_continuity?: AccessIdentityContinuityProof;
   blockers: CfctlCoverageBlocker[];
 }
 
@@ -128,6 +139,10 @@ export function validReadbackCoverage(
     !sameStringSet(classifiedCapabilities, coverage.required_capability_ids)
   ) return false;
   if (!validAcceptanceSurfaces(coverage)) return false;
+  if (
+    coverage.access_identity_continuity !== undefined &&
+    !validAccessIdentityContinuity(coverage.access_identity_continuity)
+  ) return false;
   if (!Array.isArray(coverage.blockers) || !coverage.blockers.every(validBlocker)) return false;
 
   const selectedScopeComplete =
@@ -148,6 +163,7 @@ export function validReadbackCoverage(
     coverage.failed_capability_ids.length === 0 &&
     coverage.missing_capability_ids.length === 0 &&
     coverage.missing_acceptance_surfaces.length === 0 &&
+    validAccessIdentityContinuity(coverage.access_identity_continuity) &&
     coverage.required_acceptance_surfaces.every((surface) =>
       coverage.successful_acceptance_surfaces.includes(surface)
     );
@@ -170,7 +186,27 @@ export function readbackAuthorizesReadiness(
     coverage.profile === "dark_acceptance_v1" &&
     coverage.selected_scope_complete === true &&
     coverage.desired_scope_complete === true &&
-    coverage.acceptance_complete === true;
+    coverage.acceptance_complete === true &&
+    validAccessIdentityContinuity(coverage.access_identity_continuity);
+}
+
+function validAccessIdentityContinuity(
+  proof: AccessIdentityContinuityProof | undefined,
+): proof is AccessIdentityContinuityProof {
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) return false;
+  const ids = [
+    proof.retained_app_id,
+    proof.application_readback_app_id,
+    proof.retained_policy_id,
+    proof.policy_parent_app_id,
+    proof.policy_readback_app_id,
+    proof.policy_readback_policy_id,
+  ];
+  if (!ids.every(validProviderId)) return false;
+  return proof.retained_app_id === proof.application_readback_app_id &&
+    proof.retained_app_id === proof.policy_parent_app_id &&
+    proof.retained_app_id === proof.policy_readback_app_id &&
+    proof.retained_policy_id === proof.policy_readback_policy_id;
 }
 
 function validAcceptanceSurfaces(coverage: CfctlReadbackCoverage): boolean {
@@ -237,4 +273,8 @@ function sameStringSet(left: string[], right: string[]): boolean {
 
 function isSha256(value: string): boolean {
   return /^[a-f0-9]{64}$/.test(value);
+}
+
+function validProviderId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value === value.trim();
 }

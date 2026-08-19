@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
+  type AccessIdentityContinuityProof,
   type CfctlReadbackAuthority,
   DARK_ACCEPTANCE_CAPABILITY_IDS,
   DARK_ACCEPTANCE_SURFACES,
@@ -43,6 +44,40 @@ describe("maildesk verifier", () => {
     readback.coverage.successful_capability_ids.pop();
 
     expect(readbackAuthorizesReadiness(readback, fileSha256(desiredPath), domains)).toBe(false);
+  });
+
+  test("dark acceptance requires byte-exact Access identity continuity", () => {
+    const desiredPath = resolve(root, "config/desired-state.example.json");
+    const desired = JSON.parse(readFileSync(desiredPath, "utf8")) as {
+      domains: Array<{ name: string }>;
+    };
+    const domains = desired.domains.map((domain) => domain.name);
+    const expectedDesiredStateSha256 = fileSha256(desiredPath);
+
+    const missingProof = authoritativeReadback(desiredPath, domains);
+    if (!missingProof.coverage) throw new Error("authoritative fixture lacks coverage");
+    delete missingProof.coverage.access_identity_continuity;
+    expect(readbackAuthorizesReadiness(missingProof, expectedDesiredStateSha256, domains)).toBe(false);
+
+    const mismatchedApplication = authoritativeReadback(desiredPath, domains);
+    accessIdentityProof(mismatchedApplication).application_readback_app_id = "app-selector-equivalent-wrong-id";
+    expect(readbackAuthorizesReadiness(mismatchedApplication, expectedDesiredStateSha256, domains)).toBe(false);
+
+    const wrongPolicyParent = authoritativeReadback(desiredPath, domains);
+    accessIdentityProof(wrongPolicyParent).policy_parent_app_id = "app-wrong-parent";
+    expect(readbackAuthorizesReadiness(wrongPolicyParent, expectedDesiredStateSha256, domains)).toBe(false);
+
+    const mismatchedPolicy = authoritativeReadback(desiredPath, domains);
+    accessIdentityProof(mismatchedPolicy).policy_readback_policy_id = "policy-selector-equivalent-wrong-id";
+    expect(readbackAuthorizesReadiness(mismatchedPolicy, expectedDesiredStateSha256, domains)).toBe(false);
+
+    const missingExactPolicyRead = authoritativeReadback(desiredPath, domains);
+    if (!missingExactPolicyRead.coverage) throw new Error("authoritative fixture lacks coverage");
+    missingExactPolicyRead.coverage.required_capability_ids = missingExactPolicyRead.coverage.required_capability_ids
+      .filter((capability) => capability !== "access-policies-get-an-access-policy");
+    missingExactPolicyRead.coverage.successful_capability_ids = missingExactPolicyRead.coverage.successful_capability_ids
+      .filter((capability) => capability !== "access-policies-get-an-access-policy");
+    expect(readbackAuthorizesReadiness(missingExactPolicyRead, expectedDesiredStateSha256, domains)).toBe(false);
   });
 
   test("forged canary coverage suppresses no domain gaps", () => {
@@ -976,7 +1011,7 @@ function authoritativeReadback(desiredPath: string, domains: string[]): CfctlRea
   const domainHashes = domains.map(coverageDomainSha256).sort();
   const capabilities = [...DARK_ACCEPTANCE_CAPABILITY_IDS].sort();
   const surfaces = [...DARK_ACCEPTANCE_SURFACES];
-  return {
+  const readback: CfctlReadbackAuthority = {
     required: true,
     attempted: true,
     transaction_complete: true,
@@ -1003,6 +1038,25 @@ function authoritativeReadback(desiredPath: string, domains: string[]): CfctlRea
       blockers: [],
     },
   };
+  if (!readback.coverage) throw new Error("authoritative fixture lacks coverage");
+  readback.coverage.access_identity_continuity = {
+    retained_app_id: "app-owned-routing-health",
+    application_readback_app_id: "app-owned-routing-health",
+    retained_policy_id: "policy-owned-operators",
+    policy_parent_app_id: "app-owned-routing-health",
+    policy_readback_app_id: "app-owned-routing-health",
+    policy_readback_policy_id: "policy-owned-operators",
+  };
+  return readback;
+}
+
+function accessIdentityProof(readback: CfctlReadbackAuthority): AccessIdentityContinuityProof {
+  if (!readback.coverage) throw new Error("authoritative fixture lacks coverage");
+  const proof = readback.coverage.access_identity_continuity;
+  if (!proof) {
+    throw new Error("authoritative fixture lacks Access identity proof");
+  }
+  return proof;
 }
 
 function inventoryReadback(desiredPath: string, domains: string[]): CfctlReadbackAuthority {

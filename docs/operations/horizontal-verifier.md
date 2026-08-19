@@ -262,6 +262,15 @@ only for a full desired-state, transaction-complete, dark-acceptance-complete
 readback. Legacy evidence containing only `required`, `attempted`, and
 `complete` cannot establish `edge_ready` or `mail_ready`.
 
+Access acceptance requires both the exact application read and the exact
+application-scoped policy read. The receipt retains the admitted or
+provider-returned `app_id` and `policy_id`, the application readback result ID,
+the policy parent application ID, and the exact policy readback tuple. Every
+application ID must be byte-identical, and the retained policy ID must equal
+the policy readback result ID. Missing IDs, a policy attached to another
+application, or selector-equivalent objects with different provider IDs keep
+`acceptance_complete`, `edge_ready`, and `mail_ready` false.
+
 Live-evidence output is always created or tightened to mode `0600`. It may
 contain private domain and account metadata even though it contains no token or
 message body, so it must remain ignored and local.

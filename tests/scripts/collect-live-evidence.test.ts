@@ -920,6 +920,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
     });
     expect(evidence.cfctl_readback.coverage.missing_capability_ids).toEqual([
       "access-applications-get-an-access-application",
+      "access-policies-get-an-access-policy",
       "access-policies-list-access-app-policies",
       "r2-get-bucket-lifecycle-configuration",
     ]);
@@ -938,6 +939,10 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
       {
         code: "ACCEPTANCE_SURFACE_UNIMPLEMENTED",
         capability_id: "access-applications-get-an-access-application",
+      },
+      {
+        code: "ACCEPTANCE_SURFACE_UNIMPLEMENTED",
+        capability_id: "access-policies-get-an-access-policy",
       },
       {
         code: "ACCEPTANCE_SURFACE_UNIMPLEMENTED",
