@@ -1,9 +1,18 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
+import {
+  type CfctlAcceptanceProfile,
+  type CfctlCoverageBlocker,
+  type CfctlReadbackCoverage,
+  type CfctlReadbackMode,
+  DARK_ACCEPTANCE_CAPABILITY_IDS,
+  DARK_ACCEPTANCE_SURFACES,
+  coverageDomainSha256,
+} from "./live-evidence-coverage";
 
 interface DesiredState extends CanonicalDesiredTopology {
   domains: Array<{
@@ -78,10 +87,26 @@ interface CfctlMaildeskDomainEvidence {
 interface CfctlReadbackEvidence {
   required: boolean;
   attempted: boolean;
+  transaction_complete: boolean;
+  coverage: CfctlReadbackCoverage;
   complete: boolean;
   profile_id?: string;
   account_id?: string;
   receipts: CfctlReadReceipt[];
+}
+
+interface ReadScopeManifestV1 {
+  schema_version: 1;
+  mode: "canary";
+  profile: CfctlAcceptanceProfile;
+  domains: string[];
+}
+
+interface ReadScope {
+  mode: CfctlReadbackMode;
+  profile: CfctlAcceptanceProfile;
+  selected_domains: string[];
+  manifest_sha256?: string;
 }
 
 interface CfctlReadReceipt {
@@ -179,10 +204,16 @@ const wranglerBin = process.env.WRANGLER_BIN ?? argValue("--wrangler") ?? "wrang
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
 const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
-const desiredState = readJson<DesiredState>(desiredStatePath);
+const desiredStateText = readFileSync(desiredStatePath, "utf8");
+const desiredState = JSON.parse(desiredStateText) as DesiredState;
 requireCanonicalDesiredTopology(desiredState);
+const desiredStateSha256 = sha256(desiredStateText);
+const readScope = loadReadScope();
 const senderMode = senderModeOrDefault(desiredState.sender?.mode);
 const useResend = senderMode === "resend" && !args.includes("--no-resend");
+if (useResend && readScope.mode === "canary") {
+  throw new Error("Resend domain listing is account-global and cannot run under a domain-bounded canary scope");
+}
 const routerService = desiredState.workers.relay_router.script_name;
 const cfctlProfile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
 const EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION = 1;
@@ -200,7 +231,7 @@ if (cfctlResult.evidence) {
   evidence.email_routing = cfctlResult.evidence.email_routing;
   evidence.dns_mx = cfctlResult.evidence.dns_mx;
 }
-if (cfctlResult.readback.required && !cfctlResult.readback.complete) {
+if (cfctlResult.readback.required && !cfctlResult.readback.transaction_complete) {
   writeEvidenceAndExit(1);
 }
 
@@ -217,11 +248,11 @@ if (d1Name) {
   if ((d1Evidence.tables?.length ?? 0) > 0 || Object.keys(d1Evidence.audit_event_counts ?? {}).length > 0) {
     evidence.d1 = d1Evidence;
   }
-  const inboundProofs = collectInboundProofs(d1Name);
+  const inboundProofs = collectInboundProofs(d1Name, readScope.selected_domains);
   if (Object.keys(inboundProofs).length > 0) {
     evidence.inbound_proofs = inboundProofs;
   }
-  const outboundProofs = collectOutboundProofs(d1Name);
+  const outboundProofs = collectOutboundProofs(d1Name, readScope.selected_domains);
   if (Object.keys(outboundProofs).length > 0) {
     evidence.outbound_proofs = outboundProofs;
   }
@@ -289,7 +320,8 @@ writeEvidenceAndExit(0);
 
 function writeEvidenceAndExit(status: number): never {
   mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`);
+  writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(outputPath, 0o600);
   console.log(`wrote ${relativePath(outputPath)}`);
   process.exit(status);
 }
@@ -312,6 +344,90 @@ function argValue(name: string): string | undefined {
   return args[index + 1];
 }
 
+function loadReadScope(): ReadScope {
+  const manifestFlagPresent = args.includes("--scope-manifest");
+  const manifestArgument = argValue("--scope-manifest");
+  if (manifestFlagPresent && (!manifestArgument || manifestArgument.startsWith("--"))) {
+    throw new Error("--scope-manifest requires a repository-local JSON file");
+  }
+
+  if (manifestArgument) {
+    if (args.includes("--acceptance-profile")) {
+      throw new Error("--acceptance-profile cannot override a scope manifest");
+    }
+    const path = guardedRepoLocalFile(manifestArgument, "scope manifest");
+    const raw = readFileSync(path, "utf8");
+    const parsed = parseJson<Partial<ReadScopeManifestV1>>(raw);
+    if (
+      parsed?.schema_version !== 1 ||
+      parsed.mode !== "canary" ||
+      !validAcceptanceProfile(parsed.profile) ||
+      !Array.isArray(parsed.domains) ||
+      parsed.domains.length === 0 ||
+      !parsed.domains.every((domain) => typeof domain === "string" && domain === normalizeName(domain))
+    ) {
+      throw new Error("scope manifest must be schema v1 canary JSON with a typed profile and normalized domains");
+    }
+    const selectedDomains = unique(parsed.domains).sort();
+    if (selectedDomains.length !== parsed.domains.length) {
+      throw new Error("scope manifest domains must be unique");
+    }
+    const desiredDomains = new Set(desiredState.domains.map((domain) => domain.name));
+    const unknown = selectedDomains.find((domain) => !desiredDomains.has(domain));
+    if (unknown) throw new Error("scope manifest contains a domain outside the selected desired state");
+    if (selectedDomains.length >= desiredState.domains.length) {
+      throw new Error("canary scope must select fewer domains than the full desired state");
+    }
+    return {
+      mode: "canary",
+      profile: parsed.profile,
+      selected_domains: selectedDomains,
+      manifest_sha256: sha256(raw),
+    };
+  }
+
+  const profileFlagPresent = args.includes("--acceptance-profile");
+  const profileArgument = argValue("--acceptance-profile");
+  if (profileFlagPresent && (!profileArgument || profileArgument.startsWith("--"))) {
+    throw new Error("--acceptance-profile requires inventory_v1 or dark_acceptance_v1");
+  }
+  const profile = profileArgument ?? "inventory_v1";
+  if (!validAcceptanceProfile(profile)) {
+    throw new Error("--acceptance-profile must be inventory_v1 or dark_acceptance_v1");
+  }
+  return {
+    mode: "full_desired_state",
+    profile,
+    selected_domains: desiredState.domains.map((domain) => domain.name).sort(),
+  };
+}
+
+function guardedRepoLocalFile(argument: string, label: string): string {
+  const path = resolve(root, argument);
+  const repoRelativePath = relative(root, path);
+  const insideRepository = Boolean(repoRelativePath) &&
+    !repoRelativePath.startsWith("..") &&
+    !isAbsolute(repoRelativePath);
+  const alongsideDesiredState = dirname(path) === dirname(desiredStatePath);
+  if (!insideRepository && !alongsideDesiredState) {
+    throw new Error(`${label} must be inside the repository or beside the selected desired state`);
+  }
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    throw new Error(`${label} does not exist`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular file, not a symlink`);
+  }
+  return path;
+}
+
+function validAcceptanceProfile(value: unknown): value is CfctlAcceptanceProfile {
+  return value === "inventory_v1" || value === "dark_acceptance_v1";
+}
+
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }
@@ -322,18 +438,13 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
 } {
   if (!profileId) {
     return {
-      readback: { required: false, attempted: false, complete: false, receipts: [] },
+      readback: buildCfctlReadback(false, false, false, undefined, undefined, [], []),
     };
   }
   if (desiredState.domains.length > 100) {
+    const receipts = [failureReceipt("desired-state-domain-limit", false, "DOMAIN_LIMIT_EXCEEDED")];
     return {
-      readback: {
-        required: true,
-        attempted: false,
-        complete: false,
-        profile_id: profileId,
-        receipts: [failureReceipt("desired-state-domain-limit", false, "DOMAIN_LIMIT_EXCEEDED")],
-      },
+      readback: buildCfctlReadback(true, false, false, profileId, undefined, receipts, []),
     };
   }
 
@@ -341,13 +452,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   const receipts: CfctlReadReceipt[] = [profileResult.receipt];
   if (!profileResult.ok || !profileResult.account_id) {
     return {
-      readback: {
-        required: true,
-        attempted: true,
-        complete: false,
-        profile_id: profileId,
-        receipts,
-      },
+      readback: buildCfctlReadback(true, true, false, profileId, undefined, receipts, []),
     };
   }
   const accountId = profileResult.account_id;
@@ -358,9 +463,10 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   const domains: Record<string, CfctlMaildeskDomainEvidence> = {};
   const senderDomains: Record<string, Status> = {};
 
-  for (const desiredDomain of [...desiredState.domains].sort((left, right) =>
-    left.name.localeCompare(right.name)
-  )) {
+  const selectedDomainNames = new Set(readScope.selected_domains);
+  for (const desiredDomain of desiredState.domains
+    .filter((domain) => selectedDomainNames.has(domain.name))
+    .sort((left, right) => left.name.localeCompare(right.name))) {
     const zoneCall = cfctlCall(
       "zones-get",
       profileId,
@@ -606,14 +712,8 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     queue: includesStatus(queueNames, desiredState.storage.queue) === "ok" ? consumerStatus : "missing",
     dead_letter_queue: includesStatus(queueNames, desiredState.storage.dead_letter_queue),
   };
-  const domainStatuses = Object.values(domains).flatMap((domain) => [
-    domain.email_routing ?? "not_checked",
-    domain.catch_all ?? "not_checked",
-    ...Object.values(domain.aliases ?? {}),
-  ]);
   const maildeskEvidence: CfctlMaildeskEvidence = {
-    edge_ready: [...domainStatuses, ...Object.values(workers), ...Object.values(storage)]
-      .every(readinessSatisfied),
+    edge_ready: false,
     mail_ready: false,
     domains,
     workers,
@@ -622,14 +722,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   };
 
   return {
-    readback: {
-      required: true,
-      attempted: true,
-      complete: true,
-      profile_id: profileId,
-      account_id: accountId,
-      receipts,
-    },
+    readback: buildCfctlReadback(true, true, true, profileId, accountId, receipts, zones),
     evidence: {
       zones: zones.sort(),
       email_routing: emailRouting,
@@ -639,20 +732,145 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   };
 }
 
+function buildCfctlReadback(
+  required: boolean,
+  attempted: boolean,
+  transactionComplete: boolean,
+  profileId: string | undefined,
+  accountId: string | undefined,
+  receipts: CfctlReadReceipt[],
+  observedDomains: string[],
+): CfctlReadbackEvidence {
+  const requiredCapabilityIds = requiredInventoryCapabilityIds();
+  const failedCapabilityIds = unique(receipts
+    .filter((receipt) =>
+      receipt.performed && !receipt.ok && requiredCapabilityIds.includes(receipt.capability_id)
+    )
+    .map((receipt) => receipt.capability_id))
+    .sort();
+  const successfulCapabilityIds = unique(receipts
+    .filter((receipt) =>
+      receipt.performed &&
+      receipt.ok &&
+      requiredCapabilityIds.includes(receipt.capability_id) &&
+      !failedCapabilityIds.includes(receipt.capability_id)
+    )
+    .map((receipt) => receipt.capability_id))
+    .sort();
+  const missingCapabilityIds = requiredCapabilityIds
+    .filter((capabilityId) =>
+      !successfulCapabilityIds.includes(capabilityId) && !failedCapabilityIds.includes(capabilityId)
+    );
+  const selectedDomainSha256s = readScope.selected_domains.map(coverageDomainSha256).sort();
+  const observedDomainSha256s = unique(observedDomains.map(coverageDomainSha256)).sort();
+  const selectedScopeComplete = transactionComplete &&
+    observedDomainSha256s.length === selectedDomainSha256s.length &&
+    failedCapabilityIds.length === 0 &&
+    missingCapabilityIds.length === 0;
+  const desiredScopeComplete = readScope.mode === "full_desired_state" &&
+    selectedScopeComplete &&
+    selectedDomainSha256s.length === desiredState.domains.length &&
+    observedDomainSha256s.length === desiredState.domains.length;
+  const requiredAcceptanceSurfaces = readScope.profile === "dark_acceptance_v1"
+    ? [...DARK_ACCEPTANCE_SURFACES]
+    : [];
+  const missingAcceptanceSurfaces = [...requiredAcceptanceSurfaces];
+  const blockers: CfctlCoverageBlocker[] = [];
+  if (readScope.mode === "canary") blockers.push({ code: "PARTIAL_DESIRED_SCOPE" });
+  if (readScope.profile === "inventory_v1") {
+    blockers.push({ code: "ACCEPTANCE_PROFILE_INVENTORY_ONLY" });
+  } else {
+    blockers.push(...missingCapabilityIds
+      .filter((capabilityId) => DARK_ACCEPTANCE_CAPABILITY_IDS.includes(
+        capabilityId as typeof DARK_ACCEPTANCE_CAPABILITY_IDS[number],
+      ))
+      .map((capability_id) => ({
+        code: "ACCEPTANCE_SURFACE_UNIMPLEMENTED" as const,
+        capability_id,
+      })));
+    blockers.push(...missingAcceptanceSurfaces.map((surface) => ({
+      code: "ACCEPTANCE_SURFACE_UNIMPLEMENTED" as const,
+      surface,
+    })));
+  }
+  blockers.push(...failedCapabilityIds.map((capability_id) => ({
+    code: "PROVIDER_READ_FAILED" as const,
+    capability_id,
+  })));
+
+  const coverage: CfctlReadbackCoverage = {
+    mode: readScope.mode,
+    profile: readScope.profile,
+    desired_state_sha256: desiredStateSha256,
+    ...(readScope.manifest_sha256 ? { scope_manifest_sha256: readScope.manifest_sha256 } : {}),
+    expected_domain_count: desiredState.domains.length,
+    selected_domain_count: selectedDomainSha256s.length,
+    observed_domain_count: observedDomainSha256s.length,
+    selected_domain_sha256s: selectedDomainSha256s,
+    observed_domain_sha256s: observedDomainSha256s,
+    required_capability_ids: requiredCapabilityIds,
+    successful_capability_ids: successfulCapabilityIds,
+    failed_capability_ids: failedCapabilityIds,
+    missing_capability_ids: missingCapabilityIds,
+    required_acceptance_surfaces: requiredAcceptanceSurfaces,
+    successful_acceptance_surfaces: [],
+    missing_acceptance_surfaces: missingAcceptanceSurfaces,
+    selected_scope_complete: selectedScopeComplete,
+    desired_scope_complete: desiredScopeComplete,
+    acceptance_complete: false,
+    blockers,
+  };
+
+  return {
+    required,
+    attempted,
+    transaction_complete: transactionComplete,
+    coverage,
+    complete: false,
+    ...(profileId ? { profile_id: profileId } : {}),
+    ...(accountId ? { account_id: accountId } : {}),
+    receipts,
+  };
+}
+
+function requiredInventoryCapabilityIds(): string[] {
+  const selected = desiredState.domains.filter((domain) => readScope.selected_domains.includes(domain.name));
+  const capabilities = [
+    "zones-get",
+    "dns-records-for-a-zone-list-dns-records",
+    "listWorkers",
+    "worker-script-get-settings",
+    "d1-list-databases",
+    "r2-list-buckets",
+    "queues-list",
+    "queues-list-consumers",
+  ];
+  if (selected.some((domain) => domain.inbound_mx_provider === "cloudflare_email_routing")) {
+    capabilities.push(
+      "email-routing-routing-rules-list-routing-rules",
+      "email-routing-settings-get-email-routing-settings",
+      "email-routing-routing-rules-get-catch-all-rule",
+    );
+  }
+  if (
+    senderMode === "cloudflare_email_service" &&
+    selected.some((domain) => (desiredState.sender?.candidate_domains ?? []).includes(domain.name))
+  ) {
+    capabilities.push("email-sending-subdomains-list-sending-subdomains");
+  }
+  if (readScope.profile === "dark_acceptance_v1") {
+    capabilities.push(...DARK_ACCEPTANCE_CAPABILITY_IDS);
+  }
+  return capabilities.sort();
+}
+
 function incompleteReadback(
   profileId: string,
   accountId: string,
   receipts: CfctlReadReceipt[],
 ): { readback: CfctlReadbackEvidence } {
   return {
-    readback: {
-      required: true,
-      attempted: true,
-      complete: false,
-      profile_id: profileId,
-      account_id: accountId,
-      receipts,
-    },
+    readback: buildCfctlReadback(true, true, false, profileId, accountId, receipts, []),
   };
 }
 
@@ -1238,10 +1456,6 @@ function includesStatus(values: string[], expected: string): Status {
   return values.includes(expected) ? "ok" : "missing";
 }
 
-function readinessSatisfied(status: Status): boolean {
-  return status === "ok" || status === "not_applicable";
-}
-
 function verifiedSenderStatus(value: string | undefined): Status {
   return value === "verified" || value === "active" || value === "ready" || value === "ok"
     ? "ok"
@@ -1295,12 +1509,17 @@ function collectD1Evidence(databaseName: string): Evidence["d1"] {
   };
 }
 
-function collectInboundProofs(databaseName: string): Record<string, InboundProof> {
+function collectInboundProofs(
+  databaseName: string,
+  selectedDomains: string[],
+): Record<string, InboundProof> {
+  const domainPredicate = sqlDomainSet(selectedDomains);
   const rows = wranglerD1Results(
     databaseName,
-    "SELECT rh.route_address, rh.decision_kind AS route_kind, rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.last_inbound_provider_accepted_at, rh.last_inbound_provider_message_ids_json, rh.last_inbox_verified_at FROM route_health rh JOIN alias_routes ar ON ar.id = rh.route_id AND ar.enabled = 1 AND ar.policy_sha256 = rh.policy_sha256 JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = rh.policy_sha256 WHERE rh.inbound_status IN ('inbox_verified', 'reply_verified') AND rh.last_inbound_provider_accepted_at IS NOT NULL AND rh.last_inbox_verified_at IS NOT NULL ORDER BY rh.last_inbox_verified_at DESC LIMIT 200;",
+    "SELECT rh.route_address, rh.decision_kind AS route_kind, rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.last_inbound_provider_accepted_at, rh.last_inbound_provider_message_ids_json, rh.last_inbox_verified_at FROM route_health rh JOIN alias_routes ar ON ar.id = rh.route_id AND ar.enabled = 1 AND ar.policy_sha256 = rh.policy_sha256 JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = rh.policy_sha256 WHERE lower(substr(rh.route_address, instr(rh.route_address, '@') + 1)) IN (" + domainPredicate + ") AND rh.inbound_status IN ('inbox_verified', 'reply_verified') AND rh.last_inbound_provider_accepted_at IS NOT NULL AND rh.last_inbox_verified_at IS NOT NULL ORDER BY rh.last_inbox_verified_at DESC LIMIT 200;",
   );
   const proofs: Record<string, InboundProof> = {};
+  const selected = new Set(selectedDomains);
 
   for (const row of rows) {
     if (
@@ -1317,7 +1536,7 @@ function collectInboundProofs(databaseName: string): Record<string, InboundProof
       : null;
     if (!Array.isArray(providerMessageIds) || providerMessageIds.some((value) => typeof value !== "string")) continue;
     const domain = domainPart(row.route_address);
-    if (!domain) continue;
+    if (!domain || !selected.has(domain)) continue;
     if (proofs[domain]) continue;
     proofs[domain] = {
       status: "ok",
@@ -1336,12 +1555,18 @@ function collectInboundProofs(databaseName: string): Record<string, InboundProof
   return proofs;
 }
 
-function collectOutboundProofs(databaseName: string): Record<string, OutboundProof> {
+function collectOutboundProofs(
+  databaseName: string,
+  selectedDomains: string[],
+): Record<string, OutboundProof> {
+  const fromIdentity = "json_extract(detail_json, '$.fromIdentity')";
+  const domainPredicate = sqlDomainSet(selectedDomains);
   const rows = wranglerD1Results(
     databaseName,
-    "SELECT detail_json, created_at FROM audit_events WHERE action = 'outbound_reply_delivered' ORDER BY created_at DESC LIMIT 200;",
+    "SELECT detail_json, created_at FROM audit_events WHERE action = 'outbound_reply_delivered' AND json_valid(detail_json) = 1 AND lower(substr(" + fromIdentity + ", instr(" + fromIdentity + ", '@') + 1)) IN (" + domainPredicate + ") ORDER BY created_at DESC LIMIT 200;",
   );
   const proofs: Record<string, OutboundProof> = {};
+  const selected = new Set(selectedDomains);
 
   for (const row of rows) {
     if (typeof row.detail_json !== "string") continue;
@@ -1349,7 +1574,7 @@ function collectOutboundProofs(databaseName: string): Record<string, OutboundPro
     if (!detail?.fromIdentity || proofs[domainPart(detail.fromIdentity)]) continue;
 
     const domain = domainPart(detail.fromIdentity);
-    if (!domain) continue;
+    if (!domain || !selected.has(domain)) continue;
     proofs[domain] = {
       status: "delivered",
       from_identity: detail.fromIdentity,
@@ -1379,6 +1604,10 @@ function wranglerD1Results(databaseName: string, sql: string): Array<Record<stri
   }
 }
 
+function sqlDomainSet(domains: string[]): string {
+  return domains.map((domain) => "'" + domain.replaceAll("'", "''") + "'").join(", ");
+}
+
 function collectResendDomains(): Record<string, string> {
   const result = spawnSync("resend", ["domains", "list", "--json", "--limit", "100"], {
     cwd: root,
@@ -1399,7 +1628,10 @@ function collectResendDomains(): Record<string, string> {
 
 function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof> {
   const proofs: Record<string, InboundProof> = {};
-  for (const domain of desiredState.domains.filter((entry) => entry.inbound_mx_provider === "google_workspace")) {
+  const selected = new Set(readScope.selected_domains);
+  for (const domain of desiredState.domains.filter((entry) =>
+    selected.has(entry.name) && entry.inbound_mx_provider === "google_workspace"
+  )) {
     const target = `founders@${domain.name}`;
     const result = spawnSync(bin, ["resource", "search", "--json", target], {
       cwd: root,

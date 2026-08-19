@@ -39,12 +39,14 @@ describe("cfctl provisioning contract check", () => {
         discovery_commands: Array<{ purpose: string; performed: boolean; argv: string[] }>;
         read_contract: Record<string, string>;
         mutation_contract: Record<string, string>;
+        access_capability_contract: Record<string, unknown>;
       };
       resources: {
         workers: string[];
         worker_configs: string[];
         storage: string[];
         email_routing_aliases: string[];
+        access: Record<string, unknown>;
       };
       outside_checkout_blockers: string[];
     };
@@ -88,14 +90,208 @@ describe("cfctl provisioning contract check", () => {
       "queue-dlq:maildesk-cf-relay-dlq",
     ]);
     expect(receipt.resources.email_routing_aliases).toContain("founders@example.com");
+    expect(receipt.resources.access).toEqual({
+      worker_role: "routing_health",
+      hostname: "configured",
+      application_identity: "configured",
+      application_type: "self_hosted",
+      path_scope: "all_routes",
+      managed_policy_identity: "configured",
+      policy_decision: "allow",
+      operator_group_reference: "environment",
+      runtime_jwt_validation: "required",
+    });
+    expect(receipt.cfctl_handoff.access_capability_contract).toMatchObject({
+      status: "external_dependency",
+      desired_state_path: "access.routing_health",
+      required_read_capabilities: [
+        "access-applications-list-access-applications",
+        "access-applications-get-an-access-application",
+        "access-policies-list-access-app-policies",
+        "access-policies-get-an-access-policy",
+      ],
+      prohibited_bypasses: ["raw_http", "dashboard", "wrangler"],
+    });
+    const accessContract = receipt.cfctl_handoff.access_capability_contract as Record<string, any>;
+    expect(accessContract.ownership).toEqual({
+      application_selector: ["application_name", "hostname"],
+      managed_policy_selector: ["policy_name", "operator_group_id"],
+      resolved_provider_ids: ["app_id", "policy_id"],
+      authority: "one_owned_application_and_one_owned_policy_only",
+    });
+    expect(accessContract.admission.application.fail_closed).toEqual([
+      "zero_exact_with_ambiguous_existing_candidates",
+      "duplicate_exact_matches",
+      "overlapping_name_or_hostname_selectors",
+      "missing_resolved_app_id_for_update",
+    ]);
+    expect(accessContract.admission.managed_policy.fail_closed).toEqual([
+      "zero_exact_with_ambiguous_existing_candidates",
+      "duplicate_exact_matches",
+      "overlapping_name_or_operator_group_selectors",
+      "multiple_policies_satisfy_managed_identity",
+      "missing_resolved_policy_id_for_update",
+    ]);
+    expect(accessContract.preservation).toEqual({
+      unrelated_applications: "outside_reconciliation_authority",
+      unrelated_policies: "preserve_exact_bytes_semantics_and_order",
+      collection_replacement: "forbidden",
+      collection_deletion: "forbidden",
+      required_prior_state: [
+        "owned_application_full_snapshot",
+        "owned_policy_full_snapshot",
+        "unrelated_policy_content_hashes_in_order",
+      ],
+    });
+    expect(accessContract.required_plan_v2_operations).toEqual([
+      expect.objectContaining({
+        resource: "access_application",
+        action: "create_owned_self_hosted_whole_host",
+        selectors: ["account_id", "application_name", "hostname"],
+        rollback: "delete_only_returned_app_id_in_separate_reviewed_plan",
+      }),
+      expect.objectContaining({
+        resource: "access_application",
+        action: "update_owned_self_hosted_whole_host",
+        selectors: ["account_id", "app_id"],
+        rollback: "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan",
+      }),
+      expect.objectContaining({
+        resource: "access_policy",
+        action: "create_owned_operator_allow_policy",
+        selectors: ["account_id", "app_id", "policy_name", "operator_group_id"],
+        rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan",
+      }),
+      expect.objectContaining({
+        resource: "access_policy",
+        action: "update_owned_operator_allow_policy",
+        selectors: ["account_id", "app_id", "policy_id"],
+        rollback: "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan",
+      }),
+    ]);
+    expect(accessContract.mutation_proof).toEqual({
+      retain: ["operation_id", "content_hash", "app_id", "policy_id", "prior_state_digest"],
+      exact_id_readback: [
+        "access-applications-get-an-access-application:app_id",
+        "access-policies-get-an-access-policy:app_id+policy_id",
+      ],
+      readiness_requires: [
+        "desired_app_state_at_resolved_app_id",
+        "desired_policy_state_at_resolved_app_id_and_policy_id",
+        "unrelated_policy_content_hashes_and_order_unchanged",
+      ],
+      mismatch: "fail_closed",
+    });
+    expect(accessContract.identity_continuity).toEqual({
+      equality: "byte_exact_provider_id",
+      application_create: {
+        source: "application_create.provider_result.app_id",
+        must_equal: [
+          "application_create.status.app_id",
+          "application_create.rollback_target.app_id",
+          "managed_policy.parent.app_id",
+          "application_verification.selector.app_id",
+          "application_verification.result.app_id",
+        ],
+      },
+      application_update: {
+        source: "application_admission.resolved_app_id",
+        must_equal: [
+          "application_update.prior_state.app_id",
+          "application_update.plan.app_id",
+          "application_update.review.app_id",
+          "application_update.approval.app_id",
+          "application_update.apply.app_id",
+          "application_update.status.app_id",
+          "application_update.rollback_target.app_id",
+          "managed_policy.parent.app_id",
+          "application_verification.selector.app_id",
+          "application_verification.result.app_id",
+        ],
+      },
+      policy_create: {
+        parent_source: "retained_application.app_id",
+        parent_must_equal: [
+          "policy_create.plan.app_id",
+          "policy_create.review.app_id",
+          "policy_create.approval.app_id",
+          "policy_create.apply.app_id",
+          "policy_create.status.app_id",
+          "policy_create.rollback_target.app_id",
+          "policy_verification.selector.app_id",
+          "policy_verification.result.app_id",
+        ],
+        source: "policy_create.provider_result.policy_id",
+        must_equal: [
+          "policy_create.status.policy_id",
+          "policy_create.rollback_target.policy_id",
+          "policy_verification.selector.policy_id",
+          "policy_verification.result.policy_id",
+        ],
+      },
+      policy_update: {
+        source: "policy_admission.resolved_app_id+resolved_policy_id",
+        must_equal: [
+          "policy_update.prior_state.app_id+policy_id",
+          "policy_update.plan.app_id+policy_id",
+          "policy_update.review.app_id+policy_id",
+          "policy_update.approval.app_id+policy_id",
+          "policy_update.apply.app_id+policy_id",
+          "policy_update.status.app_id+policy_id",
+          "policy_update.rollback_target.app_id+policy_id",
+          "policy_verification.selector.app_id+policy_id",
+          "policy_verification.result.app_id+policy_id",
+        ],
+      },
+      failure: {
+        absent_or_unequal: "fail_closed",
+        selector_equivalent_wrong_id: "reject",
+        blocks: ["plan_ready", "live_mutation_ready", "post_apply_success", "edge_ready"],
+      },
+    });
+    expect(JSON.stringify(receipt.resources.access)).not.toContain("routing-health.example.com");
     expect(receipt.outside_checkout_blockers).toEqual([
       "install or update cfctl with the required v2 catalog capabilities",
+      "resolve and implement cfctl PlanV2 capabilities for Access application and policy reconciliation",
       "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
       "run cfctl version, doctor, and agents doctor before governed discovery",
       "bind every live call to an explicit profile, selected account, capability, and exact selectors",
       "review the immutable PlanV2 operation before approval and execution",
       "run capability-specific post-change readback and targeted mail proof after mutation",
     ]);
+  });
+
+  test("fails closed on missing, partial, desk-only, contradictory, or unmodeled Access authority", () => {
+    const original = JSON.parse(
+      readFileSync(join(root, "config/desired-state.example.json"), "utf8"),
+    ) as Record<string, any>;
+    const cases: Array<[string, (desired: Record<string, any>) => void, string]> = [
+      ["missing", (desired) => delete desired.access, "access is required"],
+      ["partial", (desired) => delete desired.access.routing_health.policy, "access.routing_health.policy is required"],
+      ["missing-app-identity", (desired) => delete desired.access.routing_health.application_name, "access.routing_health.application_name is required"],
+      ["missing-policy-identity", (desired) => delete desired.access.routing_health.policy.policy_name, "access.routing_health.policy.policy_name is required"],
+      ["malformed-app-identity", (desired) => (desired.access.routing_health.application_name = "Maildesk Access"), "access.routing_health.application_name must be a stable lowercase owned name"],
+      ["malformed-policy-identity", (desired) => (desired.access.routing_health.policy.policy_name = "Maildesk Policy"), "access.routing_health.policy.policy_name must be a stable lowercase owned name"],
+      ["desk-only", (desired) => (desired.access.routing_health.path_scope = "desk_only"), "access.routing_health.path_scope must be one of all_routes"],
+      ["contradictory", (desired) => (desired.access.routing_health.worker_role = "relay_router"), "access.routing_health.worker_role must be one of routing_health"],
+      ["unmodeled", (desired) => (desired.access.routing_health.path_patterns = ["/desk/*"]), "access.routing_health contains unmodeled fields: path_patterns"],
+    ];
+
+    for (const [name, mutate, expected] of cases) {
+      const directory = mkdtempSync(join(tmpdir(), `maildesk-access-${name}-`));
+      const desiredPath = join(directory, "desired-state.json");
+      const desired = structuredClone(original);
+      mutate(desired);
+      writeFileSync(desiredPath, `${JSON.stringify(desired, null, 2)}\n`);
+      const result = spawnSync(
+        "bun",
+        ["run", "scripts/check-cfctl-provisioning.ts", "--", "--desired-state", desiredPath, "--json"],
+        { cwd: root, encoding: "utf8" },
+      );
+      rmSync(directory, { force: true, recursive: true });
+      expect(result.status, name).toBe(1);
+      expect(result.stderr, name).toContain(expected);
+    }
   });
 
   test("rejects noncanonical Worker config basenames before cfctl planning", () => {

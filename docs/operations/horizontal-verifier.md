@@ -160,6 +160,41 @@ MAILDESK_READYZ_URL=https://maildesk.example.workers.dev/readyz \
 bun run collect:maildesk-evidence -- --out var/maildesk-live-evidence.json
 ```
 
+The default collection mode is `full_desired_state` with the
+`inventory_v1` acceptance profile. A successful inventory transaction reports
+`transaction_complete: true`, but it deliberately keeps legacy `complete`,
+`coverage.acceptance_complete`, `edge_ready`, and `mail_ready` false. Inventory
+proves the implemented resource reads; it does not impersonate dark-deployment
+acceptance.
+
+Use a repository-local scope manifest, or one beside an explicitly selected
+desired-state fixture, for a bounded canary observation:
+
+```json
+{
+  "schema_version": 1,
+  "mode": "canary",
+  "profile": "inventory_v1",
+  "domains": ["example.com", "example.net"]
+}
+```
+
+```bash
+bun run collect:maildesk-evidence -- \
+  --desired-state config/desired-state.local.json \
+  --scope-manifest var/proof/maildesk-read-scope.local.json \
+  --out var/maildesk-live-evidence.json
+```
+
+Canary collection reads only the explicit selected domains, preserves their
+observations, hashes the selected domain inventory into the coverage contract,
+and marks every unselected desired domain `not_checked`. It may establish
+`live_evidence_present: true`, but it always reports
+`coverage.desired_scope_complete: false`,
+`coverage.acceptance_complete: false`, legacy `complete: false`, and
+`edge_ready: false`. Unselected domains are excluded from aggregate provider
+gap counts; local policy-versus-desired-state failures remain visible.
+
 When `MAILDESK_CFCTL_PROFILE` is set, the collector resolves that exact profile
 to its configured account and uses only governed `cfctl call` operations. The
 v2 read set is explicit and bounded: exact-zone lookup, named Email Routing
@@ -180,7 +215,10 @@ it does not copy raw provider responses into the receipt metadata.
 
 A missing profile, denied call, malformed envelope, binding mismatch, missing
 required zone, or partial capability set makes the collector exit nonzero after
-writing `cfctl_readback.complete: false`. Catalog-declared page and cursor
+writing `cfctl_readback.transaction_complete: false` and legacy
+`complete: false`. The bound receipt, failed capability ID, unattempted
+capability IDs, desired-state digest, and scope counts remain available without
+granting readiness. Catalog-declared page and cursor
 metadata is part of that contract: malformed metadata, a declared nonterminal
 page, or a continuation cursor is rejected rather than silently truncated.
 Email Routing rules are the narrower typed case: cfctl owns the provider page
@@ -194,8 +232,10 @@ aliases plus Worker topology. Incomplete projections, legacy raw rule arrays,
 invalid matcher hashes, suppressed Worker targets, or inconsistent counts are
 malformed evidence. Other absent pagination metadata remains malformed.
 The verifier does not allow partial
-D1, `/readyz`, or provider evidence to turn that incomplete governed readback
-into `live_evidence_present: true`. When no profile is configured, the public
+D1, `/readyz`, or provider evidence to turn a failed governed transaction into
+`live_evidence_present: true`. A successful canary transaction is present
+evidence, but its coverage contract prevents it from authorizing readiness.
+When no profile is configured, the public
 template remains non-mutating and reports that governed Cloudflare readback was
 not attempted rather than launching an ambient or legacy profile lane.
 Evidence presence is content-aware: empty arrays and objects do not count, and
@@ -210,6 +250,30 @@ nested object is not evidence.
 nonempty array of typed `{ name, ok, detail? }` checks. A valid negative health
 response is present evidence and may report drift; malformed or empty runtime
 JSON is omitted by the collector and does not establish presence.
+
+The `dark_acceptance_v1` profile is fail-closed. Its contract explicitly names
+Access application and policy readback, R2 spool lifecycle, exact Worker
+deployment and route identity, Queue and DLQ backlog, spool emptiness, and the
+readiness endpoint as required acceptance surfaces. Surfaces not implemented
+by this collector are emitted as typed blockers and keep
+`coverage.acceptance_complete` false. A missing readiness URL is never silently
+treated as dark acceptance. The compatibility field `complete` can become true
+only for a full desired-state, transaction-complete, dark-acceptance-complete
+readback. Legacy evidence containing only `required`, `attempted`, and
+`complete` cannot establish `edge_ready` or `mail_ready`.
+
+Access acceptance requires both the exact application read and the exact
+application-scoped policy read. The receipt retains the admitted or
+provider-returned `app_id` and `policy_id`, the application readback result ID,
+the policy parent application ID, and the exact policy readback tuple. Every
+application ID must be byte-identical, and the retained policy ID must equal
+the policy readback result ID. Missing IDs, a policy attached to another
+application, or selector-equivalent objects with different provider IDs keep
+`acceptance_complete`, `edge_ready`, and `mail_ready` false.
+
+Live-evidence output is always created or tightened to mode `0600`. It may
+contain private domain and account metadata even though it contains no token or
+message body, so it must remain ignored and local.
 
 Email Routing aliases count as wired only when the matching rule invokes the
 configured Maildesk Worker. A direct `forward` action is completed provider

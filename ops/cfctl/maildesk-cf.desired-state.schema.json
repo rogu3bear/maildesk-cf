@@ -4,7 +4,7 @@
   "title": "maildesk-cf cfctl desired state",
   "type": "object",
   "additionalProperties": false,
-  "required": ["project", "domains", "workers", "storage", "operator_delivery", "sender", "verification"],
+  "required": ["project", "domains", "workers", "access", "storage", "operator_delivery", "sender", "verification"],
   "properties": {
     "project": {
       "type": "object",
@@ -33,6 +33,35 @@
         "relay_router": { "$ref": "#/$defs/worker" },
         "relay_outbound": { "$ref": "#/$defs/worker" },
         "routing_health": { "$ref": "#/$defs/worker" }
+      }
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routing_health"],
+      "properties": {
+        "routing_health": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["worker_role", "application_name", "hostname", "application_type", "path_scope", "policy"],
+          "properties": {
+            "worker_role": { "type": "string", "enum": ["routing_health"] },
+            "application_name": { "$ref": "#/$defs/owned_name" },
+            "hostname": { "$ref": "#/$defs/domain_name" },
+            "application_type": { "type": "string", "enum": ["self_hosted"] },
+            "path_scope": { "type": "string", "enum": ["all_routes"] },
+            "policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["policy_name", "decision", "operator_group_id_env"],
+              "properties": {
+                "policy_name": { "$ref": "#/$defs/owned_name" },
+                "decision": { "type": "string", "enum": ["allow"] },
+                "operator_group_id_env": { "$ref": "#/$defs/env_name" }
+              }
+            }
+          }
+        }
       }
     },
     "storage": {
@@ -166,6 +195,16 @@
     "non_empty_string": {
       "type": "string",
       "minLength": 1
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "owned_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
     }
   }
 }
