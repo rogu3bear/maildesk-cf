@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/maildesk-domain-enrollment.schema.json",
+  "title": "Maildesk domain enrollment ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "inventory_complete", "domains"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "inventory_complete": { "type": "boolean" },
+    "inventory_blocker_code": { "$ref": "#/$defs/code" },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/domain_decision" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "inventory_complete": { "const": false } } },
+      "then": { "required": ["inventory_blocker_code"] },
+      "else": { "not": { "required": ["inventory_blocker_code"] } }
+    }
+  ],
+  "$defs": {
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,127}$"
+    },
+    "domain_name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 253,
+      "pattern": "^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    "registrar_custody": {
+      "type": "string",
+      "enum": ["cloudflare", "external", "unknown"]
+    },
+    "domain_decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "decision", "registrar_custody"],
+          "properties": {
+            "name": { "$ref": "#/$defs/domain_name" },
+            "decision": { "const": "enrolled" },
+            "registrar_custody": { "$ref": "#/$defs/registrar_custody" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "decision", "registrar_custody", "blocker_code"],
+          "properties": {
+            "name": { "$ref": "#/$defs/domain_name" },
+            "decision": { "const": "scheduled_for_migration" },
+            "registrar_custody": { "$ref": "#/$defs/registrar_custody" },
+            "blocker_code": { "$ref": "#/$defs/code" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "decision", "registrar_custody", "reason_code"],
+          "properties": {
+            "name": { "$ref": "#/$defs/domain_name" },
+            "decision": { "const": "intentionally_excluded" },
+            "registrar_custody": { "$ref": "#/$defs/registrar_custody" },
+            "reason_code": { "$ref": "#/$defs/code" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "decision", "registrar_custody", "decision_owner_ref"],
+          "properties": {
+            "name": { "$ref": "#/$defs/domain_name" },
+            "decision": { "const": "pending_owner_decision" },
+            "registrar_custody": { "$ref": "#/$defs/registrar_custody" },
+            "decision_owner_ref": { "$ref": "#/$defs/code" }
+          }
+        }
+      ]
+    }
+  }
+}

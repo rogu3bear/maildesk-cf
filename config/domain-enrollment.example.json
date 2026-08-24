@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "inventory_complete": false,
+  "inventory_blocker_code": "associated_domain_inventory_not_reconciled",
+  "domains": [
+    {
+      "name": "example.com",
+      "decision": "enrolled",
+      "registrar_custody": "external"
+    },
+    {
+      "name": "example.net",
+      "decision": "scheduled_for_migration",
+      "registrar_custody": "unknown",
+      "blocker_code": "cloudflare_primary_migration_not_completed"
+    },
+    {
+      "name": "example.org",
+      "decision": "intentionally_excluded",
+      "registrar_custody": "external",
+      "reason_code": "owner_excluded_current_scope"
+    },
+    {
+      "name": "pending.example.com",
+      "decision": "pending_owner_decision",
+      "registrar_custody": "unknown",
+      "decision_owner_ref": "founder"
+    }
+  ]
+}

@@ -12,6 +12,7 @@
     "preflight:template": "bun run scripts/preflight.ts --mode template",
     "preflight:production": "bun run scripts/preflight.ts --mode production",
     "check:cfctl-provisioning": "bun run scripts/check-cfctl-provisioning.ts",
+    "check:domain-enrollment": "bun run scripts/check-domain-enrollment.ts",
     "check:relay-topology": "bun run scripts/check-relay-topology.ts",
     "plan:dark": "bun run scripts/compile-dark-plan.ts",
     "materialize:d1-preview-config": "bun run scripts/materialize-d1-preview-config.ts",

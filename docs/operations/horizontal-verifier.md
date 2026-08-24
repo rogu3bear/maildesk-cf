@@ -1,5 +1,25 @@
 # Horizontal Verifier
 
+## Enrollment universe
+
+Before route or provider evidence is aggregated, validate the complete
+known-domain universe separately from active routing policy and deployment
+intent:
+
+```bash
+bun run check:domain-enrollment -- --json
+```
+
+The ignored `config/domain-enrollment.local.json` is the private authority for
+one explicit decision per associated domain. Active policy remains authoritative
+for route behavior, desired state remains authoritative for deployment intent,
+and provider receipts remain authoritative for observed readiness. The
+enrollment report joins those local authorities only far enough to reject
+omitted or contradictory active domains. It emits hashed domain identities and
+body-free codes, never operator addresses, and always keeps
+`full_routing_coverage_claim_allowed: false`; later route-level proof owns that
+stronger claim.
+
 The horizontal verifier is the local command surface for proving that the mail
 desk is one coherent system instead of a pile of individually green checks.
 
