@@ -257,18 +257,20 @@ function projectionSql(
     );
     statements.push(...routeStatements);
   }
-  const projectionSha256 = sha256(transaction(statements));
+  const projectionSha256 = sha256(d1ImportSql(statements));
   statements.push(
     `UPDATE policy_revisions SET superseded_at = CURRENT_TIMESTAMP WHERE activated_at IS NOT NULL AND policy_sha256 <> ${sql(policySha256)} AND superseded_at IS NULL;`,
     `UPDATE policy_revisions SET activated_at = COALESCE(activated_at, CURRENT_TIMESTAMP), superseded_at = NULL WHERE policy_sha256 = ${sql(policySha256)};`,
     `INSERT INTO runtime_state (singleton, active_policy_sha256, active_policy_r2_key, activated_at) VALUES (1, ${sql(policySha256)}, ${sql(policyR2Key)}, CURRENT_TIMESTAMP) ON CONFLICT(singleton) DO UPDATE SET active_policy_sha256 = excluded.active_policy_sha256, active_policy_r2_key = excluded.active_policy_r2_key, activated_at = excluded.activated_at;`,
     `INSERT INTO policy_projection_state (key, value, updated_at) VALUES ('active_policy_sha256', ${sql(policySha256)}, CURRENT_TIMESTAMP), ('active_desired_state_sha256', ${sql(desiredStateSha256)}, CURRENT_TIMESTAMP), ('active_projection_sha256', ${sql(projectionSha256)}, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
   );
-  return { sql: transaction(statements), projectionSha256 };
+  return { sql: d1ImportSql(statements), projectionSha256 };
 }
 
-function transaction(statements: string[]): string {
-  return ["PRAGMA foreign_keys = ON;", "BEGIN TRANSACTION;", ...statements, "COMMIT;", ""].join("\n");
+function d1ImportSql(statements: string[]): string {
+  // Wrangler's D1 file-import path supplies the transaction boundary. Explicit
+  // BEGIN/COMMIT statements would nest that transaction and remote D1 rejects them.
+  return ["PRAGMA foreign_keys = ON;", ...statements, ""].join("\n");
 }
 
 function executeLocalProjection(sqlText: string, database: string, config: string) {

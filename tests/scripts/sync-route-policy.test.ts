@@ -63,6 +63,7 @@ test("private-scale policy projection activates one immutable revision atomicall
     const binDirectory = join(directory, "bin");
     const sqlLog = join(directory, "projection.sql");
     const outputSql = join(directory, "governed-projection.sql");
+    const repeatedOutputSql = join(directory, "repeated-projection.sql");
     writeFileSync(
       policyPath,
       JSON.stringify({
@@ -145,6 +146,21 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
       policy_r2_key: string;
       projection_sha256: string;
     };
+    const repeatedResult = spawnSync(
+      "bun",
+      [
+        "scripts/sync-route-policy.ts",
+        "--policy",
+        policyPath,
+        "--desired-state",
+        desiredPath,
+        "--out",
+        repeatedOutputSql,
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(repeatedResult.status).toBe(0);
+    const repeatedSummary = JSON.parse(repeatedResult.stdout) as { projection_sha256: string };
     expect(summary.routes).toBe(141);
     expect(summary.policy_sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(summary.desired_state_sha256).toMatch(/^[a-f0-9]{64}$/);
@@ -152,8 +168,11 @@ cat "$file" >> "$MAILDESK_POLICY_SQL_LOG"
     expect(summary.projection_sha256).toMatch(/^[a-f0-9]{64}$/);
     const sql = readFileSync(sqlLog, "utf8");
     expect(readFileSync(outputSql, "utf8")).toBe(sql);
-    expect(sql.match(/BEGIN TRANSACTION;/g)).toHaveLength(1);
-    expect(sql.match(/COMMIT;/g)).toHaveLength(1);
+    expect(readFileSync(repeatedOutputSql, "utf8")).toBe(sql);
+    expect(repeatedSummary.projection_sha256).toBe(summary.projection_sha256);
+    expect(sql).toStartWith("PRAGMA foreign_keys = ON;\n");
+    expect(sql).not.toContain("BEGIN TRANSACTION;");
+    expect(sql).not.toContain("COMMIT;");
     expect(sql.indexOf("UPDATE alias_routes SET enabled = 0")).toBeLessThan(sql.indexOf("enabled, policy_sha256"));
     expect(sql.lastIndexOf("INSERT INTO runtime_state")).toBeGreaterThan(sql.lastIndexOf("INSERT INTO route_health"));
     expect(sql.lastIndexOf("INSERT INTO policy_projection_state")).toBeGreaterThan(sql.lastIndexOf("INSERT INTO runtime_state"));

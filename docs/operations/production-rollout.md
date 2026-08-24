@@ -48,6 +48,20 @@ cargo run --package maildesk-router --bin maildesk-policy-check -- config/policy
 The policy should be the source for both Worker runtime config and `cfctl`
 Email Routing desired state.
 
+Compile the policy projection as a D1 import file before the governed apply:
+
+```bash
+bun run sync:route-policy -- --policy config/policy.local.json \
+  --desired-state config/desired-state.local.json --out var/policy-projection.sql
+```
+
+The generated SQL intentionally omits explicit `BEGIN TRANSACTION` and
+`COMMIT` statements. `wrangler d1 execute --file` supplies the D1 import
+transaction; adding another transaction wrapper is rejected by remote D1. The
+projection digest remains deterministic over the ordered pre-activation SQL
+batch, while atomic application is an invariant of the governed Wrangler/D1
+file import rather than syntax emitted by this compiler.
+
 ## 3. Cloudflare Provisioning
 
 Provision through cfctl v2, using capability resolution and PlanV2 for each
