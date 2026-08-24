@@ -40,6 +40,17 @@ to the exact projection plan.
    ignored mode-0600 root configs, including
    `wrangler.d1-preview.production.toml`. Rehearse all migrations against that
    D1-only preview target before planning the production migration operation.
+   Materialize the preview config without placing its database identifier in
+   argv or output:
+
+   ```bash
+   printf '%s' "$MAILDESK_D1_PREVIEW_DATABASE_ID" | bun run materialize:d1-preview-config
+   ```
+
+   Populate `MAILDESK_D1_PREVIEW_DATABASE_ID` only from the exact governed
+   bootstrap/readback transaction. The materializer creates the ignored file
+   exclusively at mode 0600, reports only content digests, and refuses to
+   overwrite an operator-owned config.
 6. Generate the private immutable policy object and projection SQL, then create
    migration, upload, projection, Worker, consumer, Access, lifecycle, and reply
    routing child plans.
