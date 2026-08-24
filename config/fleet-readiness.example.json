@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "binding": {
+    "transaction_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "checkout_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "tree_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "policy_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "desired_state_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "enrollment_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "route_inventory_sha256": "sha256:0bce9137b24844ec1204dbd934308886503a9c2cc53f7349e83f491896f77580"
+  },
+  "enrollment": {
+    "schema_version": 1,
+    "kind": "maildesk_domain_enrollment_report",
+    "performed": false,
+    "body_free": true,
+    "enrollment_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+    "status": {
+      "ledger_valid": true,
+      "associated_domain_inventory_complete": true,
+      "all_active_domains_classified": true,
+      "full_routing_coverage_claim_allowed": false,
+      "inventory_blocker_code": null
+    },
+    "counts": {
+      "total_known_domains": 2,
+      "enrolled_domains": 1,
+      "scheduled_domains": 0,
+      "excluded_domains": 1,
+      "pending_domains": 0,
+      "active_policy_domains": 1,
+      "desired_state_domains": 1
+    },
+    "domains": [
+      {
+        "domain_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": "enrolled",
+        "registrar_custody": "external",
+        "desired_inbound_provider": "cloudflare_email_routing",
+        "active_policy": true,
+        "configured": true,
+        "reason_code": null,
+        "blocker_code": null,
+        "decision_owner_ref_sha256": null,
+        "first_blocker": null
+      },
+      {
+        "domain_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "decision": "intentionally_excluded",
+        "registrar_custody": "external",
+        "desired_inbound_provider": null,
+        "active_policy": false,
+        "configured": false,
+        "reason_code": "owner_excluded_current_scope",
+        "blocker_code": null,
+        "decision_owner_ref_sha256": null,
+        "first_blocker": null
+      }
+    ]
+  },
+  "route_inventory": {
+    "schema_version": 1,
+    "coverage_mode": "full_policy",
+    "declared_route_count": 1,
+    "route_set_sha256": "sha256:0bce9137b24844ec1204dbd934308886503a9c2cc53f7349e83f491896f77580",
+    "binding": {
+      "transaction_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checkout_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "tree_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "policy_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "desired_state_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "enrollment_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "route_inventory_sha256": "sha256:0bce9137b24844ec1204dbd934308886503a9c2cc53f7349e83f491896f77580"
+    },
+    "policy_projection_receipt": {
+      "schema_version": 1,
+      "kind": "maildesk_policy_projection_inventory_receipt",
+      "performed": false,
+      "body_free": true,
+      "configured_route_count": 1,
+      "route_set_sha256": "sha256:0bce9137b24844ec1204dbd934308886503a9c2cc53f7349e83f491896f77580",
+      "evidence_sha256": "sha256:ccca416b63ed8c497a7d02b5e59861a7e481b45ed81646168c180944e286be13",
+      "binding": {
+        "transaction_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "checkout_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "tree_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "policy_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "desired_state_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "enrollment_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "route_inventory_sha256": "sha256:0bce9137b24844ec1204dbd934308886503a9c2cc53f7349e83f491896f77580"
+      }
+    },
+    "routes": [
+      {
+        "route_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "domain_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "route_kind": "role_alias",
+        "delivery_contract": "bidirectional_reply"
+      }
+    ]
+  },
+  "route_evidence": []
+}

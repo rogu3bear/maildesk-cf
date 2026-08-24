@@ -20,6 +20,68 @@ body-free codes, never operator addresses, and always keeps
 `full_routing_coverage_claim_allowed: false`; later route-level proof owns that
 stronger claim.
 
+## Fleet readiness compiler
+
+Compile a body-free route-level report only after a normalized full-policy
+route inventory and route-specific receipts exist:
+
+```bash
+bun run compile:fleet-readiness -- \
+  --input config/fleet-readiness.example.json \
+  --expected-policy-projection-sha256 "$CONTROLLER_POLICY_PROJECTION_SHA256" \
+  --json
+```
+
+The compiler is pure and performs no Cloudflare, Google, D1, Apple Mail, or
+external-recipient action. Its input carries only hashed domain and route
+identities plus hash-bound receipts. The compiler canonicalizes the sorted
+route definitions and recomputes the closed digest of the body-free
+policy-projection inventory receipt. The nested receipt digest must equal a
+separate exact digest supplied by the controller through
+`--expected-policy-projection-sha256`; the compiler never derives that trust
+input from its JSON input. Root binding, route inventory, nested receipt, and
+independent controller digest must therefore agree on the exact route-set
+digest and expected count. Editing and coherently rehashing both the route
+array and evidence array does not erase a route from the controller-bound
+projection. Every receipt is bound to its route and domain;
+mail-path receipts additionally share one unique route-specific golden-thread
+digest. The output keeps these eight planes
+independent and ordered: `configured`, `cloudflare_active`,
+`inbound_provider_accepted`, `inbox_received`, `reply_authorized`,
+`outbound_provider_accepted`, `recipient_delivered`, and `privacy_proven`.
+Evidence at a later plane never fills an earlier one. A route's first blocker
+is the earliest failed plane; the fleet's route blocker is selected by plane
+order and then route digest so array ordering cannot change the controller
+handoff.
+
+Freshness uses the compiler's runtime clock and a reviewed fixed fifteen-minute
+window. Input cannot select its own evaluation time or freshness threshold.
+Golden-thread observations must also preserve causal order from inbound
+provider acceptance through inbox receipt, reply authorization, outbound
+acceptance, recipient delivery, and privacy observation.
+
+`full_coverage_proven` requires a complete enrollment inventory, no scheduled
+or pending decision, a `full_policy` route inventory, an evidence row for every
+enrolled route, coherent checkout/tree/policy/desired-state/enrollment/route
+inventory transaction bindings, and fresh proof for every required plane. A
+canary remains useful route evidence but cannot authorize the fleet. Excluded
+domains stay visible without becoming failed routes. The `inbound_only_v1`
+contract is restricted to sink routes. It requires an explicit unexpired
+graduation contract whose digest is recomputed over its closed fields and route
+identity, plus explicit `not_applicable` receipts for reply authorization,
+outbound acceptance, recipient delivery, and privacy. Omission never inflates
+readiness. Only the closed failure codes `private_identity_exposed` and
+`wrong_public_identity` kill a route; other failures remain blocked.
+
+The AC-62 fleet counts remain plane-specific: configured, Cloudflare-active,
+inbox-received, reply-proven, and failed-or-stale. A route may contribute to a
+higher-plane count while an earlier plane is missing because the compiler
+reports observations without inferring them.
+
+The tracked schema and example describe the interchange boundary. Private
+instances build ignored input artifacts from their own route compiler and
+receipt collectors; the public example is not live evidence.
+
 The horizontal verifier is the local command surface for proving that the mail
 desk is one coherent system instead of a pile of individually green checks.
 

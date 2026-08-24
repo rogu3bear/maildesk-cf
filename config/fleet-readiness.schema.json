@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/maildesk/fleet-readiness.schema.json",
+  "title": "Maildesk body-free fleet readiness compiler input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "binding", "enrollment", "route_inventory", "route_evidence"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "binding": { "$ref": "#/$defs/binding" },
+    "enrollment": { "$ref": "#/$defs/enrollment_report" },
+    "route_inventory": { "$ref": "#/$defs/route_inventory" },
+    "route_evidence": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/route_evidence" }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,127}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction_sha256", "checkout_sha256", "tree_sha256", "policy_sha256", "desired_state_sha256", "enrollment_sha256", "route_inventory_sha256"],
+      "properties": {
+        "transaction_sha256": { "$ref": "#/$defs/digest" },
+        "checkout_sha256": { "$ref": "#/$defs/digest" },
+        "tree_sha256": { "$ref": "#/$defs/digest" },
+        "policy_sha256": { "$ref": "#/$defs/digest" },
+        "desired_state_sha256": { "$ref": "#/$defs/digest" },
+        "enrollment_sha256": { "$ref": "#/$defs/digest" },
+        "route_inventory_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "enrollment_blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plane", "code"],
+      "properties": { "plane": { "const": "enrollment" }, "code": { "$ref": "#/$defs/code" } }
+    },
+    "enrollment_domain_base": {
+      "type": "object",
+      "required": ["domain_sha256", "decision", "registrar_custody", "desired_inbound_provider", "active_policy", "configured", "reason_code", "blocker_code", "decision_owner_ref_sha256", "first_blocker"],
+      "properties": {
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "registrar_custody": { "enum": ["cloudflare", "external", "unknown"] },
+        "desired_inbound_provider": { "type": ["string", "null"] },
+        "active_policy": { "type": "boolean" },
+        "configured": { "type": "boolean" },
+        "reason_code": { "oneOf": [{ "$ref": "#/$defs/code" }, { "type": "null" }] },
+        "blocker_code": { "oneOf": [{ "$ref": "#/$defs/code" }, { "type": "null" }] },
+        "decision_owner_ref_sha256": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "first_blocker": { "oneOf": [{ "$ref": "#/$defs/enrollment_blocker" }, { "type": "null" }] }
+      }
+    },
+    "enrolled_domain": {
+      "allOf": [
+        { "$ref": "#/$defs/enrollment_domain_base" },
+        {
+          "type": "object",
+          "required": ["decision"],
+          "properties": {
+            "decision": { "const": "enrolled" },
+            "desired_inbound_provider": { "const": "cloudflare_email_routing" },
+            "active_policy": { "const": true },
+            "configured": { "const": true },
+            "reason_code": { "type": "null" },
+            "blocker_code": { "type": "null" },
+            "decision_owner_ref_sha256": { "type": "null" },
+            "first_blocker": { "type": "null" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "scheduled_domain": {
+      "allOf": [
+        { "$ref": "#/$defs/enrollment_domain_base" },
+        {
+          "type": "object",
+          "required": ["decision"],
+          "properties": {
+            "decision": { "const": "scheduled_for_migration" },
+            "desired_inbound_provider": { "type": "string", "minLength": 1 },
+            "active_policy": { "const": true },
+            "configured": { "const": true },
+            "reason_code": { "type": "null" },
+            "blocker_code": { "$ref": "#/$defs/code" },
+            "decision_owner_ref_sha256": { "type": "null" },
+            "first_blocker": { "$ref": "#/$defs/enrollment_blocker" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "excluded_domain": {
+      "allOf": [
+        { "$ref": "#/$defs/enrollment_domain_base" },
+        {
+          "type": "object",
+          "required": ["decision"],
+          "properties": {
+            "decision": { "const": "intentionally_excluded" },
+            "desired_inbound_provider": { "type": "null" },
+            "active_policy": { "const": false },
+            "configured": { "const": false },
+            "reason_code": { "$ref": "#/$defs/code" },
+            "blocker_code": { "type": "null" },
+            "decision_owner_ref_sha256": { "type": "null" },
+            "first_blocker": { "type": "null" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "pending_domain": {
+      "allOf": [
+        { "$ref": "#/$defs/enrollment_domain_base" },
+        {
+          "type": "object",
+          "required": ["decision"],
+          "properties": {
+            "decision": { "const": "pending_owner_decision" },
+            "desired_inbound_provider": { "type": "null" },
+            "active_policy": { "const": false },
+            "configured": { "const": false },
+            "reason_code": { "type": "null" },
+            "blocker_code": { "type": "null" },
+            "decision_owner_ref_sha256": { "$ref": "#/$defs/digest" },
+            "first_blocker": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["plane", "code"],
+              "properties": { "plane": { "const": "enrollment" }, "code": { "const": "owner_decision_pending" } }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "enrollment_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "performed", "body_free", "enrollment_sha256", "status", "counts", "domains"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "maildesk_domain_enrollment_report" },
+        "performed": { "const": false },
+        "body_free": { "const": true },
+        "enrollment_sha256": { "$ref": "#/$defs/digest" },
+        "status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ledger_valid", "associated_domain_inventory_complete", "all_active_domains_classified", "full_routing_coverage_claim_allowed", "inventory_blocker_code"],
+          "properties": {
+            "ledger_valid": { "const": true },
+            "associated_domain_inventory_complete": { "type": "boolean" },
+            "all_active_domains_classified": { "const": true },
+            "full_routing_coverage_claim_allowed": { "const": false },
+            "inventory_blocker_code": { "oneOf": [{ "$ref": "#/$defs/code" }, { "type": "null" }] }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total_known_domains", "enrolled_domains", "scheduled_domains", "excluded_domains", "pending_domains", "active_policy_domains", "desired_state_domains"],
+          "properties": {
+            "total_known_domains": { "type": "integer", "minimum": 0 },
+            "enrolled_domains": { "type": "integer", "minimum": 0 },
+            "scheduled_domains": { "type": "integer", "minimum": 0 },
+            "excluded_domains": { "type": "integer", "minimum": 0 },
+            "pending_domains": { "type": "integer", "minimum": 0 },
+            "active_policy_domains": { "type": "integer", "minimum": 0 },
+            "desired_state_domains": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "domains": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 500,
+          "items": { "oneOf": [{ "$ref": "#/$defs/enrolled_domain" }, { "$ref": "#/$defs/scheduled_domain" }, { "$ref": "#/$defs/excluded_domain" }, { "$ref": "#/$defs/pending_domain" }] }
+        }
+      }
+    },
+    "graduation_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "route_sha256", "contract_sha256", "reason_code", "owner_ref_sha256", "expires_at"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "contract_sha256": { "$ref": "#/$defs/digest" },
+        "reason_code": { "$ref": "#/$defs/code" },
+        "owner_ref_sha256": { "$ref": "#/$defs/digest" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "bidirectional_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_sha256", "domain_sha256", "route_kind", "delivery_contract"],
+      "properties": {
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "route_kind": { "enum": ["role_alias", "personal_alias", "catch_all"] },
+        "delivery_contract": { "const": "bidirectional_reply" }
+      }
+    },
+    "sink_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_sha256", "domain_sha256", "route_kind", "delivery_contract", "graduation_contract"],
+      "properties": {
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "route_kind": { "const": "sink" },
+        "delivery_contract": { "const": "inbound_only_v1" },
+        "graduation_contract": { "$ref": "#/$defs/graduation_contract" }
+      }
+    },
+    "policy_projection_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "performed", "body_free", "configured_route_count", "route_set_sha256", "evidence_sha256", "binding"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "maildesk_policy_projection_inventory_receipt" },
+        "performed": { "const": false },
+        "body_free": { "const": true },
+        "configured_route_count": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "route_set_sha256": { "$ref": "#/$defs/digest" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" }
+      }
+    },
+    "route_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "coverage_mode", "declared_route_count", "route_set_sha256", "binding", "policy_projection_receipt", "routes"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "coverage_mode": { "enum": ["full_policy", "canary"] },
+        "declared_route_count": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "route_set_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" },
+        "policy_projection_receipt": { "$ref": "#/$defs/policy_projection_receipt" },
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": { "oneOf": [{ "$ref": "#/$defs/bidirectional_route" }, { "$ref": "#/$defs/sink_route" }] }
+        }
+      }
+    },
+    "control_proven_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source", "observed_at", "evidence_sha256", "route_sha256", "domain_sha256", "binding"],
+      "properties": {
+        "state": { "const": "proven" },
+        "source": { "enum": ["policy_projection", "cloudflare_control_plane"] },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" }
+      }
+    },
+    "control_failed_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source", "observed_at", "evidence_sha256", "route_sha256", "domain_sha256", "binding", "blocker_code"],
+      "properties": {
+        "state": { "const": "failed" },
+        "source": { "enum": ["policy_projection", "cloudflare_control_plane"] },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" },
+        "blocker_code": { "$ref": "#/$defs/code" }
+      }
+    },
+    "golden_proven_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source", "observed_at", "evidence_sha256", "route_sha256", "domain_sha256", "golden_thread_sha256", "binding"],
+      "properties": {
+        "state": { "const": "proven" },
+        "source": { "enum": ["d1_inbound_audit", "apple_mail_inbox_receipt", "d1_reply_authorization", "outbound_provider_receipt", "external_recipient_receipt", "privacy_non_exposure_receipt"] },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "golden_thread_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" }
+      }
+    },
+    "golden_failed_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source", "observed_at", "evidence_sha256", "route_sha256", "domain_sha256", "golden_thread_sha256", "binding", "blocker_code"],
+      "properties": {
+        "state": { "const": "failed" },
+        "source": { "enum": ["d1_inbound_audit", "apple_mail_inbox_receipt", "d1_reply_authorization", "outbound_provider_receipt", "external_recipient_receipt", "privacy_non_exposure_receipt"] },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "golden_thread_sha256": { "$ref": "#/$defs/digest" },
+        "binding": { "$ref": "#/$defs/binding" },
+        "blocker_code": { "$ref": "#/$defs/code" }
+      }
+    },
+    "control_receipt": { "oneOf": [{ "$ref": "#/$defs/control_proven_receipt" }, { "$ref": "#/$defs/control_failed_receipt" }] },
+    "golden_receipt": { "oneOf": [{ "$ref": "#/$defs/golden_proven_receipt" }, { "$ref": "#/$defs/golden_failed_receipt" }] },
+    "not_applicable_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "source", "route_sha256", "domain_sha256", "golden_thread_sha256", "evidence_sha256", "graduation_contract_sha256"],
+      "properties": {
+        "state": { "const": "not_applicable" },
+        "source": { "const": "graduation_contract" },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "golden_thread_sha256": { "$ref": "#/$defs/digest" },
+        "evidence_sha256": { "$ref": "#/$defs/digest" },
+        "graduation_contract_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "planes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "configured": { "$ref": "#/$defs/control_receipt" },
+        "cloudflare_active": { "$ref": "#/$defs/control_receipt" },
+        "inbound_provider_accepted": { "$ref": "#/$defs/golden_receipt" },
+        "inbox_received": { "$ref": "#/$defs/golden_receipt" },
+        "reply_authorized": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
+        "outbound_provider_accepted": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
+        "recipient_delivered": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
+        "privacy_proven": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] }
+      }
+    },
+    "route_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "route_sha256", "domain_sha256", "golden_thread_sha256", "planes"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "route_sha256": { "$ref": "#/$defs/digest" },
+        "domain_sha256": { "$ref": "#/$defs/digest" },
+        "golden_thread_sha256": { "$ref": "#/$defs/digest" },
+        "planes": { "$ref": "#/$defs/planes" }
+      }
+    }
+  }
+}
