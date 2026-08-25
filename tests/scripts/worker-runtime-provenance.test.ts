@@ -67,7 +67,7 @@ describe("Worker runtime provenance", () => {
     expect(drifted.status).toBe("drift");
   });
 
-  test("rejects traffic splits, mismatched detail, and noncanonical annotations", () => {
+  test("rejects traffic splits, mismatched detail, and noncanonical version annotations", () => {
     const split = deploymentResult(candidateHead, artifactSha256);
     split.result.deployments[0].versions = [
       { version_id: versionId, percentage: 50 },
@@ -85,15 +85,25 @@ describe("Worker runtime provenance", () => {
       versionDetail: wrongVersion,
     })).toThrow("version detail does not match");
 
-    const extraText = deploymentResult(candidateHead, artifactSha256);
-    extraText.result.deployments[0].annotations["workers/message"] += " extra";
+    const deploymentNote = deploymentResult(candidateHead, artifactSha256);
+    deploymentNote.result.deployments[0].annotations["workers/message"] = "promote audited version";
+    expect(projectWorkerRuntimeProvenance({
+      scriptName: "maildesk-relay-router",
+      candidateHead,
+      expectedArtifactSha256: artifactSha256,
+      deployments: deploymentNote,
+      versionDetail: versionDetail(candidateHead, artifactSha256),
+    }).status).toBe("exact");
+
+    const extraText = versionDetail(candidateHead, artifactSha256);
+    extraText.result.annotations["workers/message"] += " extra";
     expect(() => projectWorkerRuntimeProvenance({
       scriptName: "maildesk-relay-router",
       candidateHead,
       expectedArtifactSha256: artifactSha256,
-      deployments: extraText,
-      versionDetail: versionDetail(candidateHead, artifactSha256),
-    })).toThrow("deployment annotation is malformed");
+      deployments: deploymentResult(candidateHead, artifactSha256),
+      versionDetail: extraText,
+    })).toThrow("version detail annotation is malformed");
   });
 
   test("hashes the complete main and assets artifact set using repository-relative paths", () => {

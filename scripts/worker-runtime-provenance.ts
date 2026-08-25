@@ -41,8 +41,6 @@ interface ProvenanceInput {
 interface ActiveDeployment {
   versionId: string;
   message: string;
-  sourceSha: string;
-  artifactSha256: string;
 }
 
 export function deploymentArtifactSha256(repositoryRoot: string, configPath: string): string {
@@ -96,19 +94,19 @@ export function projectWorkerRuntimeProvenance(input: ProvenanceInput): WorkerRu
   }
   const deployment = activeDeployment(input.deployments);
   const detail = versionDetail(input.versionDetail);
-  if (detail.versionId !== deployment.versionId || detail.message !== deployment.message) {
+  if (detail.versionId !== deployment.versionId) {
     throw new Error("Worker version detail does not match the active deployment");
   }
-  const artifactMatches = deployment.artifactSha256 === input.expectedArtifactSha256;
-  const sourceMatches = deployment.sourceSha === input.candidateHead;
+  const artifactMatches = detail.artifactSha256 === input.expectedArtifactSha256;
+  const sourceMatches = detail.sourceSha === input.candidateHead;
   return {
     schema_version: 1,
     status: artifactMatches ? sourceMatches ? "exact" : "artifact_equivalent" : "drift",
     script_name: input.scriptName,
     candidate_source_sha: input.candidateHead,
-    deployed_source_sha: deployment.sourceSha,
+    deployed_source_sha: detail.sourceSha,
     expected_artifact_sha256: input.expectedArtifactSha256,
-    deployed_artifact_sha256: deployment.artifactSha256,
+    deployed_artifact_sha256: detail.artifactSha256,
     active_version_sha256: sha256(deployment.versionId),
     script_etag_sha256: detail.scriptEtag,
     deployment_message_sha256: sha256(deployment.message),
@@ -137,19 +135,18 @@ function activeDeployment(value: unknown): ActiveDeployment {
     throw new Error("Worker deployment annotation is missing");
   }
   const message = annotations["workers/message"];
-  const match = DEPLOYMENT_MESSAGE.exec(message);
-  if (!match) throw new Error("Worker deployment annotation is malformed");
+  if (!validName(message)) throw new Error("Worker deployment annotation is malformed");
   return {
     versionId: active[0].version_id as string,
     message,
-    sourceSha: match[1],
-    artifactSha256: match[2],
   };
 }
 
 function versionDetail(value: unknown): {
   versionId: string;
   message: string;
+  sourceSha: string;
+  artifactSha256: string;
   scriptEtag: string;
   metadataSource: string;
 } {
@@ -163,7 +160,9 @@ function versionDetail(value: unknown): {
   if (!isRecord(result.annotations) || typeof result.annotations["workers/message"] !== "string") {
     throw new Error("Worker version detail annotation is missing");
   }
-  if (!DEPLOYMENT_MESSAGE.test(result.annotations["workers/message"])) {
+  const message = result.annotations["workers/message"];
+  const match = DEPLOYMENT_MESSAGE.exec(message);
+  if (!match) {
     throw new Error("Worker version detail annotation is malformed");
   }
   const script = isRecord(result.resources) && isRecord(result.resources.script)
@@ -180,7 +179,9 @@ function versionDetail(value: unknown): {
   }
   return {
     versionId: result.id,
-    message: result.annotations["workers/message"],
+    message,
+    sourceSha: match[1],
+    artifactSha256: match[2],
     scriptEtag: script.etag,
     metadataSource,
   };

@@ -287,9 +287,11 @@ compared with the checked-in role-specific Wrangler contracts; Queue consumer
 target, batch size, concurrency, retries, and DLQ are compared with the outbound
 Wrangler contract. The collector independently reproduces cfctl's complete,
 repository-relative artifact-set digest from each Wrangler `main` and assets
-root. It accepts exactly one 100% active version only when the deployment and
-version-detail annotations agree on the canonical
-`source=<git-sha> artifact-sha256=<digest>` message. A matching source and artifact is `exact`;
+root. It accepts exactly one 100% active deployment target and then requires
+that version detail to carry the canonical
+`source=<git-sha> artifact-sha256=<digest>` message. Deployment annotations may
+describe the promotion and are retained only by hash; they do not override the
+selected version's provenance. A matching source and artifact is `exact`;
 an identical artifact built from a later documentation- or proof-only commit is
 `artifact_equivalent`; any artifact mismatch is `drift`. The retained projection
 contains hashes and status only—never the raw provider response, version ID,
