@@ -200,7 +200,9 @@ blueprint described in
 does not create child operation IDs or perform any Cloudflare action.
 `bun run receipt:maildesk` runs the non-mutating collect, verify, and proof-plan
 workflow and writes the receipt artifacts under `var/`. Pass
-`--summary <path>` to persist the compact readiness handoff JSON. Pass
+`--summary <path>` to persist the compact readiness handoff JSON. The receipt,
+proof plan, and summary carry one body-free Git HEAD/tree/dirty binding so a
+protected consumer can reject stale, mismatched, or uncommitted candidates. Pass
 `--plan-manifest <path> --require-plan-ready` when the receipt should also prove
 that every Cloudflare sender-domain blocker has an exact reviewed PlanV2
 operation.

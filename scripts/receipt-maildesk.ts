@@ -1,8 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { collectGitCandidate, type GitCandidate } from "./git-candidate";
 
 interface Receipt {
+  candidate?: GitCandidate;
+  candidate_sha256?: string;
   status?: {
     local_truth_ok?: boolean;
     edge_ready?: boolean;
@@ -14,6 +17,8 @@ interface Receipt {
 }
 
 interface ProofPlan {
+  candidate?: GitCandidate;
+  candidate_sha256?: string;
   summary?: {
     action_count?: number;
     inbound_probe_count?: number;
@@ -61,7 +66,9 @@ const verifyArgs = [
   ...(requireLive ? ["--require-live"] : []),
 ];
 const verify = runCaptured("verify maildesk receipt", ["run", "scripts/verify-maildesk.ts", "--", ...verifyArgs]);
-const receipt = parseJson<Receipt>(verify.stdout, "verify maildesk receipt");
+const verifiedReceipt = parseJson<Receipt>(verify.stdout, "verify maildesk receipt");
+const candidateBinding = collectGitCandidate(root);
+const receipt: Receipt = { ...verifiedReceipt, ...candidateBinding };
 writeJson(receiptPath, receipt);
 
 const planArgs = [
@@ -77,6 +84,7 @@ const proofPlan = parseJson<ProofPlan>(planResult.stdout, "plan mail proof gaps"
 writeJson(planPath, proofPlan);
 
 const summary = {
+  ...candidateBinding,
   evidence_path: skipCollect && !explicitEvidencePath ? null : relativePath(resolve(root, evidencePath)),
   receipt_path: relativePath(resolve(root, receiptPath)),
   plan_path: relativePath(resolve(root, planPath)),

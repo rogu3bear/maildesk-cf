@@ -137,12 +137,20 @@ describe("maildesk receipt workflow", () => {
 
     expect(result.status).toBe(0);
     const summary = JSON.parse(result.stdout) as {
+      candidate?: { head: string; tree: string; dirty: boolean };
+      candidate_sha256?: string;
       sender_domain_blocked_count?: number;
       sender_domain_plan_ready_count?: number;
       sender_domain_plan_missing_count?: number;
     };
     expect(summary).toMatchObject({
       summary_path: summaryPath,
+      candidate: {
+        head: expect.stringMatching(/^[a-f0-9]{40}$/),
+        tree: expect.stringMatching(/^[a-f0-9]{40}$/),
+        dirty: expect.any(Boolean),
+      },
+      candidate_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sender_domain_blocked_count: 1,
       sender_domain_plan_ready_count: 1,
       sender_domain_plan_missing_count: 0,
@@ -150,18 +158,24 @@ describe("maildesk receipt workflow", () => {
 
     const writtenSummary = JSON.parse(readFileSync(summaryPath, "utf8")) as {
       summary_path?: string;
+      candidate?: { head: string; tree: string; dirty: boolean };
+      candidate_sha256?: string;
       sender_domain_blocked_count?: number;
       sender_domain_plan_ready_count?: number;
       sender_domain_plan_missing_count?: number;
     };
     expect(writtenSummary).toMatchObject({
       summary_path: summaryPath,
+      candidate: summary.candidate,
+      candidate_sha256: summary.candidate_sha256,
       sender_domain_blocked_count: 1,
       sender_domain_plan_ready_count: 1,
       sender_domain_plan_missing_count: 0,
     });
 
     const plan = JSON.parse(readFileSync(planPath, "utf8")) as {
+      candidate?: { head: string; tree: string; dirty: boolean };
+      candidate_sha256?: string;
       summary: {
         sender_domain_blocked_count?: number;
         sender_domain_plan_ready_count?: number;
@@ -173,6 +187,19 @@ describe("maildesk receipt workflow", () => {
       sender_domain_blocked_count: 1,
       sender_domain_plan_ready_count: 1,
       sender_domain_plan_missing_count: 0,
+    });
+    expect(plan).toMatchObject({
+      candidate: summary.candidate,
+      candidate_sha256: summary.candidate_sha256,
+    });
+
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as {
+      candidate?: { head: string; tree: string; dirty: boolean };
+      candidate_sha256?: string;
+    };
+    expect(receipt).toMatchObject({
+      candidate: summary.candidate,
+      candidate_sha256: summary.candidate_sha256,
     });
     expect(plan.actions.find((action) => action.operation_id)).toMatchObject({
       operation_id: "20260701T000000Z-00000-tenant",

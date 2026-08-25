@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import { admitGitCandidateBinding, type GitCandidate } from "./git-candidate";
 import {
   planLifecycle,
   senderDomainPlanManifestItem,
@@ -12,6 +13,8 @@ import {
 } from "./cfctl-v2-command-contract";
 
 interface Receipt {
+  candidate?: GitCandidate;
+  candidate_sha256?: string;
   rows: DomainRow[];
   gaps: ReceiptGap[];
 }
@@ -68,6 +71,9 @@ if (!receiptPath) {
 
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const receipt = readJson<Receipt>(resolve(root, receiptPath));
+const candidateBinding = receipt.candidate === undefined && receipt.candidate_sha256 === undefined
+  ? null
+  : admitGitCandidateBinding(receipt.candidate, receipt.candidate_sha256);
 const policy = readJson<PolicyFile>(policyPath);
 const planManifestPath = argValue("--plan-manifest");
 if (
@@ -81,6 +87,7 @@ const planManifest = loadPlanManifest(planManifestPath);
 const actions = buildActions(receipt, policy);
 const senderDomainPlans = senderDomainPlanSummary(actions);
 const plan = {
+  ...(candidateBinding ?? {}),
   generated_at: new Date().toISOString(),
   receipt_path: relativePath(resolve(root, receiptPath)),
   policy_path: relativePath(policyPath),
