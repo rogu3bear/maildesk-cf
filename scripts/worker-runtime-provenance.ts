@@ -53,12 +53,12 @@ export function deploymentArtifactSha256(repositoryRoot: string, configPath: str
   const parsed = Bun.TOML.parse(readFileSync(config, "utf8"));
   if (!isRecord(parsed)) throw new Error("Wrangler config root must be an object");
 
-  const artifactRoots = new Set<string>();
+  const artifactPaths = new Set<string>();
   const main = requiredString(parsed.main, "Wrangler main");
   const mainPath = containedRealPath(root, resolve(dirname(config), main));
   const mainMetadata = lstatSync(mainPath);
   if (mainMetadata.isSymbolicLink()) throw new Error("artifact paths must not be symbolic links");
-  artifactRoots.add(mainMetadata.isDirectory() ? mainPath : dirname(mainPath));
+  artifactPaths.add(mainPath);
 
   if (parsed.assets !== undefined) {
     if (!isRecord(parsed.assets)) throw new Error("Wrangler assets must be an object");
@@ -67,12 +67,12 @@ export function deploymentArtifactSha256(repositoryRoot: string, configPath: str
     if (!lstatSync(assetsPath).isDirectory()) {
       throw new Error("Wrangler assets.directory must be a directory");
     }
-    artifactRoots.add(assetsPath);
+    artifactPaths.add(assetsPath);
   }
 
   const files = new Map<string, string>();
-  for (const artifactRoot of [...artifactRoots].sort()) {
-    collectArtifactFiles(root, artifactRoot, files);
+  for (const artifactPath of [...artifactPaths].sort()) {
+    collectArtifactPath(root, artifactPath, files);
   }
   if (files.size === 0) throw new Error("Worker deployment artifact set is empty");
   const manifest = [...files]
@@ -187,19 +187,31 @@ function versionDetail(value: unknown): {
   };
 }
 
+function collectArtifactPath(root: string, artifactPath: string, files: Map<string, string>): void {
+  const metadata = lstatSync(artifactPath);
+  if (metadata.isSymbolicLink()) throw new Error("artifact paths must not be symbolic links");
+  if (metadata.isFile()) {
+    const real = containedRealPath(root, artifactPath);
+    const logical = relative(root, real).split(sep).join("/");
+    files.set(logical, sha256(readFileSync(real)));
+    return;
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error("Worker deployment artifact contains a non-file entry");
+  }
+  collectArtifactFiles(root, artifactPath, files);
+}
+
 function collectArtifactFiles(root: string, directory: string, files: Map<string, string>): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
     if (entry.isSymbolicLink()) throw new Error("artifact paths must not be symbolic links");
     if (entry.name === ".git") throw new Error("artifact path must not contain Git metadata");
     if (entry.isDirectory()) {
-      collectArtifactFiles(root, containedRealPath(root, path), files);
+      collectArtifactPath(root, containedRealPath(root, path), files);
       continue;
     }
-    if (!entry.isFile()) throw new Error("Worker deployment artifact contains a non-file entry");
-    const real = containedRealPath(root, path);
-    const logical = relative(root, real).split(sep).join("/");
-    files.set(logical, sha256(readFileSync(real)));
+    collectArtifactPath(root, path, files);
   }
 }
 
