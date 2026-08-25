@@ -117,10 +117,14 @@ describe("Worker runtime provenance", () => {
       "",
     ].join("\n"));
     writeFileSync(join(root, "build", "index.js"), "main\n");
+    writeFileSync(join(root, "build", "Z-module.js"), "upper\n");
+    writeFileSync(join(root, "build", "a-module.js"), "lower\n");
     writeFileSync(join(root, "build", "nested", "module.js"), "nested\n");
     writeFileSync(join(root, "site", "index.html"), "site\n");
 
     const manifest = [
+      `${sha256("upper\n")}  build/Z-module.js`,
+      `${sha256("lower\n")}  build/a-module.js`,
       `${sha256("main\n")}  build/index.js`,
       `${sha256("nested\n")}  build/nested/module.js`,
       `${sha256("site\n")}  site/index.html`,

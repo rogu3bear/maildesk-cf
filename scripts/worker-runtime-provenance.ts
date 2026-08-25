@@ -71,12 +71,12 @@ export function deploymentArtifactSha256(repositoryRoot: string, configPath: str
   }
 
   const files = new Map<string, string>();
-  for (const artifactRoot of [...artifactRoots].sort()) {
+  for (const artifactRoot of [...artifactRoots].sort(comparePaths)) {
     collectArtifactFiles(root, artifactRoot, files);
   }
   if (files.size === 0) throw new Error("Worker deployment artifact set is empty");
   const manifest = [...files]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => comparePaths(left, right))
     .map(([path, digest]) => `${digest}  ${path}\n`)
     .join("");
   return sha256(manifest);
@@ -217,6 +217,10 @@ function requiredString(value: unknown, label: string): string {
     throw new Error(`${label} must be a non-empty string`);
   }
   return value;
+}
+
+function comparePaths(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function validName(value: string): boolean {
