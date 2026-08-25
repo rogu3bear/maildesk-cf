@@ -106,7 +106,7 @@ describe("Worker runtime provenance", () => {
     })).toThrow("version detail annotation is malformed");
   });
 
-  test("hashes the exact main file and assets without unrelated main-directory siblings", () => {
+  test("hashes the complete main and assets artifact set using repository-relative paths", () => {
     const root = mkdtempSync(join(tmpdir(), "maildesk-artifact-set-"));
     mkdirSync(join(root, "build", "nested"), { recursive: true });
     mkdirSync(join(root, "site"), { recursive: true });
@@ -122,6 +122,7 @@ describe("Worker runtime provenance", () => {
 
     const manifest = [
       `${sha256("main\n")}  build/index.js`,
+      `${sha256("nested\n")}  build/nested/module.js`,
       `${sha256("site\n")}  site/index.html`,
       "",
     ].join("\n");
