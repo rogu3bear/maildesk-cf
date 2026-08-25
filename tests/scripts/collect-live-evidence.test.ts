@@ -4,6 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { deploymentArtifactSha256 } from "../../scripts/worker-runtime-provenance";
 
 const root = resolve(import.meta.dir, "../..");
 
@@ -54,6 +55,20 @@ case "$*" in
   *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
   *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
   *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
+  *"call worker-deployments-list-deployments"*)
+    case "$*" in
+      *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
+      *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
+      *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
+    esac
+    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+  *"call worker-versions-get-version-detail"*)
+    case "$*" in
+      *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
+      *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
+      *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
+    esac
+    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
   *"call d1-list-databases"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
   *"call r2-list-buckets"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
   *"call queues-list-consumers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
@@ -102,6 +117,7 @@ exit 0
           MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
+          ...workerRuntimeFixtureEnv(),
         },
       },
     );
@@ -113,6 +129,7 @@ exit 0
       active_policy?: Record<string, unknown>;
       cfctl_maildesk?: {
         workers?: Record<string, string>;
+        worker_deployments?: Record<string, { status?: string; provider_output_retained?: boolean }>;
         storage?: Record<string, string>;
         domains?: Record<string, { catch_all?: string }>;
       };
@@ -161,6 +178,10 @@ exit 0
       relay_outbound: "ok",
       routing_health: "ok",
     });
+    expect(Object.values(evidence.cfctl_maildesk?.worker_deployments ?? {})).toHaveLength(3);
+    expect(Object.values(evidence.cfctl_maildesk?.worker_deployments ?? {}).every((deployment) =>
+      deployment.status === "exact" && deployment.provider_output_retained === false
+    )).toBe(true);
     expect(evidence.cfctl_maildesk?.storage).toEqual({
       d1_database: "ok",
       r2_policy_bucket: "ok",
@@ -200,6 +221,8 @@ exit 0
       "email-routing-routing-rules-get-catch-all-rule",
       "listWorkers",
       "worker-script-get-settings",
+      "worker-deployments-list-deployments",
+      "worker-versions-get-version-detail",
       "d1-list-databases",
       "r2-list-buckets",
       "queues-list",
@@ -254,6 +277,7 @@ exit 0
           MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
+          ...workerRuntimeFixtureEnv(),
         },
       },
     );
@@ -307,6 +331,7 @@ exit 0
           MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
+          ...workerRuntimeFixtureEnv(),
         },
       },
     );
@@ -395,6 +420,7 @@ JSON
           GOOGLE_ADMIN_BIN: googleAdmin,
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
+          ...workerRuntimeFixtureEnv(),
         },
       },
     );
@@ -712,6 +738,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
           MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_PROVIDER_LOG: providerLog,
+          ...workerRuntimeFixtureEnv(),
         },
       },
     );
@@ -885,7 +912,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
     });
   }, 20_000);
 
-  test("dark acceptance names every unsupported capability and surface as a typed blocker", () => {
+  test("dark acceptance admits Worker deployment identity and types every remaining blocker", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-dark-"));
     const fixture = createCoverageFixture(dir);
     const { result, out } = runCoverageCollection(fixture, dir, {
@@ -903,6 +930,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
           desired_scope_complete: boolean;
           acceptance_complete: boolean;
           missing_capability_ids: string[];
+          successful_acceptance_surfaces: string[];
           missing_acceptance_surfaces: string[];
           blockers: Array<{ code: string; capability_id?: string; surface?: string }>;
         };
@@ -924,11 +952,13 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
       "access-policies-list-access-app-policies",
       "r2-get-bucket-lifecycle-configuration",
     ]);
+    expect(evidence.cfctl_readback.coverage.successful_acceptance_surfaces).toEqual([
+      "worker_deployment_identity",
+    ]);
     expect(evidence.cfctl_readback.coverage.missing_acceptance_surfaces).toEqual([
       "access_application",
       "access_policies",
       "r2_spool_lifecycle",
-      "worker_deployment_identity",
       "worker_route_identity",
       "queue_backlog",
       "dead_letter_queue_backlog",
@@ -1639,6 +1669,19 @@ function createCoverageFixture(dir: string) {
   return { domains, desiredPath, policyPath, scopeManifestPath };
 }
 
+function workerRuntimeFixtureEnv(): Record<string, string> {
+  const head = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).stdout.trim();
+  return {
+    MAILDESK_TEST_HEAD: head,
+    MAILDESK_TEST_ROUTER_ARTIFACT: deploymentArtifactSha256(root, "wrangler.mail-router.toml"),
+    MAILDESK_TEST_OUTBOUND_ARTIFACT: deploymentArtifactSha256(root, "wrangler.mail-outbound.toml"),
+    MAILDESK_TEST_HEALTH_ARTIFACT: deploymentArtifactSha256(root, "wrangler.routing-health.toml"),
+  };
+}
+
 function writeCoverageCfctl(path: string) {
   writeFileSync(
     path,
@@ -1672,6 +1715,20 @@ case "$*" in
   *"call r2-list-buckets"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
   *"call queues-list-consumers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
   *"call queues-list"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
+  *"call worker-deployments-list-deployments"*)
+    case "$*" in
+      *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
+      *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
+      *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
+    esac
+    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+  *"call worker-versions-get-version-detail"*)
+    case "$*" in
+      *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
+      *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
+      *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
+    esac
+    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' >&2; exit 1 ;;
 esac
 `,
@@ -1717,6 +1774,7 @@ function runCoverageCollection(
       ...process.env,
       MAILDESK_CFCTL_PROFILE: "profile-example",
       MAILDESK_TEST_CFCTL_LOG: log,
+      ...workerRuntimeFixtureEnv(),
       ...(options.denyDomain ? { MAILDESK_TEST_DENY_DOMAIN: options.denyDomain } : {}),
     },
   });

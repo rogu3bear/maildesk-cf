@@ -3,12 +3,20 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSyn
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
+import { collectGitCandidate } from "./git-candidate";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
+import {
+  activeWorkerVersionId,
+  deploymentArtifactSha256,
+  projectWorkerRuntimeProvenance,
+  type WorkerRuntimeProvenance,
+} from "./worker-runtime-provenance";
 import {
   type CfctlAcceptanceProfile,
   type CfctlCoverageBlocker,
   type CfctlReadbackCoverage,
   type CfctlReadbackMode,
+  type DarkAcceptanceSurface,
   DARK_ACCEPTANCE_CAPABILITY_IDS,
   DARK_ACCEPTANCE_SURFACES,
   coverageDomainSha256,
@@ -73,6 +81,7 @@ interface CfctlMaildeskEvidence {
   mail_ready?: boolean;
   domains?: Record<string, CfctlMaildeskDomainEvidence>;
   workers?: Record<string, Status>;
+  worker_deployments?: Record<string, WorkerRuntimeProvenance>;
   storage?: Record<string, Status>;
   sender_domains?: Record<string, Status>;
 }
@@ -688,6 +697,8 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     return incompleteReadback(profileId, accountId, receipts);
   }
   const workers: Record<string, Status> = {};
+  const workerDeployments: Record<string, WorkerRuntimeProvenance> = {};
+  const candidateHead = collectGitCandidate(root).candidate.head;
   for (const [role, worker] of Object.entries(desiredState.workers)) {
     const settingsCall = cfctlCall(
       "worker-script-get-settings",
@@ -699,10 +710,64 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     if (!settingsCall.ok) return incompleteReadback(profileId, accountId, receipts);
     const bindings = decodeWorkerBindings(settingsCall.result);
     if (!bindings) return malformedReadback(profileId, accountId, receipts, settingsCall.receipt);
-    workers[role] = workerNames.includes(worker.script_name) &&
+    const deploymentsCall = cfctlCall(
+      "worker-deployments-list-deployments",
+      profileId,
+      accountId,
+      [["account_id", accountId], ["script_name", worker.script_name]],
+    );
+    receipts.push(deploymentsCall.receipt);
+    if (!deploymentsCall.ok) return incompleteReadback(profileId, accountId, receipts);
+    let activeVersionId: string;
+    try {
+      activeVersionId = activeWorkerVersionId(deploymentsCall.result);
+    } catch {
+      deploymentsCall.receipt.ok = false;
+      deploymentsCall.receipt.error_code = "WORKER_RUNTIME_PROVENANCE_MALFORMED";
+      return incompleteReadback(profileId, accountId, receipts);
+    }
+    let expectedArtifactSha256: string;
+    try {
+      expectedArtifactSha256 = deploymentArtifactSha256(root, worker.config);
+    } catch {
+      receipts.push(failureReceipt(
+        `worker-artifact:${role}`,
+        false,
+        "LOCAL_WORKER_ARTIFACT_UNAVAILABLE",
+      ));
+      return incompleteReadback(profileId, accountId, receipts);
+    }
+    const versionCall = cfctlCall(
+      "worker-versions-get-version-detail",
+      profileId,
+      accountId,
+      [
+        ["account_id", accountId],
+        ["script_name", worker.script_name],
+        ["version_id", activeVersionId],
+      ],
+    );
+    receipts.push(versionCall.receipt);
+    if (!versionCall.ok) return incompleteReadback(profileId, accountId, receipts);
+    try {
+      workerDeployments[role] = projectWorkerRuntimeProvenance({
+        scriptName: worker.script_name,
+        candidateHead,
+        expectedArtifactSha256,
+        deployments: deploymentsCall.result,
+        versionDetail: versionCall.result,
+      });
+    } catch {
+      versionCall.receipt.ok = false;
+      versionCall.receipt.error_code = "WORKER_RUNTIME_PROVENANCE_MALFORMED";
+      return incompleteReadback(profileId, accountId, receipts);
+    }
+    const deploymentAccepted = workerDeployments[role].status === "exact" ||
+      workerDeployments[role].status === "artifact_equivalent";
+    workers[role] = workerNames.includes(worker.script_name) && deploymentAccepted &&
         workerBindingsMatch(bindings, expectedBindings[role] ?? [], d1Ids, queueIds)
       ? "ok"
-      : "missing";
+      : deploymentAccepted ? "missing" : "drift";
   }
 
   const storage: Record<string, Status> = {
@@ -717,12 +782,26 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     mail_ready: false,
     domains,
     workers,
+    worker_deployments: workerDeployments,
     storage,
     ...(senderMode === "cloudflare_email_service" ? { sender_domains: senderDomains } : {}),
   };
 
   return {
-    readback: buildCfctlReadback(true, true, true, profileId, accountId, receipts, zones),
+    readback: buildCfctlReadback(
+      true,
+      true,
+      true,
+      profileId,
+      accountId,
+      receipts,
+      zones,
+      Object.values(workerDeployments).every((deployment) =>
+          deployment.status === "exact" || deployment.status === "artifact_equivalent"
+        )
+        ? ["worker_deployment_identity"]
+        : [],
+    ),
     evidence: {
       zones: zones.sort(),
       email_routing: emailRouting,
@@ -740,6 +819,7 @@ function buildCfctlReadback(
   accountId: string | undefined,
   receipts: CfctlReadReceipt[],
   observedDomains: string[],
+  successfulAcceptanceSurfaces: DarkAcceptanceSurface[] = [],
 ): CfctlReadbackEvidence {
   const requiredCapabilityIds = requiredInventoryCapabilityIds();
   const failedCapabilityIds = unique(receipts
@@ -774,7 +854,10 @@ function buildCfctlReadback(
   const requiredAcceptanceSurfaces = readScope.profile === "dark_acceptance_v1"
     ? [...DARK_ACCEPTANCE_SURFACES]
     : [];
-  const missingAcceptanceSurfaces = [...requiredAcceptanceSurfaces];
+  const admittedAcceptanceSurfaces = successfulAcceptanceSurfaces
+    .filter((surface) => requiredAcceptanceSurfaces.includes(surface));
+  const missingAcceptanceSurfaces = requiredAcceptanceSurfaces
+    .filter((surface) => !admittedAcceptanceSurfaces.includes(surface));
   const blockers: CfctlCoverageBlocker[] = [];
   if (readScope.mode === "canary") blockers.push({ code: "PARTIAL_DESIRED_SCOPE" });
   if (readScope.profile === "inventory_v1") {
@@ -813,7 +896,7 @@ function buildCfctlReadback(
     failed_capability_ids: failedCapabilityIds,
     missing_capability_ids: missingCapabilityIds,
     required_acceptance_surfaces: requiredAcceptanceSurfaces,
-    successful_acceptance_surfaces: [],
+    successful_acceptance_surfaces: admittedAcceptanceSurfaces,
     missing_acceptance_surfaces: missingAcceptanceSurfaces,
     selected_scope_complete: selectedScopeComplete,
     desired_scope_complete: desiredScopeComplete,
@@ -840,6 +923,8 @@ function requiredInventoryCapabilityIds(): string[] {
     "dns-records-for-a-zone-list-dns-records",
     "listWorkers",
     "worker-script-get-settings",
+    "worker-deployments-list-deployments",
+    "worker-versions-get-version-detail",
     "d1-list-databases",
     "r2-list-buckets",
     "queues-list",

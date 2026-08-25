@@ -280,12 +280,20 @@ gap counts; local policy-versus-desired-state failures remain visible.
 When `MAILDESK_CFCTL_PROFILE` is set, the collector resolves that exact profile
 to its configured account and uses only governed `cfctl call` operations. The
 v2 read set is explicit and bounded: exact-zone lookup, named Email Routing
-rules, the separate catch-all rule, Email Routing settings, root MX records, Workers and each Worker’s deployed settings, D1
+rules, the separate catch-all rule, Email Routing settings, root MX records, Workers, each Worker’s deployed settings, its active deployment, and the active version detail, D1
 databases, R2 buckets, Queues and the target Queue’s consumers, and—for
 Cloudflare Email Service candidates—sending subdomains. Worker settings are
 compared with the checked-in role-specific Wrangler contracts; Queue consumer
 target, batch size, concurrency, retries, and DLQ are compared with the outbound
-Wrangler contract. Resource-name presence alone never proves a binding or
+Wrangler contract. The collector independently reproduces cfctl's complete,
+repository-relative artifact-set digest from each Wrangler `main` and assets
+root. It accepts exactly one 100% active version only when the deployment and
+version-detail annotations agree on the canonical
+`source=<git-sha> artifact-sha256=<digest>` message. A matching source and artifact is `exact`;
+an identical artifact built from a later documentation- or proof-only commit is
+`artifact_equivalent`; any artifact mismatch is `drift`. The retained projection
+contains hashes and status only—never the raw provider response, version ID,
+author, or account identity. Resource-name presence alone never proves a binding or
 consumer relationship. Every call carries the same `--profile` and `--account`
 binding. The collector accepts a result only
 when its `ResultEnvelopeV2` names the expected capability, profile, and account,
@@ -333,9 +341,11 @@ nonempty array of typed `{ name, ok, detail? }` checks. A valid negative health
 response is present evidence and may report drift; malformed or empty runtime
 JSON is omitted by the collector and does not establish presence.
 
-The `dark_acceptance_v1` profile is fail-closed. Its contract explicitly names
+The `dark_acceptance_v1` profile is fail-closed. Exact or artifact-equivalent
+active-version readback now admits only the `worker_deployment_identity`
+surface. Its remaining contract explicitly names
 Access application and policy readback, R2 spool lifecycle, exact Worker
-deployment and route identity, Queue and DLQ backlog, spool emptiness, and the
+route identity, Queue and DLQ backlog, spool emptiness, and the
 readiness endpoint as required acceptance surfaces. Surfaces not implemented
 by this collector are emitted as typed blockers and keep
 `coverage.acceptance_complete` false. A missing readiness URL is never silently
