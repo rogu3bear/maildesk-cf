@@ -60,8 +60,9 @@ migration without improving the policy boundary further.
 - `wasm-pack`, `wasm-bindgen`, and the `wasm32-unknown-unknown` target are build
   requirements.
 - The pinned `wasm-bindgen` library and generated glue must move together.
-- The Worker bundle grows by the router module; current dry runs remain small
-  at about 70 KiB gzipped per Worker.
+- Each mail Worker deploys from one ignored, role-specific closed bundle. Its
+  manifest binds the TypeScript/package graph, Rust inputs, generated WASM,
+  and builder identity; Wrangler verifies that closure without rewriting it.
 - Router changes now reach both inbound and outbound runtime paths through one
   implementation and one testable contract.
 - Cloudflare mutation, deployment, and live mail proof remain outside this ADR.
@@ -69,7 +70,7 @@ migration without improving the policy boundary further.
 ## Proof
 
 ```bash
-bun run build:router-wasm
+bun run build:mail-workers
 bun run test:workers
 cargo test -p maildesk-router
 bunx wrangler deploy --dry-run --config wrangler.toml

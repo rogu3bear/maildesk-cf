@@ -141,7 +141,8 @@ Current local checks:
 ```bash
 bun install
 bun run build:ui
-bun run build:router-wasm
+bun run build:mail-workers
+bun run check:mail-worker-bundles
 cargo test --workspace --all-features
 cargo clippy --all-targets -- -D warnings
 bun run typecheck
@@ -178,9 +179,10 @@ deployments may select `MAILDESK_UI_ACCESS_SCOPE=desk_only`; private routing
 instances select `all_routes`, which protects the entire hostname including
 static assets in both the edge adapter and Rust server.
 
-The Worker gates build the Rust router automatically. Generated WASM stays
-ignored under `generated/router-wasm/`; both Wrangler targets run the same
-build before bundling. See
+The Worker gates build the Rust router and one closed upload artifact per mail
+Worker. Generated WASM and role bundles stay ignored under `generated/`; each
+Wrangler target verifies the already-built artifact against the complete
+source closure without rewriting it after planning. See
 [ADR 0001](docs/architecture/adr/0001-rust-router-worker-authority.md) for the
 boundary and trade-offs.
 

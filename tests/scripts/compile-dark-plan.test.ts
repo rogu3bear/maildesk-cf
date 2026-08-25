@@ -231,14 +231,14 @@ describe("dark deployment blueprint", () => {
       [
         "router role entrypoint",
         "relay_router",
-        (config) => config.replace('workers/mail-router/src/index.ts', 'workers/mail-outbound/src/index.ts'),
-        "main must equal desired value workers/mail-router/src/index.ts",
+        (config) => config.replace('generated/mail-workers/mail-router/index.js', 'generated/mail-workers/mail-outbound/index.js'),
+        "main must equal desired value generated/mail-workers/mail-router/index.js",
       ],
       [
         "outbound role entrypoint",
         "relay_outbound",
-        (config) => config.replace('workers/mail-outbound/src/index.ts', 'workers/mail-router/src/index.ts'),
-        "main must equal desired value workers/mail-outbound/src/index.ts",
+        (config) => config.replace('generated/mail-workers/mail-outbound/index.js', 'generated/mail-workers/mail-router/index.js'),
+        "main must equal desired value generated/mail-workers/mail-outbound/index.js",
       ],
       [
         "health role entrypoint",

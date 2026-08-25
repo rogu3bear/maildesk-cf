@@ -1,5 +1,5 @@
 name = "maildesk-cf-relay-outbound"
-main = "workers/mail-outbound/src/index.ts"
+main = "generated/mail-workers/mail-outbound/index.js"
 compatibility_date = "2026-08-12"
 workers_dev = false
 upload_source_maps = true
@@ -9,7 +9,7 @@ send_email = [
 ]
 
 [build]
-command = "bun run build:router-wasm"
+command = "bun run check:mail-worker-bundles"
 
 [vars]
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"

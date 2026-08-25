@@ -25,8 +25,18 @@ describe("relay deployment topology", () => {
       string,
       string,
     ]> = [
-      ["relay_router", "mail-router", "workers/mail-outbound/src/index.ts", "main = workers/mail-router/src/index.ts"],
-      ["relay_outbound", "mail-outbound", "workers/mail-router/src/index.ts", "main = workers/mail-outbound/src/index.ts"],
+      [
+        "relay_router",
+        "mail-router",
+        "generated/mail-workers/mail-outbound/index.js",
+        "main = generated/mail-workers/mail-router/index.js",
+      ],
+      [
+        "relay_outbound",
+        "mail-outbound",
+        "generated/mail-workers/mail-router/index.js",
+        "main = generated/mail-workers/mail-outbound/index.js",
+      ],
       ["routing_health", "routing-health", "workers/mail-api/src/index.ts", "main = build/_worker.js"],
     ];
 

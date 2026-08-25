@@ -35,13 +35,20 @@ exports JSON adapter functions for route decisions and reply authorization;
 `workers/shared/router.ts` translates field names and validates the response
 shape without reimplementing policy.
 
-Generated WASM is a build artifact and is not tracked. Rebuild it with:
+Generated WASM and the two role-specific closed Worker bundles are build
+artifacts and are not tracked. Build the deployment closure with:
 
 ```bash
-bun run build:router-wasm
+bun run build:mail-workers
 ```
 
-The build must run before Worker typechecking, tests, or Wrangler bundling.
+The build records every imported TypeScript/package input, the Rust source and
+lockfiles, generated WASM bytes, and the exact builder versions in each
+role-specific artifact manifest. Wrangler runs
+`bun run check:mail-worker-bundles` as a verification-only build command: it
+reproduces the closure in ignored staging and fails on any byte drift without
+changing the artifact that `cfctl` already hashed. The build must run before
+Worker typechecking, tests, or governed deployment planning.
 See [ADR 0001](adr/0001-rust-router-worker-authority.md) for the alternatives
 and deployment boundary.
 
@@ -53,7 +60,7 @@ Every generated project should keep these checks green:
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo run --package maildesk-router --bin maildesk-policy-check -- config/policy.example.json
-bun run build:router-wasm
+bun run build:mail-workers
 ```
 
 Private instances should run the same policy checker against their ignored

@@ -1,5 +1,5 @@
 name = "maildesk-cf-router"
-main = "workers/mail-router/src/index.ts"
+main = "generated/mail-workers/mail-router/index.js"
 compatibility_date = "2026-05-19"
 workers_dev = false
 
@@ -8,7 +8,7 @@ send_email = [
 ]
 
 [build]
-command = "bun run build:router-wasm"
+command = "bun run check:mail-worker-bundles"
 
 [vars]
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"

@@ -6,6 +6,8 @@
   "scripts": {
     "build:ui": "bash scripts/build-ui-edge.sh",
     "build:router-wasm": "bun run scripts/build-router-wasm.ts",
+    "build:mail-workers": "bun run scripts/build-mail-worker-bundles.ts",
+    "check:mail-worker-bundles": "bun run scripts/build-mail-worker-bundles.ts --check",
     "ci": "bash scripts/ci.sh",
     "check": "bun run typecheck",
     "preflight": "bun run scripts/preflight.ts",
@@ -20,8 +22,8 @@
     "check:maildesk-closeout": "bun run scripts/check-maildesk-closeout.ts",
     "apply:maildesk-acks": "bun run scripts/apply-sender-domain-ack-manifest.ts",
     "test:scripts": "bun test ./tests/scripts",
-    "test:workers": "bun run build:router-wasm && bun test ./tests/workers",
-    "typecheck": "bun run build:router-wasm && tsc --noEmit",
+    "test:workers": "bun run build:mail-workers && bun test ./tests/workers",
+    "typecheck": "bun run build:mail-workers && tsc --noEmit",
     "check:ui": "cargo check --package maildesk-ui --all-features",
     "collect:maildesk-evidence": "bun run scripts/collect-live-evidence.ts",
     "plan:maildesk-proofs": "bun run scripts/plan-mail-proofs.ts",
@@ -35,6 +37,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260812.1",
     "@types/node": "^25.9.3",
+    "esbuild": "0.28.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.110.0"
   },
