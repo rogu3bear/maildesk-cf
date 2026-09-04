@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 export const CFCTL_COMMAND_CONTRACT_VERSION = 2 as const;
 export const SENDER_DOMAIN_CREATE_CAPABILITY =
   "email-sending-subdomains-create-sending-subdomain" as const;
@@ -239,4 +241,120 @@ export function isSenderDomainPlanRequest(value: unknown): value is SenderDomain
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Read contracts consumed by collect-live-evidence, checked before production
+// admission. This proves catalog compatibility only, never account readiness.
+export interface MaildeskReadContract {
+  id: string;
+  selectors: string[];
+}
+
+export function maildeskReadContracts(options: {
+  emailRouting: boolean;
+  senderDomains: boolean;
+  darkAcceptance: boolean;
+}): MaildeskReadContract[] {
+  const account = ["account_id"];
+  const zone = ["zone_id"];
+  const script = ["account_id", "script_name"];
+  const contracts: MaildeskReadContract[] = [
+    { id: "zones-get", selectors: ["name"] },
+    { id: "dns-records-for-a-zone-list-dns-records", selectors: zone },
+    { id: "listWorkers", selectors: account },
+    { id: "worker-script-get-settings", selectors: script },
+    { id: "worker-deployments-list-deployments", selectors: script },
+    { id: "worker-versions-get-version-detail", selectors: [...script, "version_id"] },
+    { id: "d1-list-databases", selectors: account },
+    { id: "r2-list-buckets", selectors: account },
+    { id: "queues-list", selectors: account },
+    { id: "queues-list-consumers", selectors: [...account, "queue_id"] },
+  ];
+  if (options.emailRouting) contracts.push(
+    { id: "email-routing-routing-rules-list-routing-rules", selectors: zone },
+    { id: "email-routing-settings-get-email-routing-settings", selectors: zone },
+    { id: "email-routing-routing-rules-get-catch-all-rule", selectors: zone },
+  );
+  if (options.senderDomains) contracts.push({ id: SENDER_DOMAIN_VERIFY_CAPABILITY, selectors: zone });
+  if (options.darkAcceptance) contracts.push(
+    { id: "access-applications-get-an-access-application", selectors: [...account, "app_id"] },
+    { id: "access-policies-list-access-app-policies", selectors: [...account, "app_id"] },
+    { id: "access-policies-get-an-access-policy", selectors: [...account, "app_id", "policy_id"] },
+    { id: "r2-get-bucket-lifecycle-configuration", selectors: [...account, "bucket_name"] },
+  );
+  return contracts.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+export function incompatibleMaildeskRead(contract: MaildeskReadContract, envelope: unknown): string | null {
+  const value = envelope as {
+    schema_version?: unknown; command?: unknown; ok?: unknown; performed?: unknown;
+    result?: {
+      id?: unknown; adapter_status?: unknown; blocked_reason?: unknown;
+      method?: unknown; effect?: unknown; mutating?: unknown;
+      response_contract?: { body_mode?: unknown };
+      selectors?: Array<{ name?: unknown; value_type?: unknown; required?: unknown }>;
+    };
+  } | null;
+  if (!value || value.schema_version !== 2 || value.command !== "catalog show" || value.ok !== true || value.performed !== false) {
+    return `${contract.id}: catalog must return a successful non-performing ResultEnvelopeV2`;
+  }
+  const capability = value.result;
+  if (!capability || capability.id !== contract.id ||
+      !["native", "dynamic_api"].includes(String(capability.adapter_status)) ||
+      capability.blocked_reason != null || capability.method !== "GET" ||
+      capability.effect !== "read_only" || capability.mutating !== false ||
+      capability.response_contract?.body_mode !== "cloudflare_json_envelope") {
+    return `${contract.id}: required non-mutating API read is unavailable or incompatible`;
+  }
+  if (!Array.isArray(capability.selectors) || contract.selectors.some((name) =>
+    !capability.selectors!.some((selector) => selector?.name === name && selector.value_type === "string")
+  )) return `${contract.id}: required string selectors are missing or incompatible`;
+  if (capability.selectors.some((selector) => selector?.required === true &&
+    !contract.selectors.includes(String(selector.name))
+  )) return `${contract.id}: catalog requires a selector not supplied by Maildesk`;
+  return null;
+}
+
+const accessAppFields = ["allowed_idps", "app_launcher_visible", "auto_redirect_to_identity", "destinations", "domain", "enable_binding_cookie", "http_only_cookie_attribute", "name", "options_preflight_bypass", "policies", "session_duration", "type"];
+const accessPolicyFields = ["name", "decision", "include", "exclude", "require", "precedence"];
+
+export function maildeskAccessOperations() {
+  return [
+    { resource: "access_application", action: "create_owned_self_hosted_whole_host", capability_id: "access-applications-create-owned-self-hosted-whole-host", method: "POST", path: "/accounts/{account_id}/access/apps", selectors: ["account_id"], body: accessAppFields, rollback: "delete_only_returned_app_id_in_separate_reviewed_plan" },
+    { resource: "access_application", action: "update_owned_self_hosted_whole_host", capability_id: "access-applications-update-owned-self-hosted-whole-host", method: "PUT", path: "/accounts/{account_id}/access/apps/{app_id}", selectors: ["account_id", "app_id"], body: [...accessAppFields, "self_hosted_domains"], rollback: "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan" },
+    { resource: "access_policy", action: "create_owned_operator_allow_policy", capability_id: "access-policies-create-operator-group-allow-policy", method: "POST", path: "/accounts/{account_id}/access/apps/{app_id}/policies", selectors: ["account_id", "app_id"], body: accessPolicyFields, rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan" },
+    { resource: "access_policy", action: "update_owned_operator_allow_policy", capability_id: "access-policies-update-operator-group-allow-policy", method: "PUT", path: "/accounts/{account_id}/access/apps/{app_id}/policies/{policy_id}", selectors: ["account_id", "app_id", "policy_id"], body: accessPolicyFields, rollback: "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan" },
+  ];
+}
+
+export function incompatibleMaildeskAccess(operation: ReturnType<typeof maildeskAccessOperations>[number], envelope: unknown): string | null {
+  const fail = (reason: string) => `${operation.capability_id}: ${reason}`;
+  if (!isRecord(envelope) || envelope.schema_version !== 2 || envelope.command !== "catalog show" || envelope.ok !== true || envelope.performed !== false) return fail("expected non-performing catalog ResultEnvelopeV2");
+  const c = envelope.result;
+  if (!isRecord(c) || c.id !== operation.capability_id || c.adapter_status !== "dynamic_api" || c.blocked_reason != null || c.method !== operation.method || c.path !== operation.path || c.mutating !== true || c.effect !== "identity_or_ownership" || c.verification?.required !== true || c.rollback?.supported !== true || c.response_contract?.body_mode !== "cloudflare_json_envelope") return fail("owned mutation, verification or compensation contract is unavailable");
+  if (!Array.isArray(c.selectors) || c.selectors.length !== operation.selectors.length || operation.selectors.some(name => !c.selectors.some((selector: any) => selector?.name === name && selector.required === true && selector.location === "path" && selector.value_type === "string"))) return fail("exact account/resource selectors drifted");
+  const schema = c.request_schema;
+  if (!isRecord(schema) || schema.type !== "object" || schema.additionalProperties !== false || !Array.isArray(schema.required) || schema.required.length !== operation.body.length || operation.body.some(name => !schema.required.includes(name)) || !isRecord(schema.properties)) return fail("closed required request fields drifted; inspect cfctl guide");
+  const fields = schema.properties;
+  const onlyEnum = (field: any, value: unknown) => Array.isArray(field?.enum) && field.enum.length === 1 && field.enum[0] === value;
+  if (operation.resource === "access_application") {
+    if (!onlyEnum(fields.type, "self_hosted") || fields.domain?.format !== "hostname" || fields.destinations?.type !== "array" || fields.destinations.minItems !== 1 || fields.destinations.maxItems !== 1 || fields.destinations.items?.additionalProperties !== false || !onlyEnum(fields.destinations.items?.properties?.type, "public") || fields.destinations.items?.properties?.uri?.format !== "hostname") return fail("whole-host application schema drifted");
+    if (operation.method === "POST" && (Object.keys(fields).length !== operation.body.length || fields.policies?.maxItems !== 0 || !onlyEnum(fields.options_preflight_bypass, false))) return fail("create must be initially deny-all with an empty policy set");
+    if (operation.method === "PUT" && fields.policies?.minItems !== 1) return fail("update must preserve existing policy references");
+  } else if (!onlyEnum(fields.decision, "allow") || fields.include?.minItems !== 1 || fields.include?.maxItems !== 1 || fields.include?.items?.additionalProperties !== false || JSON.stringify(fields.include?.items?.required) !== '["group"]' || fields.include?.items?.properties?.group?.additionalProperties !== false || JSON.stringify(fields.include?.items?.properties?.group?.required) !== '["id"]' || fields.exclude?.maxItems !== 0 || fields.require?.maxItems !== 0) return fail("single operator-group allow policy schema drifted");
+  return null;
+}
+
+
+export function discoverMaildeskAccess(installed: boolean) {
+  const failures: string[] = [];
+  if (installed) for (const operation of maildeskAccessOperations()) {
+    const result = spawnSync(process.env.CFCTL_BIN ?? "cfctl", ["catalog", "show", operation.capability_id, "--json"], { encoding: "utf8", timeout: 10_000 });
+    if (result.status !== 0) { failures.push(`${operation.capability_id}: catalog unavailable; inspect cfctl guide`); continue; }
+    try {
+      const error = incompatibleMaildeskAccess(operation, JSON.parse(result.stdout));
+      if (error) failures.push(error);
+    } catch { failures.push(`${operation.capability_id}: malformed catalog envelope`); }
+  }
+  return { status: !installed ? "not_checked" : failures.length ? "incompatible" : "compatible", performed: false, account_authority_proven: false, failures };
 }

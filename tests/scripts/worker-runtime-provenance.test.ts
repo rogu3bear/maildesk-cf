@@ -16,7 +16,7 @@ const versionId = "11111111-2222-4333-8444-555555555555";
 const scriptEtag = "d".repeat(64);
 
 describe("Worker runtime provenance", () => {
-  test("projects an exact active version without retaining provider identities", () => {
+  test("projects matching metadata as an unverified annotation claim", () => {
     const deployments = deploymentResult(candidateHead, artifactSha256);
     const detail = versionDetail(candidateHead, artifactSha256);
 
@@ -29,12 +29,14 @@ describe("Worker runtime provenance", () => {
       versionDetail: detail,
     })).toEqual({
       schema_version: 1,
-      status: "exact",
+      status: "metadata_only",
+      annotation_claim: "exact",
+      artifact_bytes_verified: false,
       script_name: "maildesk-relay-router",
       candidate_source_sha: candidateHead,
-      deployed_source_sha: candidateHead,
+      claimed_source_sha: candidateHead,
       expected_artifact_sha256: artifactSha256,
-      deployed_artifact_sha256: artifactSha256,
+      claimed_artifact_sha256: artifactSha256,
       active_version_sha256: sha256(versionId),
       script_etag_sha256: scriptEtag,
       deployment_message_sha256: sha256(
@@ -46,7 +48,7 @@ describe("Worker runtime provenance", () => {
     });
   });
 
-  test("permits explicit proof inheritance only when runtime artifacts are identical", () => {
+  test("never infers artifact equivalence from matching annotations", () => {
     const inherited = projectWorkerRuntimeProvenance({
       scriptName: "maildesk-relay-router",
       candidateHead,
@@ -54,8 +56,10 @@ describe("Worker runtime provenance", () => {
       deployments: deploymentResult(deployedHead, artifactSha256),
       versionDetail: versionDetail(deployedHead, artifactSha256),
     });
-    expect(inherited.status).toBe("artifact_equivalent");
-    expect(inherited.deployed_source_sha).toBe(deployedHead);
+    expect(inherited.status).toBe("metadata_only");
+    expect(inherited.annotation_claim).toBe("artifact_equivalent");
+    expect(inherited.artifact_bytes_verified).toBe(false);
+    expect(inherited.claimed_source_sha).toBe(deployedHead);
 
     const drifted = projectWorkerRuntimeProvenance({
       scriptName: "maildesk-relay-router",
@@ -65,6 +69,15 @@ describe("Worker runtime provenance", () => {
       versionDetail: versionDetail(deployedHead, "e".repeat(64)),
     });
     expect(drifted.status).toBe("drift");
+  });
+
+  test("matching annotations with a different valid provider etag cannot prove executable bytes", () => {
+    const detail = versionDetail(candidateHead, artifactSha256);
+    detail.result.resources.script.etag = "9".repeat(64);
+    const projection = projectWorkerRuntimeProvenance({ scriptName: "maildesk-relay-router", candidateHead, expectedArtifactSha256: artifactSha256, deployments: deploymentResult(candidateHead, artifactSha256), versionDetail: detail });
+    expect(projection.status).toBe("metadata_only");
+    expect(projection.artifact_bytes_verified).toBe(false);
+    expect(projection.annotation_claim).toBe("exact");
   });
 
   test("rejects traffic splits, mismatched detail, and noncanonical version annotations", () => {
@@ -93,7 +106,7 @@ describe("Worker runtime provenance", () => {
       expectedArtifactSha256: artifactSha256,
       deployments: deploymentNote,
       versionDetail: versionDetail(candidateHead, artifactSha256),
-    }).status).toBe("exact");
+    }).status).toBe("metadata_only");
 
     const extraText = versionDetail(candidateHead, artifactSha256);
     extraText.result.annotations["workers/message"] += " extra";

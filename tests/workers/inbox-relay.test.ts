@@ -477,6 +477,27 @@ test("tampering a pending recovery payload cannot redirect an operator delivery"
     .toBe("pending");
 });
 
+test("missing pending recipient spool preserves the unsent claim and never repeats accepted recipients", async () => {
+  const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
+  const deliveries: EmailMessageBuilder[] = [];
+  const queued: unknown[] = [];
+  const env = relayEnv(db, deliveries);
+  env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
+  // R2 writes succeed, but a later recovery read cannot find the retained body.
+  const raw = mime({ from: "sender@example.net", messageId: "<missing-recovery@example.net>" });
+  await mailRouterWorker.email(inboundMessage("sender@example.net", "security@example.com", raw), env, {} as ExecutionContext);
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  await mailRouterWorker.email(inboundMessage("sender@example.net", "security@example.com", raw), env, {} as ExecutionContext);
+  expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
+  expect(db.recipientDeliveries.map((recipient) => recipient.status)).toEqual(["pending", "provider_accepted"]);
+  expect(db.inboundDelivery?.status).toBe("partial_delivery");
+  expect(queued.at(-1)).toMatchObject({
+    kind: "inbound_delivery_result",
+    status: "partial_delivery",
+    results: [{ ok: false, errorCode: "recipient_pending" }, { ok: true }],
+  });
+});
+
 test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
   const supersedingPolicy = {
     default_reply_mode: "role_first",

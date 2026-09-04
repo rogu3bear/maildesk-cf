@@ -21,6 +21,10 @@ recovery evidence when work does not complete.
 
 ## Failure and Recovery Semantics
 
+The current inbox-relay operator procedure is [operations/recovery.md](operations/recovery.md).
+It maps exact durable states, retention deadlines, permitted next actions and
+explicitly unresolved outcomes. Legacy web-desk details below remain mode-specific.
+
 - Access uncertainty returns 401, 403, or 503 before Leptos receives an
   operator identity.
 - Unknown persisted route kinds, malformed route addresses, unauthorized
@@ -52,6 +56,7 @@ production reliability SLO:
 
 ## Production Evidence Gaps
 
-- Add a desk-level summary that counts recovery-required outbound transitions;
-  thread audit history already exposes the action without message content.
+- The relay dashboard already groups route-level exceptions; per-attempt
+  resolution still requires the exact durable evidence and supported governed
+  operation described in the recovery procedure.
 - Bind alert thresholds to observed traffic after the private instance exists.

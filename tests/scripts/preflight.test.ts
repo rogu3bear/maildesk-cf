@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
 import { loadEnvFile } from "../../scripts/env-file";
 
 const root = resolve(import.meta.dir, "../..");
@@ -10,6 +11,12 @@ const root = resolve(import.meta.dir, "../..");
 setDefaultTimeout(30_000);
 
 describe("production preflight", () => {
+  test("new-instance environment matches the split dark activation contract", () => {
+    const example = readFileSync(resolve(root, ".env.example"), "utf8");
+    expect(example).toContain("MAILDESK_INBOUND_RELAY_MODE=disabled");
+    expect(example).toContain("MAILDESK_REPLY_RELAY_MODE=disabled");
+    expect(example).not.toContain("MAILDESK_RELAY_PROCESSING_MODE=");
+  });
   test("tracked legacy web-desk configs declare an explicit delivery mode", () => {
     for (const configPath of ["wrangler.toml", "deploy/ui/wrangler.toml"]) {
       const config = Bun.TOML.parse(readFileSync(resolve(root, configPath), "utf8")) as {
@@ -30,7 +37,7 @@ describe("production preflight", () => {
     const topology = writeProductionTopology();
     try {
       const result = runInboxRelayProductionPreflight(topology.desiredPath);
-
+      if (result.status !== 0) throw new Error(result.stderr || result.stdout);
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("preflight ok: production");
       expect(result.stderr).not.toContain("still contains placeholder Cloudflare resource IDs");
@@ -644,6 +651,18 @@ function scrubCloudflareEnv(env: Record<string, string | undefined>): void {
   }
 }
 
+function fakeCatalogDispatcher(): string {
+  const cases = maildeskReadContracts({ emailRouting: true, senderDomains: true, darkAcceptance: true }).map((contract) => {
+    const envelope = { schema_version: 2, command: "catalog show", ok: true, performed: false, result: {
+      id: contract.id, adapter_status: "dynamic_api", method: "GET", effect: "read_only", mutating: false,
+      response_contract: { body_mode: "cloudflare_json_envelope" },
+      selectors: contract.selectors.map((name) => ({ name, value_type: "string" })),
+    } };
+    return `"catalog show ${contract.id} --json") printf '%s\\n' '${JSON.stringify(envelope)}'; exit 0 ;;`;
+  });
+  return `case "$*" in\n${cases.join("\n")}\nesac`;
+}
+
 function fakeCfctlDoctor(healthy: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-"));
   const path = join(dir, "cfctl");
@@ -651,6 +670,7 @@ function fakeCfctlDoctor(healthy: boolean): string {
   writeFileSync(
     path,
     `#!/bin/sh
+${fakeCatalogDispatcher()}
 if [ "$1" = "--help" ]; then
   echo "fake cfctl"
   exit 0
@@ -688,6 +708,7 @@ function fakeCfctlV2Doctor(): string {
   writeFileSync(
     path,
     `#!/bin/sh
+${fakeCatalogDispatcher()}
 if [ "$1" = "--help" ]; then
   echo "fake cfctl"
   exit 0
@@ -711,6 +732,7 @@ function fakeCfctlV2ProfileDoctor(accountId = "example-account-id"): string {
   writeFileSync(
     path,
     `#!/bin/sh
+${fakeCatalogDispatcher()}
 if [ "$1" = "--help" ]; then
   echo "fake cfctl"
   exit 0
@@ -801,8 +823,11 @@ function writeProductionTopology(options: {
   writeFileSync(resolve(root, outboundPath), outbound);
   writeFileSync(resolve(root, healthPath), health);
 
+  const canonical = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8"));
   const desiredPath = writeDesiredState("cloudflare_email_service", {
-    domains: [{ name: "example.com" }],
+    domains: canonical.domains,
+    access: canonical.access,
+    verification: canonical.verification,
     operator_delivery: {
       mode: "inbox_relay",
       inbound_processing_mode: "disabled",

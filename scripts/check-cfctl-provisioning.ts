@@ -1,9 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
 import {
   CFCTL_COMMAND_CONTRACT_VERSION,
   provisioningDiscoveryCommands,
+  maildeskReadContracts,
+  incompatibleMaildeskRead,
+  maildeskAccessOperations,
+  discoverMaildeskAccess,
 } from "./cfctl-v2-command-contract";
 import {
   isRepositoryRelativePath,
@@ -102,10 +107,39 @@ if (desiredState) {
   validateDesiredState(desiredState);
 }
 
+const installedReadContracts = failures.length === 0 && desiredState ? maildeskReadContracts({
+  emailRouting: desiredState?.domains.some((domain) => domain.inbound_mx_provider === "cloudflare_email_routing") ?? false,
+  senderDomains: desiredState?.sender?.mode === "cloudflare_email_service",
+  darkAcceptance: true,
+}) : [];
+if (args.includes("--installed") && failures.length === 0) {
+  for (const contract of installedReadContracts) {
+    const call = spawnSync(process.env.CFCTL_BIN ?? "cfctl", ["catalog", "show", contract.id, "--json"], {
+      cwd: root, env: process.env, encoding: "utf8", timeout: 10_000,
+    });
+    if (call.status !== 0) {
+      failures.push(`${contract.id}: catalog discovery failed; inspect cfctl catalog show and guide`);
+      continue;
+    }
+    try {
+      const incompatible = incompatibleMaildeskRead(contract, JSON.parse(call.stdout));
+      if (incompatible) failures.push(incompatible);
+    } catch {
+      failures.push(`${contract.id}: catalog returned malformed JSON`);
+    }
+  }
+}
+
 if (failures.length > 0 || !desiredState) {
   for (const failure of failures) {
     console.error(`fail: ${failure}`);
   }
+  process.exit(1);
+}
+
+const accessCatalog = discoverMaildeskAccess(args.includes("--installed-access"));
+if (accessCatalog.failures.length) {
+  for (const failure of accessCatalog.failures) console.error(`fail: ${failure}`);
   process.exit(1);
 }
 
@@ -116,6 +150,7 @@ const receipt = {
   status: {
     provisioning_contract_ready: true,
     live_mutation_ready: false,
+    installed_read_contract_ready: args.includes("--installed") ? true : null,
   },
   cfctl_handoff: {
     schema_version: CFCTL_COMMAND_CONTRACT_VERSION,
@@ -134,6 +169,7 @@ const receipt = {
       verification: "inspect cfctl plans status and perform the capability-specific readback",
     },
     access_capability_contract: accessCapabilityContract(),
+    required_read_contracts: installedReadContracts,
   },
   resources: resourceSummary(desiredState),
   protected_actions: [
@@ -448,7 +484,7 @@ function emailRoutingAliases(desired: DesiredState): string[] {
 function outsideCheckoutBlockers(): string[] {
   return [
     "install or update cfctl with the required v2 catalog capabilities",
-    "resolve and implement cfctl PlanV2 capabilities for Access application and policy reconciliation",
+    "check installed cfctl closed Access capabilities with --installed-access, then admit exact ownership evidence",
     "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
     "run cfctl version, doctor, and agents doctor before governed discovery",
     "bind every live call to an explicit profile, selected account, capability, and exact selectors",
@@ -460,6 +496,7 @@ function outsideCheckoutBlockers(): string[] {
 function accessCapabilityContract() {
   return {
     status: "external_dependency",
+    catalog_admission: accessCatalog,
     desired_state_path: "access.routing_health",
     required_read_capabilities: [
       "access-applications-list-access-applications",
@@ -511,40 +548,7 @@ function accessCapabilityContract() {
         "unrelated_policy_content_hashes_in_order",
       ],
     },
-    required_plan_v2_operations: [
-      {
-        resource: "access_application",
-        action: "create_owned_self_hosted_whole_host",
-        capability_id: null,
-        selectors: ["account_id", "application_name", "hostname"],
-        body: ["application_name", "hostname", "application_type", "path_scope"],
-        rollback: "delete_only_returned_app_id_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_application",
-        action: "update_owned_self_hosted_whole_host",
-        capability_id: null,
-        selectors: ["account_id", "app_id"],
-        body: ["application_name", "hostname", "application_type", "path_scope"],
-        rollback: "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_policy",
-        action: "create_owned_operator_allow_policy",
-        capability_id: null,
-        selectors: ["account_id", "app_id", "policy_name", "operator_group_id"],
-        body: ["policy_name", "decision", "operator_group_id"],
-        rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_policy",
-        action: "update_owned_operator_allow_policy",
-        capability_id: null,
-        selectors: ["account_id", "app_id", "policy_id"],
-        body: ["policy_name", "decision", "operator_group_id"],
-        rollback: "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan",
-      },
-    ],
+    required_plan_v2_operations: maildeskAccessOperations(),
     mutation_proof: {
       retain: ["operation_id", "content_hash", "app_id", "policy_id", "prior_state_digest"],
       exact_id_readback: [

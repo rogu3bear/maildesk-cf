@@ -47,7 +47,7 @@ describe("dark deployment blueprint", () => {
     });
     expect(plan.external_dependencies).toContainEqual(expect.objectContaining({
       id: "cfctl-access-plan-v2",
-      status: "missing_capability",
+      status: "not_checked",
       desired_state_path: "access.routing_health",
     }));
     const accessDependency = plan.external_dependencies.find((entry: Record<string, unknown>) =>
@@ -100,7 +100,7 @@ describe("dark deployment blueprint", () => {
     const { id: dependencyId, status: dependencyStatus, ...dependencyContract } = accessDependency;
     const { status: handoffStatus, ...handoffContract } = provisioningReceipt.cfctl_handoff.access_capability_contract;
     expect(dependencyId).toBe("cfctl-access-plan-v2");
-    expect(dependencyStatus).toBe("missing_capability");
+    expect(dependencyStatus).toBe("not_checked");
     expect(handoffStatus).toBe("external_dependency");
     expect(dependencyContract).toEqual(handoffContract);
     expect(JSON.stringify(plan)).not.toContain("routing-health.example.com");

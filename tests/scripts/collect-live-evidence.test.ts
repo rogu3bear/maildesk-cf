@@ -174,13 +174,13 @@ exit 0
     expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("raw_r2_key");
     expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("operator@");
     expect(evidence.cfctl_maildesk?.workers).toEqual({
-      relay_router: "ok",
-      relay_outbound: "ok",
-      routing_health: "ok",
+      relay_router: "not_checked",
+      relay_outbound: "not_checked",
+      routing_health: "not_checked",
     });
     expect(Object.values(evidence.cfctl_maildesk?.worker_deployments ?? {})).toHaveLength(3);
     expect(Object.values(evidence.cfctl_maildesk?.worker_deployments ?? {}).every((deployment) =>
-      deployment.status === "exact" && deployment.provider_output_retained === false
+      deployment.status === "metadata_only" && deployment.provider_output_retained === false
     )).toBe(true);
     expect(evidence.cfctl_maildesk?.storage).toEqual({
       d1_database: "ok",
@@ -912,7 +912,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
     });
   }, 20_000);
 
-  test("dark acceptance admits Worker deployment identity and types every remaining blocker", () => {
+  test("dark acceptance retains deployment metadata as an unproven identity blocker", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-coverage-dark-"));
     const fixture = createCoverageFixture(dir);
     const { result, out } = runCoverageCollection(fixture, dir, {
@@ -952,13 +952,12 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
       "access-policies-list-access-app-policies",
       "r2-get-bucket-lifecycle-configuration",
     ]);
-    expect(evidence.cfctl_readback.coverage.successful_acceptance_surfaces).toEqual([
-      "worker_deployment_identity",
-    ]);
+    expect(evidence.cfctl_readback.coverage.successful_acceptance_surfaces).toEqual([]);
     expect(evidence.cfctl_readback.coverage.missing_acceptance_surfaces).toEqual([
       "access_application",
       "access_policies",
       "r2_spool_lifecycle",
+      "worker_deployment_identity",
       "worker_route_identity",
       "queue_backlog",
       "dead_letter_queue_backlog",

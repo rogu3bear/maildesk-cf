@@ -101,6 +101,12 @@ checkPolicy(policyPath);
 if (mode === "production") {
   const cfctlDoctor = readCfctlDoctor();
   checkCfctlDoctor(cfctlDoctor);
+  const compatibility = spawnSync("bun", ["run", "scripts/check-cfctl-provisioning.ts", "--installed", "--desired-state", desiredStatePath, "--json"], {
+    cwd: root, env: process.env, encoding: "utf8", timeout: 60_000,
+  });
+  if (compatibility.status !== 0) failures.push(
+    `installed cfctl read contract is incompatible: ${compatibility.stderr.trim() || "run bun run check:cfctl-provisioning -- --installed"}`,
+  );
   checkCloudflareAccountTarget(desiredState);
   checkCloudflareAuthEnv();
   checkProjectName(desiredState);

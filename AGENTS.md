@@ -131,8 +131,9 @@ hide routing policy inside JavaScript glue or provider-specific handlers.
 
 - Inbound mail enters through Cloudflare Email Routing and an Email Worker.
 - D1 stores thread, participant, identity, routing, and audit metadata.
-- R2 stores raw MIME bodies and attachment blobs.
-- Queues handle parsing, notification, indexing, and outbound retries.
+- In inbox relay, R2 is a bounded recovery spool; successful processing removes
+  message content. Legacy web-desk storage remains a compatibility surface.
+- Queues handle durable replies, result projection, cleanup and bounded retries.
 - Cloudflare Email Service is the primary outbound sender.
 - Optional sender adapters must be explicit and policy-gated.
 - Personal mailbox providers may be notification/archive targets, but not the
@@ -181,18 +182,17 @@ Follow `leptos-cf`-style app discipline where it helps:
 Do not vendor or require `leptos-cf` unless the operator explicitly approves
 that coupling.
 
-## Initial Milestone
+## Current Acceptance Slice
 
-The first milestone is not a full helpdesk. It is:
+The supported new-template journey is inbox relay: receive through a declared
+route, deliver to an existing authorized operator inbox, authorize an ordinary
+reply under the public identity, and expose body-free routing health. See
+`docs/acceptance-criteria.md` and `docs/operations/recovery.md`.
 
-- buildable Rust router crate;
-- policy fixture and tests;
-- Email Worker adapter skeleton;
-- D1 schema skeleton;
-- R2/Queue binding contract;
-- operator UI placeholder;
-- `cfctl` provisioning contract draft;
-- local checks proving the template is clean and buildable.
+The explicit `web_desk` mode remains for existing integrations. Preserve its
+auth and reply behavior; do not add shared-inbox/composer scope to the relay
+milestone. Independent local template proof, account deployment, provider
+acceptance, inbox receipt and reply receipt remain separate acceptance planes.
 
 ## Preflight
 
@@ -216,33 +216,26 @@ Production preflight must fail if required Cloudflare/cfctl inputs are missing,
 if `wrangler.toml` still contains placeholder IDs, or if policy validation does
 not pass. Do not skip it to make a deployment feel green.
 
-## Cloudflare Token Doctrine
+## Cloudflare Credentials
 
-<!-- Canonical across the operator's Cloudflare repos. Rotation: scripts/rotate-secrets.sh -->
+Use the configured `cfctl` installation for account-pinned authentication and
+credential lifecycle. This public template has no workstation-specific token
+minter, external rotation script, or credential-directory dependency.
 
-- **One minter: `CF_DEV_TOKEN`** in the operator's shared credential env (not
-  committed) — an account-owned (`cfat_`/`cfut_`) token scoped to `Account API
-  Tokens: Write` + `Account Settings: Read` only. It stays on the operator's
-  machine and never enters CI. The Global API Key (`CF_GLOBAL_TOKEN` /
-  `X-Auth-Email` + `X-Auth-Key`) flow is **forbidden** for minting.
-- **Every runtime and deploy credential is a short-lived, purpose-scoped child**
-  minted from `CF_DEV_TOKEN` via `POST /accounts/{id}/tokens`. Children go to
-  CI / Worker / Pages secret stores and the repo-local `.env` (gitignored); the
-  minter stays on the operator's machine. This repo's child lives in `.env` as
-  `CLOUDFLARE_API_TOKEN` (with `CLOUDFLARE_API_TOKEN_ID` tracked for revocation).
-- **Rotate with `./scripts/rotate-secrets.sh`** — it delegates to the operator's
-  shared rotation engine (raw `curl`, no cfctl / no keychain, so it runs
-  unattended): mint a fresh child from the repo's declared scope (scripts/cf-rotate.conf) →
-  verify → write it to `.env` → record state → queue the old id for revocation. `--dry-run` previews
-  without minting. All Cloudflare calls force `curl -4` (the minter may carry an
-  IPv4-only allowlist; IPv6 egress returns Cloudflare error 9109).
-- **Auto-rotation** runs via a user launchd agent that invokes the rotator on a
-  schedule and sweeps prior children; unattended runs mint while the login
-  session is active.
-- **cfctl caveat (2026-07):** cfctl's keychain secret store is broken on this
-  machine (`errSecAuthFailed` on any profile write), so `cfctl keys mint` and
-  other authenticated cfctl operations are unavailable — the raw-`curl` rotator
-  is the working path. Use cfctl for no-auth reads (catalog / docs / doctor) only
-  until the keychain bug is fixed.
-- Secret values never appear in argv, stdout, logs, or committed files — only in
-  the repo `.env` (gitignored) and the platform secret stores.
+- Discover protected import with `cfctl auth import-api-token --help`.
+  Import through stdin or a mode-0600 `--value-in` file, with an explicit account
+  and profile. Never place secret values in arguments, output or tracked files.
+- Check `cfctl version --json`, `cfctl doctor --json`, and
+  `cfctl agents doctor --json`; use actual health output, not historical
+  workstation failures, to select the documented recovery path.
+- Load `cfctl guide --topic standing-authority --json` for recurring token
+  lifecycle work. Follow its exact permission inventory and policy lifecycle;
+  a standing policy requires explicit approval and grants only its recorded
+  bounds. This template neither creates nor activates that policy.
+- Ordinary mutations retain the capability-specific call/plan/approve/run/status
+  lifecycle above. A missing capability or unhealthy secret store is a blocker
+  with a governed next action, never permission to call Cloudflare directly.
+- Production build adapters require the purpose-scoped deployment token named
+  by preflight. Profile custody and deployment-token availability are separate
+  checks; runtime bindings do not require copying an account credential into
+  application code.

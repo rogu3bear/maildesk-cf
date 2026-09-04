@@ -285,11 +285,16 @@ describe("body-free fleet readiness compiler", () => {
     expect(FLEET_EVIDENCE_MAX_AGE_SECONDS).toBe(15 * 60);
   });
 
-  test("proves full coverage only for a complete, coherent, fresh full-policy fleet", () => {
+  test("reduces coherent caller-supplied coverage without authenticating live evidence", () => {
     const report = compile(input());
     expect(report).toMatchObject({
       schema_version: 1,
       kind: "maildesk_fleet_readiness_report",
+      evidence_authority: {
+        plane_states: "caller_supplied",
+        plane_artifacts_authenticated: false,
+        live_readiness_authorized: false,
+      },
       performed: false,
       body_free: true,
       coverage: {

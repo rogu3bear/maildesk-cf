@@ -41,13 +41,13 @@ values.
 | --- | --- | --- |
 | `CLOUDFLARE_ACCOUNT_ID` | production account option | Cloudflare account target for `cfctl` and Workers |
 | `CLOUDFLARE_API_TOKEN` | production auth option | scoped API token used by the control plane |
-| `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` | production auth option | global-key lane used by older or emergency `cfctl` setups |
-| `CF_DEV_TOKEN` or `CF_GLOBAL_TOKEN` | production auth option | `cfctl` lane token used by cfctl-native setups |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
 | `MAILDESK_CFCTL_PROFILE` | optional | explicit account-bound `cfctl` profile; avoids changing shared global profile selection |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
 | `MAILDESK_OPERATOR_DELIVERY_MODE` | production inbox relay | `inbox_relay` or `web_desk`; must match `operator_delivery.mode` |
-| `MAILDESK_RELAY_PROCESSING_MODE` | production inbox relay | `disabled` for dark deployment or `enabled` only for a separately reviewed canary; must match `operator_delivery.processing_mode` |
+| `MAILDESK_INBOUND_RELAY_MODE` | production inbox relay | must match `operator_delivery.inbound_processing_mode`; `disabled` until the reviewed inbound canary |
+| `MAILDESK_REPLY_RELAY_MODE` | production inbox relay | must match `operator_delivery.reply_processing_mode`; `disabled` until inbox receipt and a later reviewed reply activation |
+| `MAILDESK_RELAY_PROCESSING_MODE` | legacy compatibility only | accepted only when neither split switch is supplied; never combine with split activation |
 | `MAILDESK_REPLY_DOMAIN` | production inbox relay | dedicated relay domain; must match `operator_delivery.reply_domain` |
 | `MAILDESK_REPLY_TOKEN_TTL_DAYS` | production inbox relay | token lifetime; must match desired state |
 | `MAILDESK_SPOOL_RETENTION_DAYS` | production inbox relay | recovery-spool ceiling; must match desired state and the prefix-scoped R2 lifecycle |
@@ -55,23 +55,19 @@ values.
 | `MAILDESK_REPLY_API_MODE` | production | `disabled` by default; `token` only for an explicitly service-bound legacy reply integration |
 | `MAILDESK_API_TOKEN` or `MAILDESK_PROOF_API_TOKEN` | token reply API only | bearer token required only when `MAILDESK_REPLY_API_MODE=token`; proof-only closeout may use the secondary token without rotating the primary token |
 | `MAILDESK_ACCESS_TEAM_DOMAIN` | production | HTTPS Access team origin used to fetch rotating JWKS, such as `https://team-name.cloudflareaccess.com` |
-| `MAILDESK_ACCESS_AUD` | production | immutable audience tag for the Access application protecting `/desk*` |
+| `MAILDESK_ACCESS_AUD` | production | immutable audience tag for the Access application protecting the selected scope (whole host for inbox relay) |
 | `MAILDESK_OUTBOUND_MODE` | optional | `disabled`, `cloudflare_email_service`, or `resend`; defaults to `disabled` and must match selected desired-state `sender.mode` |
 | `MAILDESK_VERIFIED_SENDER_DOMAINS` | required for `cloudflare_email_service` or `resend` | comma-separated sender domains approved by the active provider readback |
 | `RESEND_API_KEY` or `RESEND` | required for `resend` mode | Resend API key; `RESEND_API_KEY` is the preferred Worker secret name and `RESEND` is accepted as a local compatibility alias |
 | `MAILDESK_PROJECT_NAME` | production project option | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
 
-Production mode requires one Cloudflare auth option: `CLOUDFLARE_API_TOKEN`,
-`CF_DEV_TOKEN`, `CF_GLOBAL_TOKEN`, or both `CLOUDFLARE_API_KEY` and
-`CLOUDFLARE_EMAIL`. In cfctl-native environments, a healthy `cfctl doctor`
-lane also satisfies the Cloudflare account/auth proof because the account
-selector and credential source live in the operator's `cfctl` configuration.
-When no global profile is selected, set `MAILDESK_CFCTL_PROFILE`; preflight
-requires that profile's credential to be available and bound to
-`CLOUDFLARE_ACCOUNT_ID`.
-Prefer scoped tokens for normal operation; the key/email path exists so
-`cfctl` can still run an explicitly selected global/emergency lane.
+Production mode requires a purpose-scoped `CLOUDFLARE_API_TOKEN` for the
+build/deploy adapter and a healthy cfctl installation. A minter or global key
+is not a substitute. When no global profile is selected, set
+`MAILDESK_CFCTL_PROFILE`; preflight requires that profile's credential to be
+available and bound to `CLOUDFLARE_ACCOUNT_ID`. Import and rotate credentials
+through the public cfctl lifecycle described in `AGENTS.md`.
 
 Production mode also requires a project/resource prefix. Set
 `MAILDESK_PROJECT_NAME`, or put `project.name` in the selected desired-state
@@ -141,3 +137,17 @@ After resolution, inspect the selected catalog contract and guide. Bind each
 live call to the exact profile/account and selectors. A mutating `cfctl call`
 creates one PlanV2 operation; it does not cross the write boundary until the
 reviewed operation is separately approved and run.
+
+## Installed capability compatibility
+
+Production preflight runs the same read-contract check used by
+`bun run check:cfctl-provisioning -- --installed --json`. It consumes only
+non-performing `cfctl catalog show` output and checks the capability identity,
+adapter, read effect, response envelope and required target selectors. A missing
+or incompatible capability reports its identifier and blocks preflight. The
+required inventory is shared with the live-evidence collector, including the
+selected Email Routing/sender mode and dark Access/lifecycle reads.
+
+This check establishes neither credentials/permissions nor specialized mutation
+support. Inspect and guide each actual operation before planning. Catalog
+success cannot resolve an Access ownership or provider-state blocker.

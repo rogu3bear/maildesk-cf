@@ -5,7 +5,6 @@
 #   bun run ci
 # The pre-push hook (.githooks/pre-push) runs this automatically once you set
 #   git config core.hooksPath .githooks
-# Bypass a single push with: git push --no-verify
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

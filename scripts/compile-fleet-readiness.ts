@@ -154,6 +154,11 @@ interface ValidatedInput {
 export interface FleetReadinessReport {
   schema_version: 1;
   kind: "maildesk_fleet_readiness_report";
+  evidence_authority: {
+    plane_states: "caller_supplied";
+    plane_artifacts_authenticated: false;
+    live_readiness_authorized: false;
+  };
   performed: false;
   body_free: true;
   evaluated_at: string;
@@ -431,6 +436,11 @@ export function compileFleetReadiness(
   return {
     schema_version: 1,
     kind: "maildesk_fleet_readiness_report",
+    evidence_authority: {
+      plane_states: "caller_supplied",
+      plane_artifacts_authenticated: false,
+      live_readiness_authorized: false,
+    },
     performed: false,
     body_free: true,
     evaluated_at: evaluatedAt,

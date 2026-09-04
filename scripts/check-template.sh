@@ -30,11 +30,11 @@ echo "== personal data scan"
 # commit. A gitignored `.env` (which legitimately holds local credentials) is
 # excluded, while a moved config is covered before it is staged. `--no-messages`
 # suppresses only paths deleted by the current diff; matching content still
-# fails the gate. Doctrine files that may reference the operator's own context
-# are excluded via pathspec.
+# fails the gate. Local strategy files are excluded via pathspec; tracked
+# AGENTS.md is part of the public scrub boundary.
 scan_output="$(
   git -C "${ROOT_DIR}" ls-files -z --cached --others --exclude-standard \
-    ':!:AGENTS.md' ':!:CLAUDE.md' ':!:NORTH_STAR.md' ':!:ANCHOR.md' \
+    ':!:CLAUDE.md' ':!:NORTH_STAR.md' ':!:ANCHOR.md' \
     ':!:Cargo.lock' ':!:scripts/check-template.sh' \
   | xargs -0 grep --no-messages -InE \
       -e '/Users/' \

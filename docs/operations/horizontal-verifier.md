@@ -32,6 +32,22 @@ bun run compile:fleet-readiness -- \
   --json
 ```
 
+The report is a conditional reduction of caller-supplied plane states. It does
+not load or authenticate the underlying plane artifacts. Its
+`evidence_authority` explicitly reports `plane_states: caller_supplied`,
+`plane_artifacts_authenticated: false`, and `live_readiness_authorized: false`.
+The independent controller digest below binds the route inventory only; it does
+not authenticate provider, inbox, reply, privacy or recipient evidence.
+
+A controller must admit the exact underlying artifacts through its trusted
+collectors before using this report as one input to an operational decision.
+`full_coverage_proven` means the supplied claims satisfy the reduction rules;
+it cannot alone authorize deployment, sends, activation or a live-readiness
+claim. The public example, or a coherently fabricated input with valid-looking
+hashes and timestamps, is not live evidence. No in-repository caller uses this
+report as mutation authorization; `compile:fleet-readiness` is a local output
+command and its template gate runs the reserved example.
+
 The compiler is pure and performs no Cloudflare, Google, D1, Apple Mail, or
 external-recipient action. Its input carries only hashed domain and route
 identities plus hash-bound receipts. The compiler canonicalizes the sorted
@@ -291,11 +307,16 @@ root. It accepts exactly one 100% active deployment target and then requires
 that version detail to carry the canonical
 `source=<git-sha> artifact-sha256=<digest>` message. Deployment annotations may
 describe the promotion and are retained only by hash; they do not override the
-selected version's provenance. A matching source and artifact is `exact`;
-an identical artifact built from a later documentation- or proof-only commit is
-`artifact_equivalent`; any artifact mismatch is `drift`. The retained projection
-contains hashes and status only—never the raw provider response, version ID,
-author, or account identity. Resource-name presence alone never proves a binding or
+selected version's metadata. Matching source/artifact labels produce
+`status: metadata_only` and an `annotation_claim` of `exact` or
+`artifact_equivalent`; a label mismatch is `drift`. All these records state
+`artifact_bytes_verified: false`. Their `claimed_source_sha` and
+`claimed_artifact_sha256` are annotations, not executable-byte evidence. A
+provider script etag is not the repository's multi-file artifact digest.
+Without an authenticated deployment receipt/artifact-byte join, matching labels
+leave the Worker `not_checked` and cannot admit `worker_deployment_identity`.
+The retained projection contains hashes and status only—never the raw provider
+response, version ID, author or account identity. Resource-name presence alone never proves a binding or
 consumer relationship. Every call carries the same `--profile` and `--account`
 binding. The collector accepts a result only
 when its `ResultEnvelopeV2` names the expected capability, profile, and account,
@@ -343,9 +364,9 @@ nonempty array of typed `{ name, ok, detail? }` checks. A valid negative health
 response is present evidence and may report drift; malformed or empty runtime
 JSON is omitted by the collector and does not establish presence.
 
-The `dark_acceptance_v1` profile is fail-closed. Exact or artifact-equivalent
-active-version readback now admits only the `worker_deployment_identity`
-surface. Its remaining contract explicitly names
+The `dark_acceptance_v1` profile is fail-closed. Metadata-only active-version
+readback does not admit the `worker_deployment_identity` surface. Its contract
+explicitly names
 Access application and policy readback, R2 spool lifecycle, exact Worker
 route identity, Queue and DLQ backlog, spool emptiness, and the
 readiness endpoint as required acceptance surfaces. Surfaces not implemented

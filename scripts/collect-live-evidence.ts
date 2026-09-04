@@ -1,3 +1,4 @@
+import { maildeskReadContracts } from "./cfctl-v2-command-contract";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -762,12 +763,12 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       versionCall.receipt.error_code = "WORKER_RUNTIME_PROVENANCE_MALFORMED";
       return incompleteReadback(profileId, accountId, receipts);
     }
-    const deploymentAccepted = workerDeployments[role].status === "exact" ||
-      workerDeployments[role].status === "artifact_equivalent";
-    workers[role] = workerNames.includes(worker.script_name) && deploymentAccepted &&
-        workerBindingsMatch(bindings, expectedBindings[role] ?? [], d1Ids, queueIds)
-      ? "ok"
-      : deploymentAccepted ? "missing" : "drift";
+    // Provider annotations are claims. No authenticated artifact-byte join is
+    // available here, so matching labels cannot establish deployment identity.
+    workers[role] = !workerNames.includes(worker.script_name) ? "missing"
+      : workerDeployments[role].status === "drift" ||
+        !workerBindingsMatch(bindings, expectedBindings[role] ?? [], d1Ids, queueIds)
+      ? "drift" : "not_checked";
   }
 
   const storage: Record<string, Status> = {
@@ -796,11 +797,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       accountId,
       receipts,
       zones,
-      Object.values(workerDeployments).every((deployment) =>
-          deployment.status === "exact" || deployment.status === "artifact_equivalent"
-        )
-        ? ["worker_deployment_identity"]
-        : [],
+      [], // Active-version metadata does not prove deployed artifact bytes.
     ),
     evidence: {
       zones: zones.sort(),
@@ -918,35 +915,12 @@ function buildCfctlReadback(
 
 function requiredInventoryCapabilityIds(): string[] {
   const selected = desiredState.domains.filter((domain) => readScope.selected_domains.includes(domain.name));
-  const capabilities = [
-    "zones-get",
-    "dns-records-for-a-zone-list-dns-records",
-    "listWorkers",
-    "worker-script-get-settings",
-    "worker-deployments-list-deployments",
-    "worker-versions-get-version-detail",
-    "d1-list-databases",
-    "r2-list-buckets",
-    "queues-list",
-    "queues-list-consumers",
-  ];
-  if (selected.some((domain) => domain.inbound_mx_provider === "cloudflare_email_routing")) {
-    capabilities.push(
-      "email-routing-routing-rules-list-routing-rules",
-      "email-routing-settings-get-email-routing-settings",
-      "email-routing-routing-rules-get-catch-all-rule",
-    );
-  }
-  if (
-    senderMode === "cloudflare_email_service" &&
-    selected.some((domain) => (desiredState.sender?.candidate_domains ?? []).includes(domain.name))
-  ) {
-    capabilities.push("email-sending-subdomains-list-sending-subdomains");
-  }
-  if (readScope.profile === "dark_acceptance_v1") {
-    capabilities.push(...DARK_ACCEPTANCE_CAPABILITY_IDS);
-  }
-  return capabilities.sort();
+  return maildeskReadContracts({
+    emailRouting: selected.some((domain) => domain.inbound_mx_provider === "cloudflare_email_routing"),
+    senderDomains: senderMode === "cloudflare_email_service" &&
+      selected.some((domain) => (desiredState.sender?.candidate_domains ?? []).includes(domain.name)),
+    darkAcceptance: readScope.profile === "dark_acceptance_v1",
+  }).map((contract) => contract.id);
 }
 
 function incompleteReadback(

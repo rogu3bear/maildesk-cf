@@ -1,5 +1,10 @@
 # Improve App Plan
 
+Historical record of the August web-desk work. Current new-instance scope and
+release acceptance are in [roadmap.md](roadmap.md) and
+[acceptance-criteria.md](acceptance-criteria.md); phase completion below does
+not establish present inbox-relay or live readiness.
+
 ## Context
 
 - Started: 2026-08-05

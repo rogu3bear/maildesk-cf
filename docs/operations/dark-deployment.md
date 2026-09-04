@@ -26,6 +26,39 @@ its own independent private-stage digest in cfctl. D1 readback must match the
 policy, desired-state, semantic-projection, and route-count selectors supplied
 to the exact projection plan.
 
+## Installed Access contract
+
+`bun run plan:dark -- --installed-access` and
+`bun run check:cfctl-provisioning -- --installed-access --json` inspect the
+selected `CFCTL_BIN` (or cfctl on PATH) with non-performing `catalog show` calls.
+The default offline blueprint leaves this dependency `not_checked`. Missing,
+blocked or incompatible mutation schemas remain a named blocker; metadata
+compatibility alone never establishes account authority or a PlanV2 operation.
+
+The four exact capabilities are:
+
+- `access-applications-create-owned-self-hosted-whole-host`
+- `access-applications-update-owned-self-hosted-whole-host`
+- `access-policies-create-operator-group-allow-policy`
+- `access-policies-update-operator-group-allow-policy`
+
+Create the application with the catalog's closed explicit fields, a single
+public destination whose `uri` is the bare desired hostname, and `policies: []`.
+Its empty policy set is initially deny-all. Read back and retain the exact
+returned `app_id` before planning the separate operator-group allow policy.
+Application updates retain existing policy references. Policy requests use
+`name`, `decision`, `include: [{group: {id: <operator-group-id>}}]`, empty
+`exclude`/`require`, and explicit precedence; names/groups are body fields,
+not invented API selectors. Inspect the current schema for all required fields
+and bounds before materializing a private body. No generic Access create/update
+or collection replacement substitutes for these owned operations.
+
+The catalog admission is only the capability gate. Fresh complete ownership
+inventory, authenticated receipt continuity, exact account/app/policy IDs,
+unchanged unrelated policies, approval and post-change readback remain required.
+An older installed cfctl may lack the create capability even when its provider
+source checkout implements it; only the explicitly checked executable counts.
+
 ## Required planning sequence
 
 1. Verify the exact installed cfctl build, catalog hash, profile, credential

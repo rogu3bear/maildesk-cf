@@ -12,16 +12,18 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const DEPLOYMENT_MESSAGE = /^source=([a-f0-9]{40}) artifact-sha256=([a-f0-9]{64})$/;
 
-export type WorkerRuntimeStatus = "exact" | "artifact_equivalent" | "drift";
+export type WorkerRuntimeStatus = "metadata_only" | "drift";
 
 export interface WorkerRuntimeProvenance {
   schema_version: 1;
   status: WorkerRuntimeStatus;
+  annotation_claim: "exact" | "artifact_equivalent" | "drift";
+  artifact_bytes_verified: false;
   script_name: string;
   candidate_source_sha: string;
-  deployed_source_sha: string;
+  claimed_source_sha: string;
   expected_artifact_sha256: string;
-  deployed_artifact_sha256: string;
+  claimed_artifact_sha256: string;
   active_version_sha256: string;
   script_etag_sha256: string;
   deployment_message_sha256: string;
@@ -101,12 +103,14 @@ export function projectWorkerRuntimeProvenance(input: ProvenanceInput): WorkerRu
   const sourceMatches = detail.sourceSha === input.candidateHead;
   return {
     schema_version: 1,
-    status: artifactMatches ? sourceMatches ? "exact" : "artifact_equivalent" : "drift",
+    status: artifactMatches ? "metadata_only" : "drift",
+    annotation_claim: artifactMatches ? sourceMatches ? "exact" : "artifact_equivalent" : "drift",
+    artifact_bytes_verified: false,
     script_name: input.scriptName,
     candidate_source_sha: input.candidateHead,
-    deployed_source_sha: detail.sourceSha,
+    claimed_source_sha: detail.sourceSha,
     expected_artifact_sha256: input.expectedArtifactSha256,
-    deployed_artifact_sha256: detail.artifactSha256,
+    claimed_artifact_sha256: detail.artifactSha256,
     active_version_sha256: sha256(deployment.versionId),
     script_etag_sha256: detail.scriptEtag,
     deployment_message_sha256: sha256(deployment.message),

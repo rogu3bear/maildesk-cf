@@ -268,7 +268,8 @@ ignored environment file or export equivalent variables, then run:
 bun run preflight:production -- --env-file .dev.vars
 ```
 
-Production preflight checks required Cloudflare/cfctl inputs, policy validity,
+Production preflight checks the installed read-capability contract, required
+Cloudflare/cfctl inputs, policy validity,
 and placeholder Cloudflare resource IDs before any account mutation.
 The env-file loader accepts only repo-local files, fills missing variables, and
 does not print secret values.
@@ -292,17 +293,21 @@ receipts. Use reserved documentation examples such as:
 - `example.org`
 - `operator@example.com`
 
-## First Milestone
+## Current Acceptance
 
-The first milestone is deliberately narrow:
+New instances follow the inbox-relay journey. Existing `web_desk` integrations
+retain their explicit compatibility mode; they do not define the new-instance
+roadmap. The [acceptance criteria](docs/acceptance-criteria.md) bind clean-copy
+setup, capability compatibility, identity authorization and recovery to direct
+checks. The [recovery runbook](docs/operations/recovery.md) distinguishes safely
+unsent work, ambiguous sends and accepted results whose cleanup failed.
 
-- buildable Rust router crate;
-- policy tests for role aliases and reply identities;
-- D1 schema skeleton;
-- Worker adapters;
-- Cargo-Leptos public site and operator routing-health console with explicit
-  empty, loading, failure, provider, inbox-proof, and reply-proof states;
-- schema-backed cfctl v2 provisioning contract and local proof hook;
-- template hygiene check.
+Before provisioning, check the installed catalog without reading account state:
 
-Everything else should build on that foundation.
+```bash
+bun run check:cfctl-provisioning -- --installed --desired-state config/desired-state.example.json --json
+```
+
+A passing result establishes the consumed read-capability contract only.
+Mutation planning, account permissions, deployment and mail receipts remain
+separate gates. Production preflight includes this compatibility check.

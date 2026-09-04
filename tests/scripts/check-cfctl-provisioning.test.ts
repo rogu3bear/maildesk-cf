@@ -147,7 +147,7 @@ describe("cfctl provisioning contract check", () => {
       expect.objectContaining({
         resource: "access_application",
         action: "create_owned_self_hosted_whole_host",
-        selectors: ["account_id", "application_name", "hostname"],
+        selectors: ["account_id"],
         rollback: "delete_only_returned_app_id_in_separate_reviewed_plan",
       }),
       expect.objectContaining({
@@ -159,7 +159,7 @@ describe("cfctl provisioning contract check", () => {
       expect.objectContaining({
         resource: "access_policy",
         action: "create_owned_operator_allow_policy",
-        selectors: ["account_id", "app_id", "policy_name", "operator_group_id"],
+        selectors: ["account_id", "app_id"],
         rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan",
       }),
       expect.objectContaining({
@@ -252,7 +252,7 @@ describe("cfctl provisioning contract check", () => {
     expect(JSON.stringify(receipt.resources.access)).not.toContain("routing-health.example.com");
     expect(receipt.outside_checkout_blockers).toEqual([
       "install or update cfctl with the required v2 catalog capabilities",
-      "resolve and implement cfctl PlanV2 capabilities for Access application and policy reconciliation",
+      "check installed cfctl closed Access capabilities with --installed-access, then admit exact ownership evidence",
       "copy config/desired-state.example.json to config/desired-state.local.json and replace reserved examples with a real Cloudflare account and domain",
       "run cfctl version, doctor, and agents doctor before governed discovery",
       "bind every live call to an explicit profile, selected account, capability, and exact selectors",

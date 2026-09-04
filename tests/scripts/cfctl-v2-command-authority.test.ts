@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -100,7 +100,7 @@ function trackedFiles(prefixes: string[]): string[] {
     encoding: "utf8",
   });
   if (result.status !== 0) throw new Error(result.stderr || "git ls-files failed");
-  return result.stdout.split("\n").filter(Boolean);
+  return result.stdout.split("\n").filter((path) => path && existsSync(resolve(root, path)));
 }
 
 function forbiddenMatches(paths: string[], codeBlocksOnly: boolean): string[] {

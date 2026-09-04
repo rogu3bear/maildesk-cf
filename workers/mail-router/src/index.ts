@@ -1041,7 +1041,7 @@ async function recoverExistingInbound(inbound: InboundDeliveryRow, env: Env): Pr
     providerMessageId: row.provider_message_id ?? undefined,
     errorCode: row.status === "provider_accepted"
       ? undefined
-      : row.error_code ?? "provider_outcome_unknown",
+      : row.error_code ?? (row.status === "pending" ? "recipient_pending" : "provider_outcome_unknown"),
   }));
   const accepted = results.filter((result) => result.ok).length;
   const status: InboundDeliveryResultJob["status"] = accepted === results.length && results.length > 0

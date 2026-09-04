@@ -91,3 +91,7 @@ Evidence advances independently through `declared`, `local_policy_valid`,
 `edge_verified`, `provider_accepted`, `inbox_verified`, and `reply_verified`.
 `mail_ready` is a derived claim allowed only after inbox and reply receipts;
 deployment and provider acceptance do not imply it.
+
+Operator procedure: [recovery.md](../operations/recovery.md) maps these durable
+states to allowed actions and retention deadlines. Local acceptance is defined
+in [acceptance-criteria.md](../acceptance-criteria.md).

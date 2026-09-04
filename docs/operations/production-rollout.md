@@ -68,7 +68,7 @@ Provision through cfctl v2, using capability resolution and PlanV2 for each
 bounded mutation:
 
 ```bash
-bun run check:cfctl-provisioning -- --desired-state config/desired-state.local.json
+bun run check:cfctl-provisioning -- --installed --desired-state config/desired-state.local.json
 cfctl version --json
 cfctl doctor --json
 cfctl agents doctor --json
@@ -84,16 +84,13 @@ post-change readback remain separate protected steps.
 
 ## 4. Runtime Config
 
-Small policies may use `MAILDESK_POLICY_JSON`. Production policies should use
-R2:
-
-```bash
-wrangler r2 object put maildesk-cf-raw-mail/config/policy.json \
-  --file config/policy.local.json
-```
-
-Account mutation should still be wrapped by `cfctl` in environments where the
-control plane owns Cloudflare writes.
+Inbox relay loads the exact active immutable policy from the policy bucket at
+`config/policy/<sha256>.json`, with matching D1 revision and projection digest.
+Inline policy is a legacy web-desk compatibility mechanism. Follow
+[dark-deployment.md](dark-deployment.md): discover and guide `r2-put-object`,
+prepare its exact profile/account/bucket/key/body-bound plan, and retain its
+own approval, execution and readback. No raw Wrangler account mutation is an
+alternate path. Keep private policy bytes out of arguments, logs and receipts.
 
 ## 5. Production Preflight
 
@@ -113,7 +110,7 @@ system refusing to pretend.
 
 ## 6. Deploy
 
-Deploy the UI, API/Queue, and Email Workers only after preflight passes and
+Deploy the routing-health, queue-only outbound, and Email Workers only after preflight passes and
 resource readback matches desired state. Keep the targets separate so inbound
 routing can be rolled forward without changing the operator surface. Keep the
 legacy token reply API disabled unless an explicit service boundary and scoped
@@ -158,3 +155,12 @@ Production preflight also accepts `RESEND` as a local compatibility alias for
 existing ignored environment files. Resend sender-domain blockers are repaired
 in Resend and refreshed through provider readback; they do not use a Cloudflare
 PlanV2 mutation.
+
+## 8. Recovery and acceptance
+
+Before enabling mail, identify the operator responsible for the
+[recovery runbook](recovery.md). The seven-day spool ceiling is not an incident
+response target; investigate before it expires. A missing or ambiguous outcome
+must remain visible until exact evidence supports resolution. Record the local
+[acceptance criteria](../acceptance-criteria.md) separately from target-specific
+plan, deployment, provider, inbox and reply receipts.

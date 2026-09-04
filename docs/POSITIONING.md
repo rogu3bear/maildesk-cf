@@ -1,62 +1,43 @@
-# Positioning & Messaging
+# Positioning and product boundary
 
-## Competitive Alternatives
+Maildesk is an identity-preserving Cloudflare inbox relay for operators who
+already read and compose in an existing inbox. Mail enters through a declared
+route, Rust selects its operators and public reply identity, and an ordinary
+operator reply is authenticated and relayed under that identity. The web
+surface reports routing health and distinct proof states.
 
-- Forward shared aliases into personal inboxes and coordinate manually.
-- Use a generic helpdesk that owns the workflow but obscures Cloudflare account truth.
-- Assemble Email Routing, Workers, storage, and sending through dashboard-only operations.
-- Do nothing and accept fragile identity and audit behavior.
+## Alternatives and specific value
 
-## Unique Attributes → Value Themes
+Ordinary alias forwarding may already be sufficient. Maildesk is appropriate
+when explicit role/personal identity policy, account-owned infrastructure and
+body-free delivery/recovery evidence justify operating a relay. A generic
+helpdesk offers its own inbox and workflow; this template deliberately keeps
+the existing operator inbox. This is a product hypothesis, not validated demand.
 
-| Attribute | Value (so what) | Proof |
-| --- | --- | --- |
-| Rust router owns route and reply policy | Identity decisions are deterministic and testable without Cloudflare | Router contract and tests |
-| D1/R2/Queues split state by responsibility | Metadata, raw artifacts, and async work stay explicit | Runtime contract and bindings |
-| cfctl governs account mutations | Plans and live readback remain distinct from source intent | Control-plane contract |
-| Readiness has four named planes | The product cannot hide an incomplete mail chain behind one green badge | Template standard |
+Rust routing is locally testable. cfctl owns account mutations and their
+receipts. Stable D1 claims distinguish unsent work from ambiguous sends; R2
+retains bounded recovery content. None of these alone establishes inbox receipt.
 
-## Best-Fit Customer
+## Supported and compatibility modes
 
-Small technical teams that own domain mail, want Cloudflare-native infrastructure, and care more about provable identity and calm operations than incumbent helpdesk breadth.
+`inbox_relay` is the supported starting point for new instances. Its dashboard
+has no composer, message bodies, attachments or thread history. Outbound
+attachments are rejected by the current policy; an adopter must assess that
+limit before deployment. Inbound attachments are forwarded to the operator.
 
-## Market Category
+`web_desk` and its explicit token API remain compatibility surfaces. They are
+not advertised as the primary relay journey and are not silently enabled.
 
-**Subcategory: Cloudflare-native mail desk and identity router.** It is recognizable as a shared inbox, but differentiated by edge-native policy, explicit infrastructure authority, and domain-consistent replies.
+## Message and evidence
 
-## One-Liner
+Route domain mail into the inbox you use. Reply under the right public identity.
+Know whether work was queued, accepted, received, or needs recovery.
 
-**Route shared mail at the edge. Reply with the right identity. Prove every step.**
+Use “Open routing health” for the relay dashboard. Use “provider accepted” only
+for provider evidence; reserve mail-ready for the required inbox and reply
+receipts. An ambiguous result should point to the recovery runbook, not promise
+that retrying is safe.
 
-## Brand Script (StoryBrand)
-
-- **Character:** a technical operator responsible for shared domain mail.
-- **External problem:** mail routing, storage, replies, and infrastructure evidence are fragmented.
-- **Internal problem:** they cannot feel certain that a reply or readiness claim tells the whole truth.
-- **Philosophical problem:** infrastructure handling sensitive communication should be understandable and governed.
-- **Guide:** maildesk-cf provides a Rust policy core, an operator desk, and a cfctl-controlled Cloudflare path.
-- **Plan:** connect policy; triage with route context; authorize the identity; verify the result.
-- **Direct call to action:** Open the desk.
-- **Transitional call to action:** Read the architecture.
-- **Failure:** lost context, incorrect sender identity, ambiguous delivery, and unprovable account state.
-- **Success:** one calm operational surface with domain continuity and explicit evidence.
-
-## Key Messages
-
-| Surface | Message | Status |
-| --- | --- | --- |
-| Hero | Route shared mail at the edge. Reply with the right identity. Prove every step. | Provisional |
-| Trust rail | Policy, storage, delivery, and live account state remain distinct—and visible. | Provisional |
-| Desk empty state | No conversations are available yet. Your readiness evidence still is. | Provisional |
-| Identity gate | The router selects the default. The server authorizes the final From identity. | Provisional |
-| Deployment | A deploy is not mail-ready until targeted live proof closes the chain. | Contract-backed |
-| Desk loading | Loading the mail assigned to you… | SUCCESs 4/6 static pass; unvalidated |
-| Desk failure | Your desk could not be loaded. Try again. | SUCCESs 4/6 static pass; unvalidated |
-| Reply identity | Policy authorizes this identity for the current route and operator. | SUCCESs 5/6 static pass; contract-backed |
-| Reply success | Reply authorized and queued. Delivery remains a separate audit event. | SUCCESs 5/6 static pass; contract-backed |
-
-No customer result, testimonial, time-saving number, or conversion claim is authorized yet.
-
-The Commander's Intent is one sentence per operator surface: the desk says what
-needs attention; the thread says which identity is safe; the action result says
-only what the system has actually proven.
+No customer result, testimonial, time-saving figure, market advantage, or
+conversion claim is established by this repository. The next product test is a
+fresh operator completing the public setup and recovery walkthrough.

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { maildeskAccessOperations, discoverMaildeskAccess } from "./cfctl-v2-command-contract";
 import { isRepositoryRelativePath } from "./wrangler-config";
 
 interface DesiredState {
@@ -49,7 +50,9 @@ assertDarkWorkerConfigs(desired);
 const head = git("rev-parse", "HEAD");
 const tree = git("rev-parse", "HEAD^{tree}");
 const dirty = git("status", "--porcelain").length > 0;
-const externalDependencies = [accessCapabilityDependency()];
+const accessCatalog = discoverMaildeskAccess(process.argv.includes("--installed-access"));
+const accessContract = accessCapabilityDependency();
+const externalDependencies = accessCatalog.status === "compatible" ? [] : [accessContract];
 
 const sourceFiles = [
   desiredPath,
@@ -88,6 +91,7 @@ const plan = {
     operator_group_source: "access.routing_health.policy.operator_group_id_env",
     runtime_jwt_validation: "required",
   },
+  access_capability_contract: accessContract,
   external_dependencies: externalDependencies,
   plan_sets: [
     {
@@ -322,7 +326,8 @@ function validOwnedName(value: string): boolean {
 function accessCapabilityDependency() {
   return {
     id: "cfctl-access-plan-v2",
-    status: "missing_capability",
+    status: accessCatalog.status,
+    catalog_admission: accessCatalog,
     desired_state_path: "access.routing_health",
     required_read_capabilities: [
       "access-applications-list-access-applications",
@@ -374,40 +379,7 @@ function accessCapabilityDependency() {
         "unrelated_policy_content_hashes_in_order",
       ],
     },
-    required_plan_v2_operations: [
-      {
-        resource: "access_application",
-        action: "create_owned_self_hosted_whole_host",
-        capability_id: null,
-        selectors: ["account_id", "application_name", "hostname"],
-        body: ["application_name", "hostname", "application_type", "path_scope"],
-        rollback: "delete_only_returned_app_id_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_application",
-        action: "update_owned_self_hosted_whole_host",
-        capability_id: null,
-        selectors: ["account_id", "app_id"],
-        body: ["application_name", "hostname", "application_type", "path_scope"],
-        rollback: "restore_exact_prior_owned_application_snapshot_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_policy",
-        action: "create_owned_operator_allow_policy",
-        capability_id: null,
-        selectors: ["account_id", "app_id", "policy_name", "operator_group_id"],
-        body: ["policy_name", "decision", "operator_group_id"],
-        rollback: "delete_only_returned_policy_id_in_separate_reviewed_plan",
-      },
-      {
-        resource: "access_policy",
-        action: "update_owned_operator_allow_policy",
-        capability_id: null,
-        selectors: ["account_id", "app_id", "policy_id"],
-        body: ["policy_name", "decision", "operator_group_id"],
-        rollback: "restore_exact_prior_owned_policy_snapshot_in_separate_reviewed_plan",
-      },
-    ],
+    required_plan_v2_operations: maildeskAccessOperations(),
     mutation_proof: {
       retain: ["operation_id", "content_hash", "app_id", "policy_id", "prior_state_digest"],
       exact_id_readback: [

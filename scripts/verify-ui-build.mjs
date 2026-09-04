@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { createHash } from "node:crypto";
+
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,10 +23,15 @@ for (const relative of required) {
 
 const manifest = JSON.parse(readFileSync(join(root, "target/site/asset-manifest.json"), "utf8"));
 for (const key of ["js", "wasm", "css"]) {
-  const relative = String(manifest[key] ?? "").replace(/^\//, "");
-  if (!relative || !existsSync(join(root, "target/site", relative.replace(/^pkg\//, "pkg/")))) {
-    throw new Error(`hashed ${key} asset is missing`);
+  const asset = String(manifest[key] ?? "");
+  const expectedHash = String(manifest.hashes?.[key] ?? "");
+  if (!/^[a-f0-9]{16}$/.test(expectedHash) || !new RegExp(`^/pkg/[a-zA-Z0-9_-]+\\.${expectedHash}\\.${key}$`).test(asset)) {
+    throw new Error(`hashed ${key} asset name does not match its manifest digest`);
   }
+  const path = join(root, "target/site", asset.slice(1));
+  if (!existsSync(path)) throw new Error(`hashed ${key} asset is missing`);
+  const actualHash = createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 16);
+  if (actualHash !== expectedHash) throw new Error(`hashed ${key} asset bytes do not match its manifest digest`);
 }
 
 const clientModulePath = join(root, "target/site", String(manifest.js).replace(/^\//, ""));

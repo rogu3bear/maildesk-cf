@@ -60,8 +60,8 @@ Inbound and outbound identity are related but not identical.
 - Role aliases route to one or more operators.
 - Personal aliases route to exactly one operator.
 - Outbound identities must be explicitly allowed.
-- The UI should default to the identity that preserves the original domain
-  story.
+- Replies use the identity selected by the route policy. The relay UI exposes
+  routing health; legacy web-desk composition remains explicitly separate.
 
 ## Build Lanes
 
@@ -84,8 +84,8 @@ Use precise status words:
   preflight;
 - `instance-ready`: private checkout passes production preflight against real
   account inputs;
-- `edge-ready`: Workers are deployed, bindings exist, and `cfctl verify`
-  reports no drift;
+- `edge-ready`: Workers are deployed, bindings exist, and capability-specific
+  `cfctl call` readback plus `cfctl plans status` prove the intended state;
 - `mail-ready`: inbound route, persistence, notification, reply authorization,
   outbound send, and audit trail are proven by targeted checks.
 
@@ -113,3 +113,28 @@ Use reserved examples only:
 
 Do not commit personal names, private domains, local home paths, tokens, account
 IDs, or live operation receipts.
+
+## Current strategy kernel
+
+**Diagnosis:** the reusable template is constrained by clean-copy setup and
+exception completion. A second operator needs one coherent relay journey,
+explicit control-plane compatibility and safe recovery from uncertain sends;
+additional desk features do not close those gaps.
+
+**Policy:** concentrate on identity-preserving inbox relay, using the operator's
+existing inbox. Keep mail semantics here and account execution in cfctl. Use
+leptos-cf conventions without a hard dependency on that repository.
+
+**Actions:** maintain actual-content initialization tests, check the installed
+catalog at production preflight, and exercise the failure/recovery matrix in
+`../acceptance-criteria.md`. Each release owner runs local CI; an independent
+reviewer checks the exact candidate before publication. Live acceptance is an
+operator-owned, target-bound stage after local acceptance, never inferred from
+it. Capacity and deployment dates belong to the release work order.
+
+**No-list:** no new composer/helpdesk/CRM breadth, no external credential
+rotator, no private instance assumptions, no new sender adapter, and no
+automatic replay of ambiguous sends. Preserve existing web-desk compatibility.
+Reconsider this concentration if a clean operator walkthrough shows the core
+job requires a different interface or the documented attachment limits are
+unacceptable; do not infer demand from template tests.
