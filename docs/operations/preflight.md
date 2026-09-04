@@ -40,9 +40,8 @@ values.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `CLOUDFLARE_ACCOUNT_ID` | production account option | Cloudflare account target for `cfctl` and Workers |
-| `CLOUDFLARE_API_TOKEN` | production auth option | scoped API token used by the control plane |
 | `CFCTL_BIN` | optional | override path to `cfctl`; defaults to `cfctl` |
-| `MAILDESK_CFCTL_PROFILE` | optional | explicit account-bound `cfctl` profile; avoids changing shared global profile selection |
+| `MAILDESK_CFCTL_PROFILE` | production | explicit account-bound `cfctl` profile; avoids changing shared global profile selection |
 | `MAILDESK_DESIRED_STATE_PATH` | optional | desired-state file to read; defaults to local desired state in production |
 | `MAILDESK_OPERATOR_DELIVERY_MODE` | production inbox relay | `inbox_relay` or `web_desk`; must match `operator_delivery.mode` |
 | `MAILDESK_INBOUND_RELAY_MODE` | production inbox relay | must match `operator_delivery.inbound_processing_mode`; `disabled` until the reviewed inbound canary |
@@ -62,18 +61,22 @@ values.
 | `MAILDESK_PROJECT_NAME` | production project option | de-templated project/resource prefix |
 | `MAILDESK_POLICY_PATH` | optional | policy file to validate; defaults to local policy in production |
 
-Production mode requires a purpose-scoped `CLOUDFLARE_API_TOKEN` for the
-build/deploy adapter and a healthy cfctl installation. A minter or global key
-is not a substitute. When no global profile is selected, set
-`MAILDESK_CFCTL_PROFILE`; preflight requires that profile's credential to be
-available and bound to `CLOUDFLARE_ACCOUNT_ID`. Import and rotate credentials
-through the public cfctl lifecycle described in `AGENTS.md`.
+Production requires a healthy cfctl installation and an explicit
+`MAILDESK_CFCTL_PROFILE`. Preflight checks that exact profile with
+`cfctl auth status <profile> --json` and requires its available credential and
+account to match the desired target. Another globally selected profile cannot
+rescue a failed explicit profile. cfctl owns the credential and passes it to its
+governed adapters; no duplicate `CLOUDFLARE_API_TOKEN` is required in this repo.
+Import and rotate credentials through the public cfctl lifecycle in `AGENTS.md`.
+A failed or locked credential remains a failed preflight: follow cfctl's recovery
+guidance, then retry the same profile. Maildesk never invokes Keychain tooling or
+prompts for passwords itself.
 
 Production mode also requires a project/resource prefix. Set
 `MAILDESK_PROJECT_NAME`, or put `project.name` in the selected desired-state
 file. The account target can come from `CLOUDFLARE_ACCOUNT_ID`, a literal
 `project.account_id` in ignored desired state, an env name referenced by
-`project.account_id_env`, or the healthy `cfctl doctor` lane described above.
+`project.account_id_env`. The selected profile must match that explicit target.
 
 Production mode also fails if `wrangler.toml`, `wrangler.mail-router.toml`, or
 `deploy/ui/wrangler.toml` still contains placeholder Cloudflare resource IDs. That is

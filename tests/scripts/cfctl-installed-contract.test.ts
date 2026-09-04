@@ -3,19 +3,21 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { incompatibleMaildeskRead, maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
+import { incompatibleMaildeskRead, maildeskPrivateReadContracts, maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
 
 setDefaultTimeout(30_000);
 
-const contracts = maildeskReadContracts({ emailRouting: true, senderDomains: true, darkAcceptance: true });
+const contracts = [...maildeskReadContracts({ emailRouting: true, senderDomains: true, darkAcceptance: true }), ...maildeskPrivateReadContracts("maildesk-cf.d1-evidence-read")];
 const first = contracts[0]!;
 function envelope(contract = first) {
   return {
     schema_version: 2, command: "catalog show", ok: true, performed: false,
     result: {
-      id: contract.id, adapter_status: "dynamic_api", blocked_reason: null,
+      id: contract.id, adapter_status: contract.privateProjection === "maildesk_v1" ? "delegated_cli" : contract.privateProjection === "r2_digest" ? "native" : "dynamic_api", blocked_reason: null,
       method: "GET", effect: "read_only", mutating: false,
-      response_contract: { body_mode: "cloudflare_json_envelope" },
+      response_contract: { body_mode: contract.privateProjection === "r2_digest" ? "r2_private_object_digest" : "cloudflare_json_envelope" },
+      workspace_d1_evidence: { projection: "maildesk_v1", database_binding: "DB", query_sha256: `sha256:${"a".repeat(64)}` },
+      r2_private_object_digest: { max_object_bytes: 300_000_000 },
       selectors: contract.selectors.map((name) => ({ name, value_type: "string" })),
     },
   };
@@ -56,7 +58,7 @@ test("installed check discovers actual required catalog IDs without reads, plans
         const receipt = JSON.parse(result.stdout);
         expect(receipt.status.installed_read_contract_ready).toBe(true);
         expect(receipt.status.live_mutation_ready).toBe(false);
-        expect(receipt.cfctl_handoff.required_read_contracts.map((entry: {id: string}) => entry.id)).toEqual(maildeskReadContracts({ emailRouting: true, senderDomains: false, darkAcceptance: true }).map((contract) => contract.id));
+        expect(receipt.cfctl_handoff.required_read_contracts.map((entry: {id: string}) => entry.id)).toEqual([...maildeskReadContracts({ emailRouting: true, senderDomains: false, darkAcceptance: true }), ...maildeskPrivateReadContracts("maildesk-cf.d1-evidence-read")].map((contract) => contract.id));
       } else expect(result.stderr).toContain(first.id);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -155,5 +157,15 @@ test("explicit Access discovery clears only catalog dependency and never creates
       expect(provisioning.status).toBe(supported ? 0 : 1);
       if (supported) expect(JSON.parse(provisioning.stdout).status.live_mutation_ready).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("private read contracts reject raw adapters and missing compiler or digest bounds", () => {
+  const [d1, r2] = maildeskPrivateReadContracts("adopted-mail.d1-evidence-read");
+  expect(incompatibleMaildeskRead(d1!, envelope(d1))).toBeNull();
+  expect(incompatibleMaildeskRead(r2!, envelope(r2))).toBeNull();
+  for (const [contract, patch] of [[d1!, { adapter_status: "dynamic_api" }], [d1!, { workspace_d1_evidence: null }], [r2!, { response_contract: { body_mode: "raw" } }], [r2!, { r2_private_object_digest: { max_object_bytes: 0 } }]] as const) {
+    const value = envelope(contract);
+    expect(incompatibleMaildeskRead(contract, { ...value, result: { ...value.result, ...patch } })).not.toBeNull();
   }
 });

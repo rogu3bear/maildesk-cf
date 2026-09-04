@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
+import { maildeskPrivateReadContracts, maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
 import { loadEnvFile } from "../../scripts/env-file";
 
 const root = resolve(import.meta.dir, "../..");
@@ -186,7 +186,7 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).not.toContain("RESEND_API_KEY");
-    expect(result.stderr).toContain("cfctl doctor must report at least one healthy lane");
+    expect(result.stderr).toContain("cfctl must report a healthy runtime and an available MAILDESK_CFCTL_PROFILE");
   });
 
   test("fails when runtime sender mode disagrees with desired state", () => {
@@ -259,7 +259,7 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("missing Cloudflare account target");
-    expect(result.stderr).toContain("missing Cloudflare deploy auth");
+    expect(result.stderr).toContain("cfctl must report a healthy runtime");
     expect(result.stderr).not.toContain("missing project name");
   });
 
@@ -440,13 +440,14 @@ describe("production preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("missing Cloudflare account target");
-    expect(result.stderr).toContain("missing Cloudflare deploy auth");
+    expect(result.stderr).toContain("cfctl must report a healthy runtime");
   });
 
   test("accepts the current cfctl v2 doctor health contract", () => {
     const env = {
       ...process.env,
       CFCTL_BIN: fakeCfctlV2Doctor(),
+    MAILDESK_CFCTL_PROFILE: "maildesk-production",
       CLOUDFLARE_ACCOUNT_ID: "example-account-id",
       CLOUDFLARE_API_TOKEN: "example-token",
       MAILDESK_DESIRED_STATE_PATH: writeDesiredState("disabled"),
@@ -465,7 +466,7 @@ describe("production preflight", () => {
     });
 
     expect([0, 1]).toContain(result.status);
-    expect(result.stderr).not.toContain("cfctl doctor must report at least one healthy lane");
+    expect(result.stderr).not.toContain("cfctl must report a healthy runtime and an available MAILDESK_CFCTL_PROFILE");
   });
 
   test("accepts an explicit account-bound cfctl profile without global selection", () => {
@@ -491,7 +492,7 @@ describe("production preflight", () => {
     });
 
     expect([0, 1]).toContain(result.status);
-    expect(result.stderr).not.toContain("cfctl doctor must report at least one healthy lane");
+    expect(result.stderr).not.toContain("cfctl must report a healthy runtime and an available MAILDESK_CFCTL_PROFILE");
   });
 
   test("rejects an explicit cfctl profile bound to another account", () => {
@@ -510,7 +511,7 @@ describe("production preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("cfctl doctor must report at least one healthy lane");
+    expect(result.stderr).toContain("cfctl must report a healthy runtime and an available MAILDESK_CFCTL_PROFILE");
   });
 
   test("asks for either API token only when the legacy reply API is enabled", () => {
@@ -575,7 +576,7 @@ describe("production preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("purpose-scoped CLOUDFLARE_API_TOKEN");
+    expect(result.stderr).toContain("cfctl must report a healthy runtime");
     expect(result.stderr).toContain("explicit DNS domains without wildcards");
   });
 
@@ -652,10 +653,12 @@ function scrubCloudflareEnv(env: Record<string, string | undefined>): void {
 }
 
 function fakeCatalogDispatcher(): string {
-  const cases = maildeskReadContracts({ emailRouting: true, senderDomains: true, darkAcceptance: true }).map((contract) => {
+  const cases = [...maildeskReadContracts({ emailRouting: true, senderDomains: true, darkAcceptance: true }), ...maildeskPrivateReadContracts("maildesk-cf.d1-evidence-read")].map((contract) => {
     const envelope = { schema_version: 2, command: "catalog show", ok: true, performed: false, result: {
-      id: contract.id, adapter_status: "dynamic_api", method: "GET", effect: "read_only", mutating: false,
-      response_contract: { body_mode: "cloudflare_json_envelope" },
+      id: contract.id, adapter_status: contract.privateProjection === "maildesk_v1" ? "delegated_cli" : contract.privateProjection === "r2_digest" ? "native" : "dynamic_api", method: "GET", effect: "read_only", mutating: false,
+      response_contract: { body_mode: contract.privateProjection === "r2_digest" ? "r2_private_object_digest" : "cloudflare_json_envelope" },
+      workspace_d1_evidence: { projection: "maildesk_v1", database_binding: "DB", query_sha256: `sha256:${"a".repeat(64)}` },
+      r2_private_object_digest: { max_object_bytes: 300_000_000 },
       selectors: contract.selectors.map((name) => ({ name, value_type: "string" })),
     } };
     return `"catalog show ${contract.id} --json") printf '%s\\n' '${JSON.stringify(envelope)}'; exit 0 ;;`;
@@ -702,29 +705,7 @@ exit 0
   return path;
 }
 
-function fakeCfctlV2Doctor(): string {
-  const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-v2-"));
-  const path = join(dir, "cfctl");
-  writeFileSync(
-    path,
-    `#!/bin/sh
-${fakeCatalogDispatcher()}
-if [ "$1" = "--help" ]; then
-  echo "fake cfctl"
-  exit 0
-fi
-if [ "$1" = "doctor" ]; then
-  cat <<'JSON'
-{"ok":true,"result":{"build_identity_healthy":true,"current_profile":"maildesk-production","instruction_drift":0,"path_build":{"healthy":true}}}
-JSON
-  exit 0
-fi
-exit 1
-`,
-  );
-  chmodSync(path, 0o700);
-  return path;
-}
+function fakeCfctlV2Doctor(): string { return fakeCfctlV2ProfileDoctor(); }
 
 function fakeCfctlV2ProfileDoctor(accountId = "example-account-id"): string {
   const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-v2-profile-"));
@@ -739,13 +720,13 @@ if [ "$1" = "--help" ]; then
 fi
 if [ "$1" = "doctor" ]; then
   cat <<'JSON'
-{"ok":true,"result":{"build_identity_healthy":true,"current_profile":null,"instruction_drift":0,"path_build":{"healthy":true}}}
+{"schema_version":2,"command":"doctor","performed":false,"ok":true,"result":{"build_identity_healthy":true,"current_profile":null,"instruction_drift":0,"path_build":{"healthy":true}}}
 JSON
   exit 0
 fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "maildesk-production" ]; then
   cat <<'JSON'
-{"ok":true,"result":{"credential_available":true,"profile":{"id":"maildesk-production","account_id":"${accountId}"}}}
+{"schema_version":2,"command":"auth status","performed":false,"ok":true,"result":{"credential_available":true,"profile":{"id":"maildesk-production","kind":"api_token","account_id":"${accountId}"}}}
 JSON
   exit 0
 fi
@@ -870,8 +851,9 @@ function productionEnv(
   return {
     ...process.env,
     CFCTL_BIN: fakeCfctlV2Doctor(),
+    MAILDESK_CFCTL_PROFILE: "maildesk-production",
     CLOUDFLARE_ACCOUNT_ID: "example-account-id",
-    CLOUDFLARE_API_TOKEN: "example-token",
+    CLOUDFLARE_API_TOKEN: "",
     MAILDESK_DESIRED_STATE_PATH: desiredPath,
     MAILDESK_POLICY_PATH: "config/policy.example.json",
     MAILDESK_PROJECT_NAME: "maildesk-cf",

@@ -1,3 +1,4 @@
+import { APPROVED_RELAY_TABLES } from "./cfctl-d1-evidence";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -750,14 +751,7 @@ function checkD1Queue(live: LiveEvidence): Status {
   if (!requiredReadyzChecks(live, ["db_query", "mail_jobs_binding", "relay_spool_binding"])) return "drift";
   if (!live.d1?.tables) return "not_checked";
 
-  const requiredTables = [
-    "audit_events",
-    "messages",
-    "threads",
-    "alias_routes",
-    "identities",
-    "operators",
-  ];
+  const requiredTables = APPROVED_RELAY_TABLES;
   return requiredTables.every((table) => live.d1?.tables?.includes(table)) ? "ok" : "drift";
 }
 

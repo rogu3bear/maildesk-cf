@@ -18,6 +18,7 @@ const stableContracts = [
   "ops/cfctl/maildesk-cf.desired-state.schema.json",
   ".cfctl/operations/d1-migrations.toml",
   ".cfctl/operations/d1-policy-projections.toml",
+  ".cfctl/operations/d1-evidence.toml",
 ];
 const requiredTargets = [
   ".env.example",

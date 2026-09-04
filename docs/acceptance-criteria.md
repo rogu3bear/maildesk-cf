@@ -257,3 +257,69 @@ request or policy shape than the template contract
 A checked command is local proof only. Release handoff carries current test
 results; this stable criteria file does not cache a green status for future
 source changes.
+
+## Unified Cloudflare operability
+
+### AC-22: Use one managed credential
+
+**Given** a healthy current cfctl runtime and an available explicit API-token
+profile bound to the desired account, with no duplicate Cloudflare token in the
+repository environment
+
+**When** production preflight checks authentication
+
+**Then** its authentication check succeeds using that profile.
+
+### AC-23: Reject a misleading global profile
+
+**Given** a healthy global profile and an unavailable or differently bound
+explicit Maildesk profile
+
+**When** production preflight checks authentication
+
+**Then** it fails the explicit profile check and identifies the recovery command.
+
+### AC-24: Read private state through the governed contract
+
+**Given** an admitted workspace D1 operation and supported R2 digest capability
+
+**When** full live evidence is collected
+
+**Then** every Cloudflare read carries the same explicit profile and account,
+with no raw remote Wrangler, arbitrary SQL or object-body retrieval.
+
+### AC-25: Preserve failed-read meaning
+
+**Given** a failed or malformed private read envelope
+
+**When** the collector processes it
+
+**Then** collection exits unsuccessfully with a failed receipt rather than
+normalizing the result into an empty database or successful policy check.
+
+### AC-26: Preserve independent receipt requirements
+
+**Given** successful database audit and route-health projection reads without
+qualifying external mailbox evidence
+
+**When** evidence is verified
+
+**Then** inbox and reply receipt checks remain unverified.
+
+### AC-27: Bound canary collection
+
+**Given** a read scope limited to selected domains
+
+**When** the collector runs
+
+**Then** it skips account-wide private D1/R2 projection reads.
+
+### Operability proof map
+
+- AC-22/23: `tests/scripts/cfctl-profile-contract.test.ts` and production preflight integration tests.
+- AC-24/27: `tests/scripts/collect-live-evidence.test.ts`, checking exact command arguments and canary call logs.
+- AC-25: decoder and collector malformed-envelope tests in `tests/scripts/cfctl-d1-evidence.test.ts` and `tests/scripts/collect-live-evidence.test.ts`.
+- AC-26: collector no-inferred-receipt assertions and existing verifier receipt checks.
+
+These are local behavioral criteria. Actual installed-candidate compatibility,
+provider authorization, deployment and mailbox receipt remain separate evidence.

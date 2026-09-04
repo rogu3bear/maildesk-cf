@@ -6,6 +6,7 @@ import {
   CFCTL_COMMAND_CONTRACT_VERSION,
   provisioningDiscoveryCommands,
   maildeskReadContracts,
+  maildeskPrivateReadContracts,
   incompatibleMaildeskRead,
   maildeskAccessOperations,
   discoverMaildeskAccess,
@@ -112,6 +113,14 @@ const installedReadContracts = failures.length === 0 && desiredState ? maildeskR
   senderDomains: desiredState?.sender?.mode === "cloudflare_email_service",
   darkAcceptance: true,
 }) : [];
+if (failures.length === 0) {
+  try {
+    const pack = Bun.TOML.parse(readFileSync(resolve(root, ".cfctl/operations/d1-evidence.toml"), "utf8")) as { operation?: Array<{ id?: string; projection?: string }> };
+    const operations = pack.operation?.filter(operation => operation.projection === "maildesk_v1") ?? [];
+    if (operations.length !== 1 || !operations[0]?.id) throw new Error("one Maildesk D1 operation required");
+    installedReadContracts.push(...maildeskPrivateReadContracts(operations[0].id));
+  } catch { failures.push("missing or malformed .cfctl/operations/d1-evidence.toml"); }
+}
 if (args.includes("--installed") && failures.length === 0) {
   for (const contract of installedReadContracts) {
     const call = spawnSync(process.env.CFCTL_BIN ?? "cfctl", ["catalog", "show", contract.id, "--json"], {

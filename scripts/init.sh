@@ -70,6 +70,7 @@ REQUIRED_CONTRACTS=(
   "${ROOT_DIR}/ops/cfctl/maildesk-cf.desired-state.schema.json"
   "${ROOT_DIR}/.cfctl/operations/d1-migrations.toml"
   "${ROOT_DIR}/.cfctl/operations/d1-policy-projections.toml"
+  "${ROOT_DIR}/.cfctl/operations/d1-evidence.toml"
 )
 for file in "${TARGETS[@]}" "${REQUIRED_CONTRACTS[@]}"; do
   if [[ ! -f "$file" || ! -r "$file" || ! -w "$file" ]]; then

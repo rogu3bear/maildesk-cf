@@ -246,6 +246,7 @@ function isRecord(value: unknown): value is Record<string, any> {
 // Read contracts consumed by collect-live-evidence, checked before production
 // admission. This proves catalog compatibility only, never account readiness.
 export interface MaildeskReadContract {
+  privateProjection?: "maildesk_v1" | "r2_digest";
   id: string;
   selectors: string[];
 }
@@ -285,6 +286,13 @@ export function maildeskReadContracts(options: {
   return contracts.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
+export function maildeskPrivateReadContracts(operationId: string): MaildeskReadContract[] {
+  return [
+    { id: operationId, selectors: ["account_id", "database_id", "config", "binding"], privateProjection: "maildesk_v1" },
+    { id: "r2-get-private-object-digest", selectors: ["account_id", "bucket_name", "object_key"], privateProjection: "r2_digest" },
+  ];
+}
+
 export function incompatibleMaildeskRead(contract: MaildeskReadContract, envelope: unknown): string | null {
   const value = envelope as {
     schema_version?: unknown; command?: unknown; ok?: unknown; performed?: unknown;
@@ -292,6 +300,8 @@ export function incompatibleMaildeskRead(contract: MaildeskReadContract, envelop
       id?: unknown; adapter_status?: unknown; blocked_reason?: unknown;
       method?: unknown; effect?: unknown; mutating?: unknown;
       response_contract?: { body_mode?: unknown };
+      workspace_d1_evidence?: { projection?: unknown; database_binding?: unknown; query_sha256?: unknown };
+      r2_private_object_digest?: { max_object_bytes?: unknown };
       selectors?: Array<{ name?: unknown; value_type?: unknown; required?: unknown }>;
     };
   } | null;
@@ -300,12 +310,18 @@ export function incompatibleMaildeskRead(contract: MaildeskReadContract, envelop
   }
   const capability = value.result;
   if (!capability || capability.id !== contract.id ||
-      !["native", "dynamic_api"].includes(String(capability.adapter_status)) ||
+      !(contract.privateProjection === "maildesk_v1" ? ["delegated_cli"] : ["native", "dynamic_api"]).includes(String(capability.adapter_status)) ||
       capability.blocked_reason != null || capability.method !== "GET" ||
       capability.effect !== "read_only" || capability.mutating !== false ||
-      capability.response_contract?.body_mode !== "cloudflare_json_envelope") {
+      (!contract.privateProjection && capability.response_contract?.body_mode !== "cloudflare_json_envelope")) {
     return `${contract.id}: required non-mutating API read is unavailable or incompatible`;
   }
+  if (contract.privateProjection === "maildesk_v1" &&
+      (capability.workspace_d1_evidence?.projection !== "maildesk_v1" || capability.workspace_d1_evidence.database_binding !== "DB" ||
+       !/^sha256:[a-f0-9]{64}$/.test(String(capability.workspace_d1_evidence.query_sha256)))) return `${contract.id}: compiler-owned D1 projection is unavailable`;
+  if (contract.privateProjection === "r2_digest" &&
+      (capability.adapter_status !== "native" || capability.response_contract?.body_mode !== "r2_private_object_digest" ||
+       !Number.isSafeInteger(capability.r2_private_object_digest?.max_object_bytes) || Number(capability.r2_private_object_digest?.max_object_bytes) <= 0)) return `${contract.id}: bounded body-free R2 digest is unavailable`;
   if (!Array.isArray(capability.selectors) || contract.selectors.some((name) =>
     !capability.selectors!.some((selector) => selector?.name === name && selector.value_type === "string")
   )) return `${contract.id}: required string selectors are missing or incompatible`;

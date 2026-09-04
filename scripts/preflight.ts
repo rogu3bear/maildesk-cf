@@ -2,6 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadEnvFile } from "./env-file";
+import { cfctlAccountTarget, cfctlExecutable, managedProfileHealthy } from "./cfctl-profile-contract";
 import { canonicalWorkerConfigFailure, isRepositoryRelativePath } from "./wrangler-config";
 import {
   isSenderMode,
@@ -108,7 +109,6 @@ if (mode === "production") {
     `installed cfctl read contract is incompatible: ${compatibility.stderr.trim() || "run bun run check:cfctl-provisioning -- --installed"}`,
   );
   checkCloudflareAccountTarget(desiredState);
-  checkCloudflareAuthEnv();
   checkProjectName(desiredState);
   checkReplyApiEnv();
   checkAccessValidationEnv();
@@ -227,17 +227,9 @@ function checkCloudflareAccountTarget(
   );
 }
 
-function checkCloudflareAuthEnv() {
-  if (hasUsableEnv("CLOUDFLARE_API_TOKEN")) return;
-
-  failures.push(
-    "missing Cloudflare deploy auth: set a purpose-scoped CLOUDFLARE_API_TOKEN",
-  );
-}
-
 function checkCfctlDoctor(cfctlDoctor: CfctlDoctorSummary | null) {
   if (cfctlDoctor?.healthy) return;
-  failures.push("cfctl doctor must report at least one healthy lane");
+  failures.push("cfctl must report a healthy runtime and an available MAILDESK_CFCTL_PROFILE bound to the desired Cloudflare account; inspect cfctl auth status <profile> --json and follow its recovery guidance");
 }
 
 function checkDesiredSenderMode(desiredState: DesiredState | null) {
@@ -536,70 +528,16 @@ function checkTemplateExamples() {
 }
 
 function readCfctlDoctor(): CfctlDoctorSummary | null {
-  const command = process.env.CFCTL_BIN ?? "cfctl";
-  const result = spawnSync(command, ["doctor", "--json"], {
-    cwd: root,
-    encoding: "utf8",
-    env: process.env,
-  });
-  if (result.status !== 0 || !result.stdout.trim()) return null;
-
-  try {
-    const parsed = JSON.parse(result.stdout) as CfctlDoctorResponse;
-    const healthyLaneCount =
-      parsed.summary?.healthy_lane_count ??
-      parsed.summary?.healthy_lanes?.length ??
-      parsed.result?.lanes?.summary?.healthy_lane_count ??
-      parsed.result?.lanes?.summary?.healthy_lanes?.length ??
-      0;
-    const v2RuntimeHealthy =
-      parsed.result?.build_identity_healthy === true &&
-      parsed.result?.path_build?.healthy === true &&
-      parsed.result?.instruction_drift === 0;
-    const selectedProfileHealthy = isUsableValue(parsed.result?.current_profile);
-    const configuredProfileHealthy =
-      v2RuntimeHealthy && readConfiguredCfctlProfile(command);
-    return {
-      healthy:
-        parsed.ok === true &&
-        (healthyLaneCount > 0 ||
-          (v2RuntimeHealthy && selectedProfileHealthy) ||
-          configuredProfileHealthy),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function readConfiguredCfctlProfile(command: string): boolean {
+  const command = cfctlExecutable();
   const profile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
-  if (!profile || !isUsableValue(profile)) return false;
-
-  const result = spawnSync(command, ["auth", "status", profile, "--json"], {
-    cwd: root,
-    encoding: "utf8",
-    env: process.env,
-  });
-  if (result.status !== 0 || !result.stdout.trim()) return false;
-
-  try {
-    const parsed = JSON.parse(result.stdout) as CfctlAuthStatusResponse;
-    if (
-      parsed.ok !== true ||
-      parsed.result?.credential_available !== true ||
-      parsed.result?.profile?.id !== profile
-    ) {
-      return false;
-    }
-
-    const expectedAccount = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
-    return (
-      !expectedAccount ||
-      parsed.result.profile.account_id === expectedAccount
-    );
-  } catch {
-    return false;
-  }
+  const account = cfctlAccountTarget(desiredState?.project);
+  if (!profile || !isUsableValue(profile) || typeof account !== "string") return { healthy: false };
+  const invoke = (args: string[]): unknown => {
+    const result = spawnSync(command, [...args, "--json"], { cwd: root, encoding: "utf8", env: process.env });
+    if (result.status !== 0) return null;
+    try { return JSON.parse(result.stdout); } catch { return null; }
+  };
+  return { healthy: managedProfileHealthy(invoke(["doctor"]), invoke(["auth", "status", profile]), profile, account.trim()) };
 }
 
 function stringValue(value: unknown): string | null {
@@ -625,37 +563,4 @@ function isExplicitSenderDomainList(value: string): boolean {
 
 interface CfctlDoctorSummary {
   healthy: boolean;
-}
-
-interface CfctlDoctorResponse {
-  ok?: boolean;
-  summary?: {
-    healthy_lane_count?: number;
-    healthy_lanes?: string[];
-  };
-  result?: {
-    build_identity_healthy?: boolean;
-    current_profile?: unknown;
-    instruction_drift?: number;
-    path_build?: {
-      healthy?: boolean;
-    };
-    lanes?: {
-      summary?: {
-        healthy_lane_count?: number;
-        healthy_lanes?: string[];
-      };
-    };
-  };
-}
-
-interface CfctlAuthStatusResponse {
-  ok?: boolean;
-  result?: {
-    credential_available?: boolean;
-    profile?: {
-      id?: string;
-      account_id?: string;
-    };
-  };
 }

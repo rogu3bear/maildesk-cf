@@ -1,0 +1,11 @@
+schema_version = 1
+
+[[operation]]
+id = "maildesk-cf.d1-evidence-read"
+title = "Read Maildesk relay evidence"
+description = "Read the compiler-owned body-free policy, schema, audit, and route-health projection. This does not prove inbox receipt."
+config_template = "wrangler.mail-router.toml"
+production_config = "wrangler.mail-router.production.toml"
+database_binding = "DB"
+wrangler_version = "4.110.0"
+projection = "maildesk_v1"

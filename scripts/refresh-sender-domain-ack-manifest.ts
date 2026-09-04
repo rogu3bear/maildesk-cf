@@ -1,3 +1,4 @@
+import { cfctlExecutable } from "./cfctl-profile-contract";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -41,7 +42,7 @@ const jsonOutput = args.includes("--json");
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
 const outPath = argValue("--out") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const previewDir = argValue("--preview-dir") ?? "var/proof/sender-domain-plan-previews";
-const cfctlBin = argValue("--cfctl") ?? "cfctl";
+const cfctlBin = cfctlExecutable(argValue("--cfctl"));
 const profileId = argValue("--profile") ?? process.env.MAILDESK_CFCTL_PROFILE?.trim();
 
 if (!profileId) {

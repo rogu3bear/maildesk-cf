@@ -115,3 +115,37 @@ What remains outside this checkout:
   account, capability, and exact selectors;
 - review the immutable PlanV2 operation before approval and execution;
 - run capability-specific readback and targeted mail proof after mutation.
+
+## One credential and read contract
+
+Production preflight and collection require `MAILDESK_CFCTL_PROFILE` and an
+explicit desired account. Every Cloudflare live read carries that same profile
+and account. `--cfctl` selects an executable first, then `CFCTL_BIN`, then
+`cfctl` on PATH. A healthy globally selected profile cannot substitute for the
+requested profile. Credentials stay with cfctl; Maildesk does not read Keychain,
+rotate tokens independently, or require a second environment token.
+
+Full collection uses the registered, committed
+`.cfctl/operations/d1-evidence.toml` `maildesk_v1` projection and the existing
+`r2-get-private-object-digest` capability. The operation pack owns the production
+config, binding and Wrangler pin; cfctl validates its clean workspace authority
+and exact account/database selectors before reading. Register the adopted
+repository with `cfctl workspace add` using its current command help, commit the
+operation declaration, and inspect `cfctl catalog show <operation-id> --json`
+before collection. Missing capability or unavailable credential is a failed
+transaction with a receipt; fix the reported contract/profile and rerun. There
+is no raw SQL, remote Wrangler or object-body fallback.
+
+The projection supplies only its approved relay table map, audit counters and
+independent policy digests/keys. A valid zero counter is distinct from malformed
+or unavailable evidence. R2 returns a bounded hash and object identity without
+returning policy bytes to Maildesk. Domain-scoped canary collection skips this
+account-wide private projection and leaves it unverified.
+
+Database audit and route-health rows do not independently prove inbox receipt
+or an outward reply. Collection therefore leaves those proof fields absent
+unless an existing explicit external evidence source supplies them. Follow the
+mail-proof workflow and recovery runbook to obtain the missing evidence; never
+mark production acceptance green from these aggregate reads. `transaction_complete`
+means the selected reads completed, while `complete`, acceptance and mail
+readiness retain their separate requirements.

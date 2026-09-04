@@ -1,3 +1,4 @@
+import { cfctlExecutable } from "./cfctl-profile-contract";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -46,7 +47,7 @@ const confirmBulkPlan = args.includes("--confirm-bulk-plan");
 const jsonOutput = args.includes("--json");
 const manifestPath = argValue("--manifest") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const outPath = argValue("--out");
-const cfctlBin = argValue("--cfctl") ?? "cfctl";
+const cfctlBin = cfctlExecutable(argValue("--cfctl"));
 const domainFilter = argValue("--domain");
 const limit = args.includes("--all")
   ? Number.POSITIVE_INFINITY

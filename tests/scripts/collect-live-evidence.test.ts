@@ -4,6 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { APPROVED_AUDIT_EVENTS, APPROVED_RELAY_TABLES } from "../../scripts/cfctl-d1-evidence";
 import { deploymentArtifactSha256 } from "../../scripts/worker-runtime-provenance";
 
 const root = resolve(import.meta.dir, "../..");
@@ -20,75 +21,55 @@ describe("maildesk live-evidence collector", () => {
     const policySha256 = createHash("sha256").update(readFileSync(policyObject)).digest("hex");
     const policyKey = `config/policy/${policySha256}.json`;
     const projection = projectionSummary(policyObject, desiredObject);
-    const d1Result = JSON.stringify([{ results: [{
-      active_policy_sha256: policySha256,
-      active_policy_r2_key: policyKey,
-      revision_r2_key: policyKey,
-      expected_domain_count: 1,
-      expected_route_count: 11,
-      projected_domain_count: 1,
-      projected_route_count: 11,
-      projection_policy_sha256: policySha256,
-      active_desired_state_sha256: projection.desired_state_sha256,
-      active_projection_sha256: projection.projection_sha256,
-      route_address: "security@example.com",
-      route_kind: "role_alias",
-      operator_count: 2,
-      reply_identity: "security@example.com",
-      policy_sha256: policySha256,
-      last_inbound_provider_accepted_at: "2026-08-13T00:00:00.000Z",
-      last_inbound_provider_message_ids_json: JSON.stringify(["provider-a", "provider-b"]),
-      last_inbox_verified_at: "2026-08-13T00:01:00.000Z",
-    }] }]);
+    const readEnvelope = (capability_id: string, result: unknown) => JSON.stringify({ schema_version: 2, command: "call", ok: true, performed: true, capability_id, profile_id: "profile-example", account_id: "account-example", verification: { state: "passed" }, evidence: [{ content_hash: `sha256:${"d".repeat(64)}` }], result });
+    const d1Result = readEnvelope("maildesk-cf.d1-evidence-read", { adapter: "workspace_d1_evidence_v1", success: true, database_id: "d1-example", body_returned: false, provider_output_retained: false, evidence: {
+      schema_version: 1, body_returned: false, active_policy_digest: `sha256:${policySha256}`, immutable_policy_object_key: policyKey, revision_r2_key: policyKey,
+      expected_domain_count: 1, expected_route_count: 11, projected_domain_count: 1, projected_route_count: 11,
+      projection_policy_sha256: `sha256:${policySha256}`, desired_state_digest: `sha256:${projection.desired_state_sha256}`, semantic_projection_digest: `sha256:${projection.projection_sha256}`,
+      approved_schema_present: true, approved_table_presence: Object.fromEntries(APPROVED_RELAY_TABLES.map(name => [name, true])), audit_event_counts: Object.fromEntries(APPROVED_AUDIT_EVENTS.map(name => [name, 0])),
+    } });
+    const r2Result = readEnvelope("r2-get-private-object-digest", { success: true, result: { schema_version: 1, account_id: "account-example", bucket_name: "maildesk-cf-policy", object_key: policyKey, body_returned: false, byte_count: 12, etag: "etag", sha256: `sha256:${policySha256}` } });
     writeFileSync(
       cfctl,
       `#!/bin/sh
 echo "$@" >> "$MAILDESK_TEST_CFCTL_LOG"
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":true,"page_size":50,"pages":2,"rule_count":1,"rules":[{"enabled":true,"matchers":[{"matcher_type":"literal","field":"to","value_sha256":"sha256:786906db96ef646937f205d3e7398630ce2e97df5364baf31b81ef84f1386c3f"}],"actions":[{"action_type":"worker","worker_targets":["maildesk-cf-router"],"value_count":1}]}]}},"error":null}' ;;
-  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
-  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
-  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}' ;;
-  *"call listWorkers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
+  *"call maildesk-cf.d1-evidence-read"*) echo '${d1Result}' ;;
+  *"call r2-get-private-object-digest"*) echo '${r2Result}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":true,"page_size":50,"pages":2,"rule_count":1,"rules":[{"enabled":true,"matchers":[{"matcher_type":"literal","field":"to","value_sha256":"sha256:786906db96ef646937f205d3e7398630ce2e97df5364baf31b81ef84f1386c3f"}],"actions":[{"action_type":"worker","worker_targets":["maildesk-cf-router"],"value_count":1}]}]}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"example.com","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
+  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}' ;;
+  *"call listWorkers"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
   *"call worker-deployments-list-deployments"*)
     case "$*" in
       *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
       *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
       *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
     esac
-    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+    printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
   *"call worker-versions-get-version-detail"*)
     case "$*" in
       *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
       *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
       *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
     esac
-    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
-  *"call d1-list-databases"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call r2-list-buckets"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
-  *"call queues-list-consumers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
-  *"call queues-list"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
+    printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+  *"call d1-list-databases"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call r2-list-buckets"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
+  *"call queues-list-consumers"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
+  *"call queues-list"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
     );
     chmodSync(cfctl, 0o755);
-    writeFileSync(
-      wrangler,
-      `#!/bin/sh
-if [ "$1" = "r2" ]; then
-  cat "$MAILDESK_TEST_POLICY_OBJECT"
-  exit 0
-fi
-echo '${d1Result}'
-exit 0
-`,
-    );
+    writeFileSync(wrangler, "#!/bin/sh\necho raw-provider-bypass >&2\nexit 99\n");
     chmodSync(wrangler, 0o755);
 
     const result = spawnSync(
@@ -114,7 +95,7 @@ exit 0
         encoding: "utf8",
         env: {
           ...process.env,
-          MAILDESK_CFCTL_PROFILE: "profile-example",
+          CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
           ...workerRuntimeFixtureEnv(),
@@ -162,17 +143,7 @@ exit 0
       active_desired_state_sha256: projection.desired_state_sha256,
       active_projection_sha256: projection.projection_sha256,
     });
-    expect(evidence.inbound_proofs?.["example.com"]).toMatchObject({
-      status: "ok",
-      envelope_to: "security@example.com",
-      route_kind: "role_alias",
-      operator_count: 2,
-      provider_message_ids: ["provider-a", "provider-b"],
-      default_reply_identity: "security@example.com",
-    });
-    expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("forwarded_to");
-    expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("raw_r2_key");
-    expect(JSON.stringify(evidence.inbound_proofs)).not.toContain("operator@");
+    expect(evidence.inbound_proofs).toBeUndefined();
     expect(evidence.cfctl_maildesk?.workers).toEqual({
       relay_router: "not_checked",
       relay_outbound: "not_checked",
@@ -232,6 +203,11 @@ exit 0
     }
     expect(cfctlCalls).toContain("--profile profile-example");
     expect(cfctlCalls).toContain("--account account-example");
+    for (const line of cfctlCalls.trim().split("\n").filter(line => line.startsWith("call "))) {
+      expect(line).toContain("--profile profile-example"); expect(line).toContain("--account account-example");
+    }
+    expect(cfctlCalls).toContain("call maildesk-cf.d1-evidence-read");
+    expect(cfctlCalls).toContain("call r2-get-private-object-digest");
     const routingCall = cfctlCalls.split("\n").find((line) =>
       line.includes("call email-routing-routing-rules-list-routing-rules")
     );
@@ -240,6 +216,27 @@ exit 0
     expect(routingCall).not.toContain("--query per_page=");
     expect(cfctlCalls).not.toContain("list zone");
     expect(cfctlCalls).not.toContain("maildesk-cf verify");
+
+    const privateReadStub = readFileSync(cfctl, "utf8");
+    for (const [name, replacement] of [
+      ["malformed", JSON.stringify({ ...JSON.parse(d1Result), result: {} })],
+      ["failed", JSON.stringify({ ...JSON.parse(d1Result), ok: false, error: { code: "D1_READ_UNAVAILABLE" } })],
+      ["wrong-profile", JSON.stringify({ ...JSON.parse(d1Result), profile_id: "unrelated-profile" })],
+      ["wrong-account", JSON.stringify({ ...JSON.parse(d1Result), account_id: "unrelated-account" })],
+    ]) {
+      writeFileSync(cfctl, privateReadStub.replace(d1Result, replacement!), { mode: 0o755 });
+      const rejectedOut = join(dir, `${name}-private.json`), rejectedLog = join(dir, `${name}-calls.log`);
+      const rejected = spawnSync("bun", ["run", "scripts/collect-live-evidence.ts", "--cfctl", cfctl, "--out", rejectedOut, "--no-resend"], {
+        cwd: root, encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example", MAILDESK_TEST_CFCTL_LOG: rejectedLog, ...workerRuntimeFixtureEnv() },
+      });
+      expect(rejected.status).toBe(1);
+      const rejectedEvidence = JSON.parse(readFileSync(rejectedOut, "utf8"));
+      expect(rejectedEvidence.cfctl_readback.transaction_complete).toBe(false);
+      expect(rejectedEvidence.cfctl_readback.receipts.at(-1).ok).toBe(false);
+      expect(rejectedEvidence.d1).toBeUndefined(); expect(rejectedEvidence.active_policy).toBeUndefined();
+      expect(readFileSync(rejectedLog, "utf8")).not.toContain("call r2-get-private-object-digest");
+    }
+    writeFileSync(cfctl, privateReadStub, { mode: 0o755 });
 
     const successfulCfctlStub = readFileSync(cfctl, "utf8");
     const forwardOnlyOut = join(dir, "forward-only-evidence.json");
@@ -274,7 +271,7 @@ exit 0
         encoding: "utf8",
         env: {
           ...process.env,
-          MAILDESK_CFCTL_PROFILE: "profile-example",
+          CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
           ...workerRuntimeFixtureEnv(),
@@ -328,7 +325,7 @@ exit 0
         encoding: "utf8",
         env: {
           ...process.env,
-          MAILDESK_CFCTL_PROFILE: "profile-example",
+          CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
           ...workerRuntimeFixtureEnv(),
@@ -416,7 +413,7 @@ JSON
         encoding: "utf8",
         env: {
           ...process.env,
-          MAILDESK_CFCTL_PROFILE: "profile-example",
+          CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
           GOOGLE_ADMIN_BIN: googleAdmin,
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_POLICY_OBJECT: policyObject,
@@ -700,8 +697,7 @@ esac
       googleAdmin,
       `#!/bin/sh
 echo "$*" >> "$MAILDESK_TEST_PROVIDER_LOG"
-target="$4"
-echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"id\":\"workspace:group:$target\",\"type\":\"workspace.group\"},{\"type\":\"workspace.group_membership\",\"record\":{\"email\":\"operator@example.com\"}}]}"
+printf '%s\n' '${JSON.stringify({ snapshot_captured_at: "2026-08-18T00:03:00.000Z", resources: [{ id: `workspace:group:founders@${fixture.domains[0]}`, type: "workspace.group" }, { type: "workspace.group_membership", record: { email: "operator@example.com" } }] })}'
 `,
       { mode: 0o755 },
     );
@@ -735,7 +731,7 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
         encoding: "utf8",
         env: {
           ...process.env,
-          MAILDESK_CFCTL_PROFILE: "profile-example",
+          CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
           MAILDESK_TEST_CFCTL_LOG: cfctlLog,
           MAILDESK_TEST_PROVIDER_LOG: providerLog,
           ...workerRuntimeFixtureEnv(),
@@ -746,14 +742,14 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
     expect(result.status).toBe(0);
     const providerCalls = readFileSync(providerLog, "utf8");
     expect(providerCalls).toContain(fixture.domains[0]!);
-    expect(providerCalls).toContain(fixture.domains[1]!);
+    expect(providerCalls).not.toContain(fixture.domains[1]!);
     expect(providerCalls).not.toContain(fixture.domains[2]!);
     const evidence = JSON.parse(readFileSync(out, "utf8")) as {
       inbound_proofs?: Record<string, unknown>;
       outbound_proofs?: Record<string, unknown>;
     };
     expect(Object.keys(evidence.inbound_proofs ?? {})).toEqual([fixture.domains[0]!]);
-    expect(Object.keys(evidence.outbound_proofs ?? {})).toEqual([fixture.domains[0]!]);
+    expect(Object.keys(evidence.outbound_proofs ?? {})).toEqual([]);
   }, 20_000);
 
   test("canary scope rejects Resend's account-global domain listing before execution", () => {
@@ -990,8 +986,8 @@ echo "{\"snapshot_captured_at\":\"2026-08-18T00:03:00.000Z\",\"resources\":[{\"i
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":false,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -1022,7 +1018,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1050,8 +1046,8 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"zones-get","profile_id":"other-profile","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":false,"performed":true,"capability_id":"zones-get","profile_id":"other-profile","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2; exit 1 ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -1079,7 +1075,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1105,9 +1101,9 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":false,"page_size":50,"pages":1,"rule_count":0,"rules":[]}},"error":null}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":false,"page_size":50,"pages":1,"rule_count":0,"rules":[]}},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -1138,7 +1134,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1185,7 +1181,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
     expect(cursorResult.status).toBe(1);
@@ -1217,9 +1213,9 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '${JSON.stringify({ schema_version: 2, ok: true, performed: true, capability_id: "email-routing-routing-rules-list-routing-rules", profile_id: "profile-example", account_id: "account-example", verification: { state: "not_applicable" }, evidence: [{ content_hash: `sha256:${"b".repeat(64)}` }], result: { result: { schema_version: 1, complete: true, page_size: 50, pages: 2, rule_count: rules.length, rules } }, error: null })}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '${JSON.stringify({ schema_version: 2, command: "call", ok: true, performed: true, capability_id: "email-routing-routing-rules-list-routing-rules", profile_id: "profile-example", account_id: "account-example", verification: { state: "not_applicable" }, evidence: [{ content_hash: `sha256:${"b".repeat(64)}` }], result: { result: { schema_version: 1, complete: true, page_size: 50, pages: 2, rule_count: rules.length, rules } }, error: null })}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -1250,7 +1246,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1299,7 +1295,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1324,7 +1320,7 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
   *"call zones-get"*) echo '{"schema_version":1,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
@@ -1352,7 +1348,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1375,11 +1371,11 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"unexpected":true}},"error":null}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"unexpected":true}},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac
 `,
@@ -1406,7 +1402,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1437,12 +1433,12 @@ esac
       cfctl,
       `#!/bin/sh
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
-  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-example","name":"example.com","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-routing-rules-list-routing-rules"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":[{"recipient":"security@example.com","enabled":true,"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}],"result_info":{"page":1,"per_page":50,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"example.com","content":"route1.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
+  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"STOP_AFTER_CATCH_ALL"}}' ;;
 esac
 `,
@@ -1469,7 +1465,7 @@ esac
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, MAILDESK_CFCTL_PROFILE: "profile-example" },
+        env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example" },
       },
     );
 
@@ -1517,7 +1513,7 @@ esac
       { cwd: root, encoding: "utf8", env },
     );
 
-    expect(result.status).toBe(0);
+    expect(result.status).toBe(1);
     expect(readFileSync(out, "utf8")).not.toContain("profile-example");
     const evidence = JSON.parse(readFileSync(out, "utf8")) as {
       cfctl_readback?: {
@@ -1529,11 +1525,11 @@ esac
       };
     };
     expect(evidence.cfctl_readback).toMatchObject({
-      required: false,
+      required: true,
       attempted: false,
       transaction_complete: false,
       complete: false,
-      receipts: [],
+      receipts: [{ capability_id: "explicit-profile", ok: false, error_code: "MAILDESK_CFCTL_PROFILE_REQUIRED" }],
     });
     expect((evidence as { d1?: unknown }).d1).toBeUndefined();
     expect(() => readFileSync(cfctlLog, "utf8")).toThrow();
@@ -1589,7 +1585,7 @@ echo '[{"results":[{"name":"runtime_state"}]}]'
       ],
       { cwd: root, encoding: "utf8", env },
     );
-    expect(populatedCollection.status).toBe(0);
+    expect(populatedCollection.status).toBe(1);
     const populatedVerification = spawnSync(
       "bun",
       [
@@ -1607,7 +1603,7 @@ echo '[{"results":[{"name":"runtime_state"}]}]'
       { cwd: root, encoding: "utf8" },
     );
     expect(populatedVerification.status).toBe(0);
-    expect(JSON.parse(populatedVerification.stdout).status.live_evidence_present).toBe(true);
+    expect(JSON.parse(populatedVerification.stdout).status.live_evidence_present).toBe(false);
   });
 });
 
@@ -1682,6 +1678,10 @@ function workerRuntimeFixtureEnv(): Record<string, string> {
 }
 
 function writeCoverageCfctl(path: string) {
+  const sha = "a".repeat(64), key = `config/policy/${sha}.json`;
+  const read = (capability_id: string, result: unknown) => JSON.stringify({ schema_version: 2, command: "call", ok: true, performed: true, capability_id, profile_id: "profile-example", account_id: "account-example", verification: { state: "passed" }, evidence: [{ content_hash: `sha256:${sha}` }], result });
+  const d1 = read("maildesk-cf.d1-evidence-read", { adapter: "workspace_d1_evidence_v1", success: true, database_id: "d1-example", body_returned: false, provider_output_retained: false, evidence: { schema_version: 1, body_returned: false, active_policy_digest: `sha256:${sha}`, immutable_policy_object_key: key, revision_r2_key: key, projection_policy_sha256: `sha256:${sha}`, desired_state_digest: `sha256:${sha}`, semantic_projection_digest: `sha256:${sha}`, expected_domain_count: 14, projected_domain_count: 14, expected_route_count: 14, projected_route_count: 14, approved_schema_present: true, approved_table_presence: Object.fromEntries(APPROVED_RELAY_TABLES.map(name => [name, true])), audit_event_counts: Object.fromEntries(APPROVED_AUDIT_EVENTS.map(name => [name, 0])) } });
+  const r2 = read("r2-get-private-object-digest", { success: true, result: { schema_version: 1, account_id: "account-example", bucket_name: "maildesk-cf-policy", object_key: key, body_returned: false, byte_count: 12, etag: "etag", sha256: `sha256:${sha}` } });
   writeFileSync(
     path,
     `#!/bin/sh
@@ -1694,40 +1694,42 @@ for argument in "$@"; do
   esac
 done
 case "$*" in
-  "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
-  *"call zones-get"*) printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-%s","name":"%s","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}\n' "$domain" "$domain" ;;
+  *"call maildesk-cf.d1-evidence-read"*) echo '${d1}' ;;
+  *"call r2-get-private-object-digest"*) echo '${r2}' ;;
+  "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
+  *"call zones-get"*) printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"a".repeat(64)}"}],"result":{"result":[{"id":"zone-%s","name":"%s","status":"active"}],"result_info":{"page":1,"per_page":5,"total_pages":1,"total_count":1}},"error":null}\n' "$domain" "$domain" ;;
   *"call email-routing-routing-rules-list-routing-rules"*)
     if [ -n "$MAILDESK_TEST_DENY_DOMAIN" ] && [ "$domain" = "$MAILDESK_TEST_DENY_DOMAIN" ]; then
-      echo '{"schema_version":2,"ok":false,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2
+      echo '{"schema_version":2,"command":"call","ok":false,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"failed"},"evidence":[],"result":null,"error":{"code":"CFCTL_LIVE_UNAUTHORIZED"}}' >&2
       exit 1
     fi
-    echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":true,"page_size":50,"pages":1,"rule_count":0,"rules":[]}},"error":null}' ;;
-  *"call dns-records-for-a-zone-list-dns-records"*) printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"%s","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}\n' "$domain" "$domain" "$domain" ;;
-  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
-  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
-  *"call email-sending-subdomains-list-sending-subdomains"*) printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-sending-subdomains-list-sending-subdomains","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"8".repeat(64)}"}],"result":{"result":[{"name":"%s","status":"verified"}]},"error":null}\n' "$domain" ;;
-  *"call listWorkers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
-  *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
-  *"call d1-list-databases"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
-  *"call r2-list-buckets"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
-  *"call queues-list-consumers"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
-  *"call queues-list"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
+    echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"b".repeat(64)}"}],"result":{"result":{"schema_version":1,"complete":true,"page_size":50,"pages":1,"rule_count":0,"rules":[]}},"error":null}' ;;
+  *"call dns-records-for-a-zone-list-dns-records"*) printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"c".repeat(64)}"}],"result":{"result":[{"type":"MX","name":"%s","content":"route1.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route2.mx.cloudflare.net"},{"type":"MX","name":"%s","content":"route3.mx.cloudflare.net"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}\n' "$domain" "$domain" "$domain" ;;
+  *"call email-routing-settings-get-email-routing-settings"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"d".repeat(64)}"}],"result":{"result":{"enabled":true}},"error":null}' ;;
+  *"call email-routing-routing-rules-get-catch-all-rule"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"7".repeat(64)}"}],"result":{"result":{"enabled":false,"actions":[]}},"error":null}' ;;
+  *"call email-sending-subdomains-list-sending-subdomains"*) printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"email-sending-subdomains-list-sending-subdomains","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"8".repeat(64)}"}],"result":{"result":[{"name":"%s","status":"verified"}]},"error":null}\n' "$domain" ;;
+  *"call listWorkers"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"listWorkers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"e".repeat(64)}"}],"result":{"result":[{"name":"maildesk-cf-router"},{"name":"maildesk-cf-relay-outbound"},{"name":"maildesk-cf-routing-health"}],"result_info":{"page":1,"per_page":100,"total_pages":1,"total_count":3}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-router"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"3".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"},{"name":"MAIL_JOBS","type":"queue","queue_name":"maildesk-cf-relay-jobs"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-relay-outbound"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"4".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"EMAIL","type":"send_email"},{"name":"DB","type":"d1","id":"d1-example"},{"name":"POLICY_STORE","type":"r2_bucket","bucket_name":"maildesk-cf-policy"},{"name":"RELAY_SPOOL","type":"r2_bucket","bucket_name":"maildesk-cf-relay-spool"}]}},"error":null}' ;;
+  *"call worker-script-get-settings"*"script_name=maildesk-cf-routing-health"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-script-get-settings","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"5".repeat(64)}"}],"result":{"result":{"bindings":[{"name":"DB","type":"d1","id":"d1-example"},{"name":"ASSETS","type":"assets"}]}},"error":null}' ;;
+  *"call d1-list-databases"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"d1-list-databases","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"f".repeat(64)}"}],"result":{"result":[{"uuid":"d1-example","name":"maildesk-cf-relay-db"}],"result_info":{"page":1,"per_page":10000,"total_pages":1,"total_count":1}},"error":null}' ;;
+  *"call r2-list-buckets"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"r2-list-buckets","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"1".repeat(64)}"}],"result":{"result":{"buckets":[{"name":"maildesk-cf-policy"},{"name":"maildesk-cf-relay-spool"}]},"result_info":{"cursor":""}},"error":null}' ;;
+  *"call queues-list-consumers"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"queues-list-consumers","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"6".repeat(64)}"}],"result":{"result":[{"type":"worker","script_name":"maildesk-cf-relay-outbound","settings":{"batch_size":1,"max_concurrency":1,"max_retries":5,"dead_letter_queue":"maildesk-cf-relay-dlq"}}]},"error":null}' ;;
+  *"call queues-list"*) echo '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"queues-list","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"2".repeat(64)}"}],"result":{"result":[{"queue_id":"queue-jobs","queue_name":"maildesk-cf-relay-jobs"},{"queue_id":"queue-dlq","queue_name":"maildesk-cf-relay-dlq"}]},"error":null}' ;;
   *"call worker-deployments-list-deployments"*)
     case "$*" in
       *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
       *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
       *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
     esac
-    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+    printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-deployments-list-deployments","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"9".repeat(64)}"}],"result":{"result":{"deployments":[{"versions":[{"version_id":"%s","percentage":100}],"annotations":{"workers/message":"source=%s artifact-sha256=%s"}}]}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
   *"call worker-versions-get-version-detail"*)
     case "$*" in
       *"script_name=maildesk-cf-router"*) artifact="$MAILDESK_TEST_ROUTER_ARTIFACT"; version="11111111-1111-4111-8111-111111111111" ;;
       *"script_name=maildesk-cf-relay-outbound"*) artifact="$MAILDESK_TEST_OUTBOUND_ARTIFACT"; version="22222222-2222-4222-8222-222222222222" ;;
       *) artifact="$MAILDESK_TEST_HEALTH_ARTIFACT"; version="33333333-3333-4333-8333-333333333333" ;;
     esac
-    printf '{"schema_version":2,"ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
+    printf '{"schema_version":2,"command":"call","ok":true,"performed":true,"capability_id":"worker-versions-get-version-detail","profile_id":"profile-example","account_id":"account-example","verification":{"state":"not_applicable"},"evidence":[{"content_hash":"sha256:${"0".repeat(64)}"}],"result":{"result":{"id":"%s","annotations":{"workers/message":"source=%s artifact-sha256=%s"},"resources":{"script":{"etag":"${"6".repeat(64)}"}},"metadata":{"source":"cfctl"}}},"error":null}\n' "$version" "$MAILDESK_TEST_HEAD" "$artifact" ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' >&2; exit 1 ;;
 esac
 `,
@@ -1771,7 +1773,7 @@ function runCoverageCollection(
     encoding: "utf8",
     env: {
       ...process.env,
-      MAILDESK_CFCTL_PROFILE: "profile-example",
+      CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
       MAILDESK_TEST_CFCTL_LOG: log,
       ...workerRuntimeFixtureEnv(),
       ...(options.denyDomain ? { MAILDESK_TEST_DENY_DOMAIN: options.denyDomain } : {}),

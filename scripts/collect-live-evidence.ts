@@ -1,3 +1,5 @@
+import { decodeD1Evidence, decodePolicyObjectDigest } from "./cfctl-d1-evidence";
+import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
 import { maildeskReadContracts } from "./cfctl-v2-command-contract";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,6 +26,7 @@ import {
 } from "./live-evidence-coverage";
 
 interface DesiredState extends CanonicalDesiredTopology {
+  project?: { account_id?: string; account_id_env?: string };
   domains: Array<{
     name: string;
     inbound_mx_provider?: string;
@@ -144,6 +147,7 @@ type PaginationContract =
   | null;
 
 interface CfctlEnvelope {
+  command?: string;
   schema_version?: number;
   ok?: boolean;
   performed?: boolean;
@@ -209,10 +213,8 @@ const args = process.argv.slice(2);
 const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDesiredStatePath());
 const policyPath = resolve(root, argValue("--policy") ?? defaultPolicyPath());
 const outputPath = resolve(root, argValue("--out") ?? "var/maildesk-live-evidence.json");
-const cfctlBin = process.env.CFCTL_BIN ?? argValue("--cfctl") ?? "cfctl";
-const wranglerBin = process.env.WRANGLER_BIN ?? argValue("--wrangler") ?? "wrangler";
+const cfctlBin = cfctlExecutable(argValue("--cfctl"));
 const readyzUrl = process.env.MAILDESK_READYZ_URL ?? argValue("--readyz-url");
-const d1Database = process.env.MAILDESK_D1_DATABASE ?? argValue("--d1-database");
 const googleAdminBin = process.env.GOOGLE_ADMIN_BIN ?? argValue("--google-admin");
 const desiredStateText = readFileSync(desiredStatePath, "utf8");
 const desiredState = JSON.parse(desiredStateText) as DesiredState;
@@ -236,6 +238,8 @@ const evidence: Evidence = {
 const cfctlResult = collectGovernedCfctlEvidence(cfctlProfile);
 evidence.cfctl_readback = cfctlResult.readback;
 if (cfctlResult.evidence) {
+  evidence.active_policy = cfctlResult.evidence.active_policy;
+  evidence.d1 = cfctlResult.evidence.d1;
   evidence.cfctl_maildesk = cfctlResult.evidence.cfctl_maildesk;
   evidence.zones = cfctlResult.evidence.zones;
   evidence.email_routing = cfctlResult.evidence.email_routing;
@@ -248,68 +252,6 @@ if (cfctlResult.readback.required && !cfctlResult.readback.transaction_complete)
 if (readyzUrl) {
   const readyz = fetchJson(["-fsS", readyzUrl]);
   if (readyz.ok && validReadyzEvidence(readyz.value)) evidence.readyz = readyz.value;
-}
-
-const d1Name = desiredState.storage?.d1_database ?? d1Database;
-if (d1Name) {
-  const activePolicy = collectActivePolicyEvidence(d1Name, desiredState.storage.r2_policy_bucket);
-  if (activePolicy) evidence.active_policy = activePolicy;
-  const d1Evidence = collectD1Evidence(d1Name);
-  if ((d1Evidence.tables?.length ?? 0) > 0 || Object.keys(d1Evidence.audit_event_counts ?? {}).length > 0) {
-    evidence.d1 = d1Evidence;
-  }
-  const inboundProofs = collectInboundProofs(d1Name, readScope.selected_domains);
-  if (Object.keys(inboundProofs).length > 0) {
-    evidence.inbound_proofs = inboundProofs;
-  }
-  const outboundProofs = collectOutboundProofs(d1Name, readScope.selected_domains);
-  if (Object.keys(outboundProofs).length > 0) {
-    evidence.outbound_proofs = outboundProofs;
-  }
-}
-
-function collectActivePolicyEvidence(
-  databaseName: string,
-  policyBucket: string,
-): ActivePolicyEvidence | null {
-  const [row] = wranglerD1Results(
-    databaseName,
-    "SELECT rs.active_policy_sha256, rs.active_policy_r2_key, pr.r2_object_key AS revision_r2_key, pr.expected_domain_count, pr.expected_route_count, (SELECT COUNT(*) FROM domains d WHERE EXISTS (SELECT 1 FROM alias_routes ar WHERE ar.domain_id = d.id AND ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256)) AS projected_domain_count, (SELECT COUNT(*) FROM alias_routes ar WHERE ar.enabled = 1 AND ar.policy_sha256 = rs.active_policy_sha256) AS projected_route_count, (SELECT value FROM policy_projection_state WHERE key = 'active_policy_sha256') AS projection_policy_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_desired_state_sha256') AS active_desired_state_sha256, (SELECT value FROM policy_projection_state WHERE key = 'active_projection_sha256') AS active_projection_sha256 FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1;",
-  );
-  if (
-    typeof row?.active_policy_sha256 !== "string" ||
-    typeof row.active_policy_r2_key !== "string" ||
-    typeof row.revision_r2_key !== "string" ||
-    typeof row.expected_domain_count !== "number" ||
-    typeof row.expected_route_count !== "number" ||
-    typeof row.projected_domain_count !== "number" ||
-    typeof row.projected_route_count !== "number" ||
-    typeof row.projection_policy_sha256 !== "string" ||
-    typeof row.active_desired_state_sha256 !== "string" ||
-    typeof row.active_projection_sha256 !== "string"
-  ) return null;
-
-  const object = spawnSync(
-    wranglerBin,
-    ["r2", "object", "get", `${policyBucket}/${row.active_policy_r2_key}`, "--remote", "--pipe"],
-    { cwd: root, encoding: null, maxBuffer: 16 * 1024 * 1024 },
-  );
-  if (object.status !== 0 || !object.stdout) return null;
-
-  return {
-    active_policy_sha256: row.active_policy_sha256,
-    active_policy_r2_key: row.active_policy_r2_key,
-    revision_r2_key: row.revision_r2_key,
-    object_key: row.active_policy_r2_key,
-    object_sha256: createHash("sha256").update(object.stdout).digest("hex"),
-    expected_domain_count: row.expected_domain_count,
-    expected_route_count: row.expected_route_count,
-    projected_domain_count: row.projected_domain_count,
-    projected_route_count: row.projected_route_count,
-    projection_policy_sha256: row.projection_policy_sha256,
-    active_desired_state_sha256: row.active_desired_state_sha256,
-    active_projection_sha256: row.active_projection_sha256,
-  };
 }
 
 if (useResend) {
@@ -444,11 +386,11 @@ function readJson<T>(path: string): T {
 
 function collectGovernedCfctlEvidence(profileId: string | undefined): {
   readback: CfctlReadbackEvidence;
-  evidence?: Pick<Evidence, "zones" | "email_routing" | "dns_mx" | "cfctl_maildesk">;
+  evidence?: Pick<Evidence, "zones" | "email_routing" | "dns_mx" | "cfctl_maildesk" | "active_policy" | "d1">;
 } {
   if (!profileId) {
     return {
-      readback: buildCfctlReadback(false, false, false, undefined, undefined, [], []),
+      readback: buildCfctlReadback(true, false, false, undefined, undefined, [failureReceipt("explicit-profile", false, "MAILDESK_CFCTL_PROFILE_REQUIRED")], []),
     };
   }
   if (desiredState.domains.length > 100) {
@@ -788,6 +730,32 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     ...(senderMode === "cloudflare_email_service" ? { sender_domains: senderDomains } : {}),
   };
 
+  let privateEvidence: ReturnType<typeof decodeD1Evidence> = null;
+  let objectDigest: string | null = null;
+  // A canary domain scope does not authorize an account-wide private projection.
+  if (readScope.mode !== "canary") {
+    const databaseId = d1Ids.get(desiredState.storage.d1_database);
+    const pack = readWranglerConfig(".cfctl/operations/d1-evidence.toml");
+    const operations = Array.isArray(pack?.operation) ? pack.operation.filter((item: unknown) => isRecord(item) && item.projection === "maildesk_v1") : [];
+    const operation = operations.length === 1 && isRecord(operations[0]) ? operations[0] : null;
+    if (!databaseId || !operation || typeof operation.id !== "string" || typeof operation.production_config !== "string" || operation.database_binding !== "DB") {
+      receipts.push(failureReceipt("workspace-d1-evidence", false, "LOCAL_CONTRACT_MALFORMED"));
+      return incompleteReadback(profileId, accountId, receipts);
+    }
+    const config = operation.production_config as string;
+    const d1 = cfctlCall(operation.id, profileId, accountId, [["account_id", accountId], ["database_id", databaseId]], [["config", config], ["binding", "DB"]]);
+    receipts.push(d1.receipt);
+    if (!d1.ok) return incompleteReadback(profileId, accountId, receipts);
+    privateEvidence = decodeD1Evidence(d1.result, databaseId);
+    if (!privateEvidence) return malformedReadback(profileId, accountId, receipts, d1.receipt);
+    const objectKey = privateEvidence.active_policy.active_policy_r2_key;
+    const r2 = cfctlCall("r2-get-private-object-digest", profileId, accountId, [["account_id", accountId], ["bucket_name", desiredState.storage.r2_policy_bucket], ["object_key", objectKey]]);
+    receipts.push(r2.receipt);
+    if (!r2.ok) return incompleteReadback(profileId, accountId, receipts);
+    objectDigest = decodePolicyObjectDigest(r2.result, accountId, desiredState.storage.r2_policy_bucket, objectKey);
+    if (!objectDigest) return malformedReadback(profileId, accountId, receipts, r2.receipt);
+  }
+
   return {
     readback: buildCfctlReadback(
       true,
@@ -804,6 +772,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       email_routing: emailRouting,
       dns_mx: dnsMx,
       cfctl_maildesk: maildeskEvidence,
+      ...(privateEvidence && objectDigest ? { d1: privateEvidence.d1, active_policy: { ...privateEvidence.active_policy, object_key: privateEvidence.active_policy.active_policy_r2_key, object_sha256: objectDigest } } : {}),
     },
   };
 }
@@ -966,7 +935,7 @@ function cfctlProfileAccount(profileId: string): {
       receipt: failureReceipt("auth-profiles", false, "CFCTL_ENVELOPE_VERSION_MISMATCH"),
     };
   }
-  if (envelope.ok !== true || envelope.performed !== false || envelope.error) {
+  if (envelope.command !== "auth profiles" || envelope.ok !== true || envelope.performed !== false || envelope.error) {
     return {
       ok: false,
       receipt: failureReceipt(
@@ -984,6 +953,10 @@ function cfctlProfileAccount(profileId: string): {
       ok: false,
       receipt: failureReceipt("auth-profiles", false, "PROFILE_ACCOUNT_UNAVAILABLE"),
     };
+  }
+  const expectedAccount = cfctlAccountTarget(desiredState.project);
+  if (!expectedAccount || expectedAccount !== accountId) {
+    return { ok: false, receipt: failureReceipt("auth-profiles", false, "PROFILE_ACCOUNT_TARGET_MISMATCH") };
   }
   return {
     ok: true,
@@ -1021,6 +994,7 @@ function cfctlCall(
   const envelope = parseJson<CfctlEnvelope>(result.status === 0 ? result.stdout : result.stderr);
   const boundEnvelope =
     envelope?.schema_version === 2 &&
+      envelope.command === "call" &&
       envelope.capability_id === capabilityId &&
       envelope.profile_id === profileId &&
       envelope.account_id === accountId
@@ -1544,129 +1518,6 @@ function validReadyzEvidence(value: unknown): value is ReadyzEvidence {
   );
 }
 
-function collectD1Evidence(databaseName: string): Evidence["d1"] {
-  const tables = wranglerD1Results(
-    databaseName,
-    "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;",
-  )
-    .map((row) => row.name)
-    .filter((name): name is string => typeof name === "string");
-
-  const auditRows = wranglerD1Results(
-    databaseName,
-    "SELECT action, COUNT(*) AS count FROM audit_events GROUP BY action ORDER BY action;",
-  );
-  const audit_event_counts = Object.fromEntries(
-    auditRows
-      .filter((row) => typeof row.action === "string" && typeof row.count === "number")
-      .map((row) => [row.action as string, row.count as number]),
-  );
-
-  return {
-    ...(tables.length > 0 ? { tables } : {}),
-    ...(Object.keys(audit_event_counts).length > 0 ? { audit_event_counts } : {}),
-  };
-}
-
-function collectInboundProofs(
-  databaseName: string,
-  selectedDomains: string[],
-): Record<string, InboundProof> {
-  const domainPredicate = sqlDomainSet(selectedDomains);
-  const rows = wranglerD1Results(
-    databaseName,
-    "SELECT rh.route_address, rh.decision_kind AS route_kind, rh.operator_count, rh.reply_identity, rh.policy_sha256, rh.last_inbound_provider_accepted_at, rh.last_inbound_provider_message_ids_json, rh.last_inbox_verified_at FROM route_health rh JOIN alias_routes ar ON ar.id = rh.route_id AND ar.enabled = 1 AND ar.policy_sha256 = rh.policy_sha256 JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = rh.policy_sha256 WHERE lower(substr(rh.route_address, instr(rh.route_address, '@') + 1)) IN (" + domainPredicate + ") AND rh.inbound_status IN ('inbox_verified', 'reply_verified') AND rh.last_inbound_provider_accepted_at IS NOT NULL AND rh.last_inbox_verified_at IS NOT NULL ORDER BY rh.last_inbox_verified_at DESC LIMIT 200;",
-  );
-  const proofs: Record<string, InboundProof> = {};
-  const selected = new Set(selectedDomains);
-
-  for (const row of rows) {
-    if (
-      typeof row.route_address !== "string" ||
-      typeof row.route_kind !== "string" ||
-      typeof row.operator_count !== "number" ||
-      typeof row.reply_identity !== "string" ||
-      typeof row.policy_sha256 !== "string" ||
-      typeof row.last_inbound_provider_accepted_at !== "string" ||
-      typeof row.last_inbox_verified_at !== "string"
-    ) continue;
-    const providerMessageIds = typeof row.last_inbound_provider_message_ids_json === "string"
-      ? parseJson<unknown>(row.last_inbound_provider_message_ids_json)
-      : null;
-    if (!Array.isArray(providerMessageIds) || providerMessageIds.some((value) => typeof value !== "string")) continue;
-    const domain = domainPart(row.route_address);
-    if (!domain || !selected.has(domain)) continue;
-    if (proofs[domain]) continue;
-    proofs[domain] = {
-      status: "ok",
-      envelope_to: row.route_address,
-      route_kind: row.route_kind as InboundProof["route_kind"],
-      operator_count: row.operator_count,
-      policy_sha256: row.policy_sha256,
-      provider_message_ids: providerMessageIds as string[],
-      provider_accepted_at: row.last_inbound_provider_accepted_at,
-      inbox_verified_at: row.last_inbox_verified_at,
-      default_reply_identity: row.reply_identity,
-      provider: "cloudflare_email_service",
-    };
-  }
-
-  return proofs;
-}
-
-function collectOutboundProofs(
-  databaseName: string,
-  selectedDomains: string[],
-): Record<string, OutboundProof> {
-  const fromIdentity = "json_extract(detail_json, '$.fromIdentity')";
-  const domainPredicate = sqlDomainSet(selectedDomains);
-  const rows = wranglerD1Results(
-    databaseName,
-    "SELECT detail_json, created_at FROM audit_events WHERE action = 'outbound_reply_delivered' AND json_valid(detail_json) = 1 AND lower(substr(" + fromIdentity + ", instr(" + fromIdentity + ", '@') + 1)) IN (" + domainPredicate + ") ORDER BY created_at DESC LIMIT 200;",
-  );
-  const proofs: Record<string, OutboundProof> = {};
-  const selected = new Set(selectedDomains);
-
-  for (const row of rows) {
-    if (typeof row.detail_json !== "string") continue;
-    const detail = parseJson<OutboundAuditDetail>(row.detail_json);
-    if (!detail?.fromIdentity || proofs[domainPart(detail.fromIdentity)]) continue;
-
-    const domain = domainPart(detail.fromIdentity);
-    if (!domain || !selected.has(domain)) continue;
-    proofs[domain] = {
-      status: "delivered",
-      from_identity: detail.fromIdentity,
-      provider: detail.result?.provider,
-      provider_message_id: detail.result?.providerMessageId ?? detail.result?.id,
-      audit_event_at: typeof row.created_at === "string" ? row.created_at : undefined,
-    };
-  }
-
-  return proofs;
-}
-
-function wranglerD1Results(databaseName: string, sql: string): Array<Record<string, unknown>> {
-  const result = spawnSync(wranglerBin, ["d1", "execute", databaseName, "--remote", "--command", sql], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (result.status !== 0) return [];
-
-  const start = result.stdout.indexOf("[");
-  if (start === -1) return [];
-  try {
-    const parsed = JSON.parse(result.stdout.slice(start)) as Array<{ results?: Array<Record<string, unknown>> }>;
-    return parsed.flatMap((entry) => entry.results ?? []);
-  } catch {
-    return [];
-  }
-}
-
-function sqlDomainSet(domains: string[]): string {
-  return domains.map((domain) => "'" + domain.replaceAll("'", "''") + "'").join(", ");
-}
-
 function collectResendDomains(): Record<string, string> {
   const result = spawnSync("resend", ["domains", "list", "--json", "--limit", "100"], {
     cwd: root,
@@ -1734,18 +1585,6 @@ function projectedRuleRoutesToMaildesk(rule: EmailRoutingRule, routerService: st
   return rule.actions.some((action) =>
     action.action_type === "worker" && action.worker_targets.includes(routerService)
   );
-}
-
-function localPart(address: string | undefined): string | undefined {
-  const atIndex = address?.lastIndexOf("@") ?? -1;
-  if (!address || atIndex <= 0) return undefined;
-  return address.slice(0, atIndex).toLowerCase();
-}
-
-function domainPart(address: string | undefined): string | undefined {
-  const atIndex = address?.lastIndexOf("@") ?? -1;
-  if (!address || atIndex <= 0 || atIndex === address.length - 1) return undefined;
-  return address.slice(atIndex + 1).toLowerCase();
 }
 
 function parseJson<T>(value: string): T | null {
@@ -1816,13 +1655,4 @@ interface GoogleResourceSearch {
       email?: string;
     };
   }>;
-}
-
-interface OutboundAuditDetail {
-  fromIdentity?: string;
-  result?: {
-    provider?: string;
-    providerMessageId?: string;
-    id?: string;
-  };
 }
