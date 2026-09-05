@@ -1,6 +1,8 @@
+import { buildWorkerUploadManifest } from "../../scripts/worker-upload-manifest";
+import { digest } from "../../scripts/worker-module-proof";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -1607,6 +1609,56 @@ echo '[{"results":[{"name":"runtime_state"}]}]'
   });
 });
 
+describe("native module collector path", () => {
+  test("consumes actual dry-run manifests through bound envelopes and keeps assets unqualified", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-modules-"));
+    const fixture = createCoverageFixture(dir);
+    const desired = JSON.parse(readFileSync(fixture.desiredPath, "utf8"));
+    mkdirSync(resolve(root, "var/proof"), { recursive: true });
+    const configs = mkdtempSync(resolve(root, "var/proof/module-fixture-"));
+    try {
+    // CI owns builds. Exercise real upload serialization against those artifacts
+    // without invoking the configs' custom build commands for every read.
+    for (const [role, worker] of Object.entries(desired.workers) as Array<[string, { config: string }]>) {
+      const original = readFileSync(resolve(root, worker.config), "utf8");
+      const text = original.replace(/\[build\]\ncommand = [^\n]*\n/, "")
+        .replace(/^(main|directory) = "([^"]+)"/gm, (_line, key, path) => `${key} = ${JSON.stringify(resolve(root, path))}`);
+      worker.config = resolve(configs, `${role}.toml`);
+      writeFileSync(worker.config, text);
+    }
+    writeFileSync(fixture.desiredPath, JSON.stringify(desired));
+    const results: Record<string, unknown> = {};
+    for (const [role, worker] of Object.entries(desired.workers) as Array<[string, { script_name: string; config: string }]>) {
+      const upload = await buildWorkerUploadManifest(root, worker.config);
+      const version = role === "relay_router" ? "11111111-1111-4111-8111-111111111111"
+        : role === "relay_outbound" ? "22222222-2222-4222-8222-222222222222" : "33333333-3333-4333-8333-333333333333";
+      results[worker.script_name] = { status: 200, success: true, errors: [], result: {
+        schema_version: 1, version_id: version, complete: true, body_returned: false,
+        provider_output_retained: false, static_asset_bytes_verified: false,
+        manifest: upload.manifest, manifest_sha256: digest(JSON.stringify(upload.manifest)),
+        module_count: upload.manifest.modules.length,
+        byte_count: upload.manifest.modules.reduce((sum, item) => sum + item.byte_count, 0),
+      } };
+    }
+    const moduleResults = join(dir, "modules.json");
+    writeFileSync(moduleResults, JSON.stringify(results));
+    const collected = runCoverageCollection(fixture, dir, { canary: true, moduleResults });
+    expect(collected.result.status).toBe(0);
+    const evidence = JSON.parse(readFileSync(collected.out, "utf8"));
+    expect(evidence.cfctl_maildesk.worker_module_proofs.relay_router.module_bytes_verified).toBe(true);
+    expect(evidence.cfctl_maildesk.workers.relay_router).toBe("ok");
+    expect(evidence.cfctl_maildesk.worker_module_proofs.routing_health.artifact_bytes_verified).toBe(false);
+    expect(evidence.cfctl_maildesk.workers.routing_health).toBe("not_checked");
+    expect(evidence.cfctl_maildesk.worker_deployments.relay_router.status).toBe("metadata_only");
+    const denied = runCoverageCollection(fixture, dir, { canary: true, moduleResults, wrongModuleAccount: true });
+    expect(denied.result.status).toBe(1);
+    const failed = JSON.parse(readFileSync(denied.out, "utf8"));
+    expect(failed.cfctl_readback.receipts.some((r: any) => r.error_code === "CFCTL_ENVELOPE_BINDING_MISMATCH")).toBe(true);
+    expect(failed.cfctl_maildesk).toBeUndefined();
+    } finally { rmSync(configs, { recursive: true, force: true }); }
+  }, 60_000);
+});
+
 function projectionSummary(policyPath: string, desiredPath: string) {
   const result = spawnSync(
     "bun",
@@ -1694,6 +1746,8 @@ for argument in "$@"; do
   esac
 done
 case "$*" in
+  *"call worker-version-artifact-digest"*)
+    exec bun -e 'const args=process.argv.slice(1); const selector=args.find(x=>x.startsWith("worker_id=")); const name=selector?.slice(10); const results=JSON.parse(require("node:fs").readFileSync(process.env.MAILDESK_TEST_MODULE_RESULTS,"utf8")); const result=results[name]; console.log(JSON.stringify({schema_version:2,command:"call",ok:true,performed:true,capability_id:"worker-version-artifact-digest",profile_id:"profile-example",account_id:process.env.MAILDESK_TEST_WRONG_MODULE_ACCOUNT ? "wrong-account" : "account-example",verification:{state:"passed"},evidence:[{content_hash:"sha256:"+"a".repeat(64)}],result}));' -- "$@" ;;
   *"call maildesk-cf.d1-evidence-read"*) echo '${d1}' ;;
   *"call r2-get-private-object-digest"*) echo '${r2}' ;;
   "auth profiles --json") echo '{"schema_version":2,"command":"auth profiles","ok":true,"performed":false,"result":{"current":null,"profiles":[{"id":"profile-example","account_id":"account-example","kind":"api_token"}]},"error":null}' ;;
@@ -1741,7 +1795,7 @@ esac
 function runCoverageCollection(
   fixture: ReturnType<typeof createCoverageFixture>,
   dir: string,
-  options: { canary?: boolean; denyDomain?: string; profile?: "dark_acceptance_v1" } = {},
+  options: { canary?: boolean; denyDomain?: string; profile?: "dark_acceptance_v1"; moduleResults?: string; wrongModuleAccount?: boolean } = {},
 ) {
   const cfctl = join(dir, options.denyDomain ? "cfctl-deny" : options.canary ? "cfctl-canary" : "cfctl-full");
   const wrangler = join(dir, "wrangler-coverage");
@@ -1767,6 +1821,7 @@ function runCoverageCollection(
     "--no-resend",
   ];
   if (options.canary || options.denyDomain) command.push("--scope-manifest", fixture.scopeManifestPath);
+  if (options.moduleResults) command.push("--verify-worker-modules");
   if (options.profile) command.push("--acceptance-profile", options.profile);
   const result = spawnSync("bun", command, {
     cwd: root,
@@ -1775,6 +1830,8 @@ function runCoverageCollection(
       ...process.env,
       CLOUDFLARE_ACCOUNT_ID: "account-example", MAILDESK_CFCTL_PROFILE: "profile-example",
       MAILDESK_TEST_CFCTL_LOG: log,
+      MAILDESK_TEST_MODULE_RESULTS: options.moduleResults ?? "",
+      MAILDESK_TEST_WRONG_MODULE_ACCOUNT: options.wrongModuleAccount ? "yes" : "",
       ...workerRuntimeFixtureEnv(),
       ...(options.denyDomain ? { MAILDESK_TEST_DENY_DOMAIN: options.denyDomain } : {}),
     },

@@ -1,3 +1,5 @@
+import { buildWorkerUploadManifest } from "./worker-upload-manifest";
+import { WORKER_MODULE_DIGEST_CAPABILITY, qualifyWorkerModules, type WorkerModuleProof } from "./worker-module-proof";
 import { decodeD1Evidence, decodePolicyObjectDigest } from "./cfctl-d1-evidence";
 import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
 import { maildeskReadContracts } from "./cfctl-v2-command-contract";
@@ -86,6 +88,7 @@ interface CfctlMaildeskEvidence {
   domains?: Record<string, CfctlMaildeskDomainEvidence>;
   workers?: Record<string, Status>;
   worker_deployments?: Record<string, WorkerRuntimeProvenance>;
+  worker_module_proofs?: Record<string, WorkerModuleProof>;
   storage?: Record<string, Status>;
   sender_domains?: Record<string, Status>;
 }
@@ -235,7 +238,7 @@ const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
 
-const cfctlResult = collectGovernedCfctlEvidence(cfctlProfile);
+const cfctlResult = await collectGovernedCfctlEvidence(cfctlProfile);
 evidence.cfctl_readback = cfctlResult.readback;
 if (cfctlResult.evidence) {
   evidence.active_policy = cfctlResult.evidence.active_policy;
@@ -384,10 +387,10 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }
 
-function collectGovernedCfctlEvidence(profileId: string | undefined): {
+async function collectGovernedCfctlEvidence(profileId: string | undefined): Promise<{
   readback: CfctlReadbackEvidence;
   evidence?: Pick<Evidence, "zones" | "email_routing" | "dns_mx" | "cfctl_maildesk" | "active_policy" | "d1">;
-} {
+}> {
   if (!profileId) {
     return {
       readback: buildCfctlReadback(true, false, false, undefined, undefined, [failureReceipt("explicit-profile", false, "MAILDESK_CFCTL_PROFILE_REQUIRED")], []),
@@ -408,6 +411,18 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     };
   }
   const accountId = profileResult.account_id;
+
+  const localUploads: Record<string, Awaited<ReturnType<typeof buildWorkerUploadManifest>>> = {};
+  if (args.includes("--verify-worker-modules")) {
+    try {
+      for (const [role, worker] of Object.entries(desiredState.workers)) {
+        localUploads[role] = await buildWorkerUploadManifest(root, worker.config);
+      }
+    } catch {
+      return { readback: buildCfctlReadback(true, false, false, profileId, accountId,
+        [...receipts, failureReceipt("worker-upload-dry-run", false, "LOCAL_WORKER_UPLOAD_UNAVAILABLE")], []) };
+    }
+  }
 
   const zones: string[] = [];
   const emailRouting: NonNullable<Evidence["email_routing"]> = {};
@@ -641,6 +656,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
   }
   const workers: Record<string, Status> = {};
   const workerDeployments: Record<string, WorkerRuntimeProvenance> = {};
+  const moduleProofs: Record<string, WorkerModuleProof> = {};
   const candidateHead = collectGitCandidate(root).candidate.head;
   for (const [role, worker] of Object.entries(desiredState.workers)) {
     const settingsCall = cfctlCall(
@@ -672,6 +688,10 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     let expectedArtifactSha256: string;
     try {
       expectedArtifactSha256 = deploymentArtifactSha256(root, worker.config);
+      if (localUploads[role] && (localUploads[role].artifact_sha256 !== expectedArtifactSha256 ||
+          localUploads[role].config_sha256 !== `sha256:${createHash("sha256").update(readFileSync(resolve(root, worker.config))).digest("hex")}`)) {
+        throw new Error("Worker upload inputs changed");
+      }
     } catch {
       receipts.push(failureReceipt(
         `worker-artifact:${role}`,
@@ -705,12 +725,34 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       versionCall.receipt.error_code = "WORKER_RUNTIME_PROVENANCE_MALFORMED";
       return incompleteReadback(profileId, accountId, receipts);
     }
-    // Provider annotations are claims. No authenticated artifact-byte join is
-    // available here, so matching labels cannot establish deployment identity.
+    if (localUploads[role]) {
+      const modulesCall = cfctlCall(WORKER_MODULE_DIGEST_CAPABILITY, profileId, accountId, [
+        ["account_id", accountId], ["worker_id", worker.script_name], ["version_id", activeVersionId],
+      ]);
+      receipts.push(modulesCall.receipt);
+      if (!modulesCall.ok) return incompleteReadback(profileId, accountId, receipts);
+      const activeAfter = cfctlCall("worker-deployments-list-deployments", profileId, accountId,
+        [["account_id", accountId], ["script_name", worker.script_name]]);
+      receipts.push(activeAfter.receipt);
+      if (!activeAfter.ok) return incompleteReadback(profileId, accountId, receipts);
+      try {
+        if (deploymentArtifactSha256(root, worker.config) !== localUploads[role].artifact_sha256 ||
+            `sha256:${createHash("sha256").update(readFileSync(resolve(root, worker.config))).digest("hex")}` !== localUploads[role].config_sha256) {
+          throw new Error("Worker upload inputs changed during readback");
+        }
+        moduleProofs[role] = qualifyWorkerModules(localUploads[role], modulesCall.result,
+          activeVersionId, activeWorkerVersionId(activeAfter.result));
+      } catch {
+        modulesCall.receipt.ok = false;
+        modulesCall.receipt.error_code = "WORKER_MODULE_PROOF_MISMATCH";
+        return incompleteReadback(profileId, accountId, receipts);
+      }
+    }
+    // Annotation provenance stays separate even when a module join succeeds.
     workers[role] = !workerNames.includes(worker.script_name) ? "missing"
       : workerDeployments[role].status === "drift" ||
         !workerBindingsMatch(bindings, expectedBindings[role] ?? [], d1Ids, queueIds)
-      ? "drift" : "not_checked";
+      ? "drift" : moduleProofs[role]?.artifact_bytes_verified === true ? "ok" : "not_checked";
   }
 
   const storage: Record<string, Status> = {
@@ -726,6 +768,7 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
     domains,
     workers,
     worker_deployments: workerDeployments,
+    ...(Object.keys(moduleProofs).length ? { worker_module_proofs: moduleProofs } : {}),
     storage,
     ...(senderMode === "cloudflare_email_service" ? { sender_domains: senderDomains } : {}),
   };
@@ -765,7 +808,8 @@ function collectGovernedCfctlEvidence(profileId: string | undefined): {
       accountId,
       receipts,
       zones,
-      [], // Active-version metadata does not prove deployed artifact bytes.
+      Object.keys(desiredState.workers).every((role) => workers[role] === "ok" &&
+        moduleProofs[role]?.artifact_bytes_verified === true) ? ["worker_deployment_identity"] : [],
     ),
     evidence: {
       zones: zones.sort(),
@@ -889,7 +933,8 @@ function requiredInventoryCapabilityIds(): string[] {
     senderDomains: senderMode === "cloudflare_email_service" &&
       selected.some((domain) => (desiredState.sender?.candidate_domains ?? []).includes(domain.name)),
     darkAcceptance: readScope.profile === "dark_acceptance_v1",
-  }).map((contract) => contract.id);
+  }).map((contract) => contract.id).concat(args.includes("--verify-worker-modules")
+    ? [WORKER_MODULE_DIGEST_CAPABILITY] : []);
 }
 
 function incompleteReadback(
@@ -1005,6 +1050,7 @@ function cfctlCall(
     boundEnvelope?.ok === true &&
     boundEnvelope.performed === true &&
     !boundEnvelope.error &&
+    (capabilityId !== WORKER_MODULE_DIGEST_CAPABILITY || boundEnvelope.verification?.state === "passed") &&
     receiptFromEnvelope(capabilityId, boundEnvelope).evidence_hashes.length > 0,
   );
   const receipt = boundEnvelope

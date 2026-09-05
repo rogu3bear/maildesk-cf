@@ -326,6 +326,33 @@ non-performing, and error-free before it can authorize any live call. It stores 
 receipt fields and evidence hashes alongside the normalized Maildesk evidence;
 it does not copy raw provider responses into the receipt metadata.
 
+Use `--verify-worker-modules` to collect authenticated module-byte proof with
+`worker-version-artifact-digest`. The selected cfctl must provide this native
+read capability; the collector requires its verification state to be `passed`.
+Before provider reads, the collector runs the installed Wrangler's
+`deploy --dry-run --outfile` for each role using that role's exact config. These
+commands run the config's custom build and may require normal build resources.
+The config and local artifact digest must remain unchanged through each dry-run.
+The temporary upload form and build logs are private and removed after hashing.
+
+The upload reader hashes the actual multipart fields with their exact names,
+MIME types, and bytes. It does not infer upload names from filesystem paths or
+use a FormData parser that can normalize MIME types. It excludes metadata and
+records source-map presence separately. The authenticated native projection must
+match the complete canonical module manifest, sizes, counts, hash, and immutable
+version. A second deployment read must still select that same version at 100%.
+Failures stop collection with a failed receipt; they never fall back to annotations.
+`worker_module_proofs` retains only hashes, counts, and proof flags. Existing
+`worker_deployments` continues to describe annotation claims independently.
+
+A matching module proof plus matching settings and annotation claims may mark a
+role `ok` only when its upload has neither static assets nor source maps. Those
+bytes require separate proof and remain unqualified by this capability. The
+`worker_deployment_identity` acceptance surface requires every intended role to
+be qualified; it does not establish any other dark-acceptance surface or mail
+receipt. Without the explicit module verification option, collection remains
+metadata-only and cannot admit that surface.
+
 A missing profile, denied call, malformed envelope, binding mismatch, missing
 required zone, or partial capability set makes the collector exit nonzero after
 writing `cfctl_readback.transaction_complete: false` and legacy
