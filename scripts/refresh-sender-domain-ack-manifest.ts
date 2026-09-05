@@ -1,5 +1,5 @@
-import { cfctlExecutable } from "./cfctl-profile-contract";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
@@ -50,6 +50,8 @@ if (!profileId) {
   process.exit(1);
 }
 
+const desiredPath = resolve(root, argValue("--desired-state") ?? process.env.MAILDESK_DESIRED_STATE_PATH ?? (existsSync(resolve(root, "config/desired-state.local.json")) ? "config/desired-state.local.json" : "config/desired-state.example.json"));
+const desired = readJson<{ project?: { account_id?: string; account_id_env?: string } }>(desiredPath);
 const accountId = resolveProfileAccount(profileId);
 const proofPlan = readJson<ProofPlan>(resolve(root, planPath));
 const planActions = (proofPlan.actions ?? []).filter(
@@ -189,6 +191,10 @@ function resolveProfileAccount(profile: string): string {
   const selected = profiles.find((entry) => entry.id === profile);
   if (typeof selected?.account_id !== "string" || selected.account_id.length === 0) {
     console.error("explicit cfctl profile is not bound to an account");
+    process.exit(1);
+  }
+  if (selected.account_id !== cfctlAccountTarget(desired.project)) {
+    console.error("explicit cfctl profile does not match the desired Cloudflare account");
     process.exit(1);
   }
   return selected.account_id;

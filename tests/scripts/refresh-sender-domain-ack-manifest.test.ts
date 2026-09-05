@@ -41,7 +41,7 @@ describe("sender-domain PlanV2 manifest refresher", () => {
         "profile-example",
         "--json",
       ],
-      { cwd: root, encoding: "utf8" },
+      { cwd: root, encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example" } },
     );
 
     expect(result.status, result.stderr).toBe(0);
@@ -160,3 +160,12 @@ fi
 function writeJson(path: string, value: unknown) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
+
+test("desired account mismatch stops sender refresh before reads or plan creation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-account-mismatch-"));
+  const log = join(dir, "calls"), desired = join(dir, "desired.json");
+  writeJson(desired, { project: { account_id_env: "EXPECTED_ACCOUNT" } });
+  const result = spawnSync("bun", ["run", "scripts/refresh-sender-domain-ack-manifest.ts", "--cfctl", fakeCfctl(log), "--profile", "profile-example", "--desired-state", desired], { cwd: root, encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "", EXPECTED_ACCOUNT: "different-account" } });
+  expect(result.status).toBe(1); expect(result.stderr).toContain("does not match");
+  expect(readFileSync(log, "utf8").trim()).toBe("auth profiles --json body=");
+});

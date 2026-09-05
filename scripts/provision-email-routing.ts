@@ -1,3 +1,4 @@
+import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
 // scripts/provision-email-routing.ts — governed inbound Email Routing provisioning.
 //
 // A state RECONCILER over cfctl's governed lane, not an imperative script:
@@ -33,6 +34,7 @@ interface DesiredDomain {
 }
 
 interface DesiredState extends CanonicalDesiredTopology {
+  project?: { account_id?: string; account_id_env?: string };
   domains: DesiredDomain[];
 }
 
@@ -42,7 +44,7 @@ const CF_EMAIL_ROUTING_MX = ["mx.cloudflare.net", "route1.mx.cloudflare.net", "r
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
-const cfctlBin = argValue("--cfctl") ?? process.env.CFCTL_BIN ?? "cfctl";
+const cfctlBin = cfctlExecutable(argValue("--cfctl"));
 const profileId = argValue("--profile") ?? process.env.MAILDESK_CFCTL_PROFILE?.trim();
 const domainFilter = argValue("--domain");
 const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDesiredStatePath());
@@ -55,9 +57,8 @@ if (!profileId) {
   console.error("missing explicit cfctl profile: set MAILDESK_CFCTL_PROFILE or pass --profile");
   process.exit(1);
 }
-const accountId = resolveProfileAccount(profileId);
-
 const state = readDesiredState(desiredStatePath);
+const accountId = resolveProfileAccount(profileId);
 const workerScript = state.workers?.relay_router?.script_name;
 
 // Edge case 5 (non-CF domains) + --domain filter: only cloudflare_email_routing
@@ -328,6 +329,10 @@ function resolveProfileAccount(profile: string): string {
   const selected = profiles.find((entry) => entry.id === profile);
   if (typeof selected?.account_id !== "string" || selected.account_id.length === 0) {
     console.error("explicit cfctl profile is not bound to an account");
+    process.exit(1);
+  }
+  if (selected.account_id !== cfctlAccountTarget(state.project)) {
+    console.error("explicit cfctl profile does not match the desired Cloudflare account");
     process.exit(1);
   }
   return selected.account_id;

@@ -1,3 +1,4 @@
+import { cfctlExecutable } from "./cfctl-profile-contract";
 import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -91,7 +92,7 @@ const summaryPath =
 const ackManifestPath =
   argValue("--plan-manifest") ?? "var/proof/maildesk-sender-domain-plan-manifest.local.json";
 const planPath = argValue("--plan") ?? "var/maildesk-proof-plan.json";
-const cfctlBin = argValue("--cfctl");
+const cfctlBin = cfctlExecutable(argValue("--cfctl"));
 const refreshAcks = args.includes("--refresh-acks");
 const skipAckDryRun = args.includes("--skip-ack-dry-run");
 const skipProductionPreflight = args.includes("--skip-production-preflight");
@@ -462,11 +463,11 @@ function runAckRefresh(
 function runProductionPreflight(): { ok: boolean; failures: string[]; status: number } {
   const command = argValue("--preflight-command");
   const result = command
-    ? spawnSync(command, { cwd: root, encoding: "utf8", env: process.env })
+    ? spawnSync(command, { cwd: root, encoding: "utf8", env: { ...process.env, CFCTL_BIN: cfctlBin } })
     : spawnSync("bun", ["run", "scripts/preflight.ts", "--mode", "production"], {
         cwd: root,
         encoding: "utf8",
-        env: process.env,
+        env: { ...process.env, CFCTL_BIN: cfctlBin },
       });
   const status = result.status ?? 1;
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;

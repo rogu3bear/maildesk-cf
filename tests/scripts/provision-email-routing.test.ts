@@ -114,6 +114,7 @@ function run(scriptArgs: string[]) {
   ], {
     cwd: root,
     encoding: "utf8",
+    env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "account-example" },
   });
 }
 
@@ -185,3 +186,11 @@ esac
   chmodSync(path, 0o755);
   return path;
 }
+
+test("configured account mismatch stops routing before any provider read", () => {
+  const { cfctl, logPath, state } = fixture({});
+  const desired = JSON.parse(readFileSync(state, "utf8")); desired.project = { account_id: "different-account" }; writeFileSync(state, JSON.stringify(desired));
+  const result = spawnSync("bun", ["run", "scripts/provision-email-routing.ts", "--profile", "profile-example", "--desired-state", state, "--cfctl", cfctl], { cwd: root, encoding: "utf8", env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: "" } });
+  expect(result.status).toBe(1); expect(result.stderr).toContain("does not match");
+  expect(readFileSync(logPath, "utf8").trim()).toBe("auth profiles --json");
+});

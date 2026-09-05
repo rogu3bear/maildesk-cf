@@ -149,3 +149,10 @@ mail-proof workflow and recovery runbook to obtain the missing evidence; never
 mark production acceptance green from these aggregate reads. `transaction_complete`
 means the selected reads completed, while `complete`, acceptance and mail
 readiness retain their separate requirements.
+
+Routing inspection and sender-domain plan refresh also require the profile's
+account to match the explicit target before any provider read or plan. For
+sender refresh, select the desired file with `--desired-state` or
+`MAILDESK_DESIRED_STATE_PATH`; otherwise the local desired file, then the public
+example, is selected. Closeout forwards its `--cfctl` choice into production
+preflight and sender checks even when a different `CFCTL_BIN` is inherited.

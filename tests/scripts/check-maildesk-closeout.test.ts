@@ -720,3 +720,13 @@ function planManifestItem(target: string, operationId: string) {
     plan_expires_at: "2099-01-01T00:00:00Z",
   };
 }
+
+test("explicit cfctl override reaches the preflight subprocess instead of ambient binary", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-cfctl-context-"));
+  const summary = join(dir, "summary.json"), preflight = join(dir, "preflight"), observed = join(dir, "observed");
+  writeJson(summary, { local_truth_ok: true, live_evidence_present: false });
+  writeFileSync(preflight, '#!/bin/sh\nprintf "%s" "$CFCTL_BIN" > "$CONTEXT_OBSERVED"\nexit 1\n', { mode: 0o755 });
+  const selected = "/explicit/cfctl";
+  spawnSync("bun", ["run", "scripts/check-maildesk-closeout.ts", "--summary", summary, "--preflight-command", preflight, "--cfctl", selected, "--json"], { cwd: root, encoding: "utf8", env: { ...process.env, CFCTL_BIN: "/ambient/cfctl", CONTEXT_OBSERVED: observed } });
+  expect(readFileSync(observed, "utf8")).toBe(selected);
+});

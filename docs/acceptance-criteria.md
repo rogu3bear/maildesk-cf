@@ -323,3 +323,25 @@ qualifying external mailbox evidence
 
 These are local behavioral criteria. Actual installed-candidate compatibility,
 provider authorization, deployment and mailbox receipt remain separate evidence.
+
+### AC-28: Reject account drift at planning entrypoints
+
+**Given** routing inspection or sender-domain plan refresh selects a profile
+whose account differs from the explicit desired account
+
+**When** the command starts
+
+**Then** it exits unsuccessfully before provider reads or plan creation.
+
+### AC-29: Preserve executable selection through closeout
+
+**Given** closeout receives an explicit `--cfctl` path different from `CFCTL_BIN`
+
+**When** it invokes production preflight and sender-domain checks
+
+**Then** those subprocesses use the explicitly selected executable.
+
+Direct proof: mismatch subprocess regressions in
+`tests/scripts/provision-email-routing.test.ts` and
+`tests/scripts/refresh-sender-domain-ack-manifest.test.ts`; executable propagation
+in `tests/scripts/check-maildesk-closeout.test.ts`.
