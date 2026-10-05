@@ -1,5 +1,5 @@
 import { loadActivePolicy } from "../../shared/policy-store";
-import { reportRoutes, type CanaryReport } from "./report";
+import { proofMillis, reportRoutes, selectProbeRotation, type CanaryReport } from "./report";
 import { assertPolicyRoutes, type RouteInventoryRow } from "./policy-routes";
 
 export interface CanaryEnv {
@@ -10,6 +10,7 @@ export interface CanaryEnv {
   MAILDESK_CANARY_FROM?: string;
   MAILDESK_CANARY_TO?: string;
   MAILDESK_CANARY_MAX_PROOF_AGE_HOURS?: string;
+  MAILDESK_CANARY_PROBE_BATCH?: string;
   MAILDESK_CANARY_INBOUND_MODE?: string;
   MAILDESK_CANARY_REPLY_MODE?: string;
 }
@@ -37,6 +38,8 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
   const to = mailbox(env.MAILDESK_CANARY_TO);
   const hours = Number(env.MAILDESK_CANARY_MAX_PROOF_AGE_HOURS ?? "24");
   if (!Number.isSafeInteger(hours) || hours < 1 || hours > 720) throw new Error("invalid canary proof age");
+  const batch = Number(env.MAILDESK_CANARY_PROBE_BATCH ?? "3");
+  if (!Number.isSafeInteger(batch) || batch < 1 || batch > 8) throw new Error("invalid canary probe batch");
   if (!env.EMAIL) throw new Error("canary notification binding missing");
   const sender = await env.DB.prepare(
     "SELECT i.address FROM identities i JOIN alias_routes ar ON ar.default_reply_identity_id = i.id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE ar.enabled = 1 AND ar.decision_kind <> 'sink' AND i.kind = 'role' AND i.address = ?1 LIMIT 1",
@@ -60,13 +63,16 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
     }, now, hours * HOUR, {
       inbound: env.MAILDESK_CANARY_INBOUND_MODE ?? "disabled",
       reply: env.MAILDESK_CANARY_REPLY_MODE ?? "disabled",
-    });
+    }, batch);
+    await recordCoverage(env, active.sha256, routes.results, now, batch);
   } catch {
     // Do not leak policy, addresses, provider payloads or exception text.
     report = {
-      schema_version: 1, checked_at: new Date(now).toISOString(), status: "unverified",
+      schema_version: 2, checked_at: new Date(now).toISOString(), status: "unverified",
       policy_sha256: "", expected_routes: 0, observed_routes: 0, excluded_routes: 0,
-      current_routes: 0, issues: { policy_or_route_inventory_unavailable: 1 },
+      current_routes: 0, configuration_routes: 0, inbox_proofs_fresh: 0, reply_proofs_fresh: 0,
+      inbox_proofs_recorded: 0, reply_proofs_recorded: 0, probe_due: 0,
+      issues: { policy_or_route_inventory_unavailable: 1 },
       provider_inventory_checked: false, live_probe_sent: false,
     };
   }
@@ -109,14 +115,52 @@ async function notify(env: CanaryEnv, from: string, to: string, report: CanaryRe
   }
 }
 
+async function recordCoverage(env: CanaryEnv, policySha256: string, routes: RouteInventoryRow[], now: number, batch: number): Promise<void> {
+  const rotation = selectProbeRotation(routes, now, batch);
+  const statements = [
+    env.DB.prepare("DELETE FROM mail_canary_probe_rotation"),
+    ...rotation.map((probe) => env.DB.prepare(
+      "INSERT INTO mail_canary_probe_rotation (route_id, selected_at_ms, reason) VALUES (?1, ?2, ?3)",
+    ).bind(probe.route_id, now, probe.reason)),
+  ];
+  for (const route of routes) {
+    const planes: Array<["configuration" | "inbox" | "reply" | "edge", number | null]> = [
+      ["configuration", now],
+      ["inbox", proofMillis(route.last_inbox_verified_at, now)],
+      ["reply", proofMillis(route.last_reply_verified_at, now)],
+      ["edge", proofMillis(route.edge_verified_at, now)],
+    ];
+    for (const [plane, verifiedAt] of planes) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO route_proof_ledger (route_id, plane, policy_sha256, verified_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(route_id, plane) DO UPDATE SET
+           policy_sha256 = excluded.policy_sha256,
+           verified_at_ms = excluded.verified_at_ms,
+           updated_at_ms = excluded.updated_at_ms`,
+      ).bind(route.route_id, plane, policySha256, verifiedAt, now));
+    }
+  }
+  for (let index = 0; index < statements.length; index += 32) {
+    const saved = await env.DB.batch(statements.slice(index, index + 32));
+    if (saved.some((result) => !result.success)) throw new Error("proof ledger persistence failed");
+  }
+}
+
 export function notificationText(report: CanaryReport): string {
   return [
     `Maildesk route canary at ${report.checked_at}`,
     `Status: ${report.status}`,
     `Active routes: ${report.observed_routes}/${report.expected_routes}`,
-    `Current receipt sets: ${report.current_routes}; intentionally excluded: ${report.excluded_routes}`,
+    `Configuration reads: ${report.configuration_routes}`,
+    `Independent inbox proofs inside the window: ${report.inbox_proofs_fresh}; recorded: ${report.inbox_proofs_recorded}`,
+    `Independent reply proofs inside the window: ${report.reply_proofs_fresh}; recorded: ${report.reply_proofs_recorded}`,
+    `Independent receipt pairs inside the window: ${report.current_routes}; intentionally excluded: ${report.excluded_routes}`,
+    `Probe rotation selected: ${report.probe_due}`,
     ...Object.entries(report.issues).map(([code, count]) => `${code}: ${count}`),
-    "This run checked D1 route receipts and the active R2 policy. It did not check live provider inventory or send mailbox probes.",
+    "This run read every active route's configuration and recorded the last independent proof per path.",
+    "It selected the next inbox and reply probe rotation and did not send those probes.",
+    "It did not check live provider inventory.",
     "Provider acceptance of this notification is separate from receipt in your inbox.",
   ].join("\n");
 }

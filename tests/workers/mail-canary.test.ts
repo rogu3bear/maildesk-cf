@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { runCanary, type CanaryEnv } from "../../workers/mail-canary/src/index";
-import { reportRoutes, type CanarySnapshot } from "../../workers/mail-canary/src/report";
+import { reportRoutes, selectProbeRotation, type CanarySnapshot } from "../../workers/mail-canary/src/report";
 import { assertPolicyRoutes, type RouteInventoryRow } from "../../workers/mail-canary/src/policy-routes";
 import type { RouterPolicy } from "../../workers/shared/router";
 
@@ -14,19 +14,26 @@ const policyJson = JSON.stringify({ default_reply_mode: "role_first", domains: {
   personal_aliases: {},
 } } });
 
-test("full route coverage requires independent fresh edge, inbox and reply receipts", () => {
+test("configuration coverage stays current when an independent reply proof is missing", () => {
   const snapshot = goodSnapshot();
   expect(reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" }).status).toBe("receipts_current");
   snapshot.routes[0]!.last_reply_verified_at = null;
-  expect(reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" }).issues)
-    .toEqual({ reply_receipt_missing_or_stale: 1 });
+  const report = reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" });
+  expect(report.status).toBe("configuration_current");
+  expect(report.configuration_routes).toBe(1);
+  expect(report.reply_proofs_recorded).toBe(0);
+  expect(report.inbox_proofs_fresh).toBe(1);
+  expect(report.live_probe_sent).toBe(false);
+  expect(report.issues).toEqual({});
 });
 
-test("missing coverage, stale/future receipts, disabled replies and policy drift cannot pass", () => {
+test("stale independent proofs stay recorded while configuration and policy failures do not pass", () => {
   for (const timestamp of ["2026-10-01T12:00:00Z", "2026-10-06T12:00:00Z", "bad-date"]) {
     const snapshot = goodSnapshot();
     snapshot.routes[0]!.last_inbox_verified_at = timestamp;
-    expect(reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" }).status).toBe("unverified");
+    const report = reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" });
+    expect(report.status).toBe("configuration_current");
+    expect(report.inbox_proofs_fresh).toBe(0);
   }
   const snapshot = goodSnapshot();
   snapshot.expected_routes = 2;
@@ -54,7 +61,17 @@ test("scheduled notification uses real schema, deduplicates, reminds daily and r
     await runCanary(f.env, now + 60_000);
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0]!.to).toEqual(["operator@example.com"]);
+    expect(f.sent[0]!.text).toContain("Independent inbox proofs inside the window: 1");
     expect(f.sent[0]!.text).toContain("did not check live provider inventory");
+    expect(f.sent[0]!.text).toContain("did not send those probes");
+    expect(f.db.query("SELECT plane, verified_at_ms IS NOT NULL AS known FROM route_proof_ledger ORDER BY plane").all())
+      .toEqual([
+        { plane: "configuration", known: 1 },
+        { plane: "edge", known: 1 },
+        { plane: "inbox", known: 1 },
+        { plane: "reply", known: 1 },
+      ]);
+    expect(f.db.query("SELECT reason FROM mail_canary_probe_rotation").all()).toEqual([{ reason: "oldest_proof" }]);
     expect(JSON.stringify(f.sent)).not.toContain("private-message-body");
     await runCanary(f.env, now + 24 * 3_600_000);
     expect(f.sent).toHaveLength(2);
@@ -122,6 +139,21 @@ test("equal-count projection substitutions and changed routing fields cannot rep
       expect(f.sent[0]!.subject).toContain("unverified");
     } finally { f.db.close(); }
   }
+});
+
+test("probe rotation keeps a few oldest paths and skips sinks", () => {
+  const older = "2026-10-05T08:00:00Z";
+  const newer = "2026-10-05T11:00:00Z";
+  const routes = [
+    { ...goodSnapshot().routes[0]!, route_id: "route:example.com:newer", last_inbox_verified_at: newer, last_reply_verified_at: newer },
+    { ...goodSnapshot().routes[0]!, route_id: "route:example.com:missing", last_inbox_verified_at: null, last_reply_verified_at: newer },
+    { ...goodSnapshot().routes[0]!, route_id: "route:example.com:older", last_inbox_verified_at: older, last_reply_verified_at: newer },
+    { ...goodSnapshot().routes[0]!, route_id: "route:example.com:sink", decision_kind: "sink" },
+  ];
+  expect(selectProbeRotation(routes, now, 2).map((probe) => probe.route_id)).toEqual([
+    "route:example.com:missing",
+    "route:example.com:older",
+  ]);
 });
 
 test("Rust-derived inventory preserves personal, sink and catch-all decisions", () => {

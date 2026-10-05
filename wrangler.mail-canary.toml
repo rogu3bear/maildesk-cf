@@ -15,6 +15,8 @@ MAILDESK_CANARY_MODE = "disabled"
 MAILDESK_CANARY_FROM = "postmaster@example.com"
 MAILDESK_CANARY_TO = "operator@example.com"
 MAILDESK_CANARY_MAX_PROOF_AGE_HOURS = "24"
+# Oldest independent proofs selected each run. The canary records them and does not send them.
+MAILDESK_CANARY_PROBE_BATCH = "3"
 # These declarations must match the deployed mail router switches.
 MAILDESK_CANARY_INBOUND_MODE = "disabled"
 MAILDESK_CANARY_REPLY_MODE = "disabled"
