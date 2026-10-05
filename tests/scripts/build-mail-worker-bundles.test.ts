@@ -14,6 +14,7 @@ const roles = [
     role: "mail-router",
     config: "wrangler.mail-router.toml",
     entrypoint: "workers/mail-router/src/index.ts",
+    router: true,
     requiredInputs: [
       "workers/mail-router/src/index.ts",
       "workers/shared/contracts.ts",
@@ -36,6 +37,7 @@ const roles = [
     role: "mail-outbound",
     config: "wrangler.mail-outbound.toml",
     entrypoint: "workers/mail-outbound/src/index.ts",
+    router: true,
     requiredInputs: [
       "workers/mail-outbound/src/index.ts",
       "workers/mail-api/src/index.ts",
@@ -58,6 +60,7 @@ const roles = [
     role: "mail-canary",
     config: "wrangler.mail-canary.toml",
     entrypoint: "workers/mail-canary/src/index.ts",
+    router: true,
     requiredInputs: [
       "workers/mail-canary/src/index.ts",
       "workers/mail-canary/src/report.ts",
@@ -69,6 +72,13 @@ const roles = [
       "crates/maildesk-router/src/lib.rs",
       "scripts/build-mail-worker-bundles.ts", "scripts/build-router-wasm.ts",
     ],
+  },
+  {
+    role: "mail-heartbeat",
+    config: "wrangler.mail-heartbeat.toml",
+    entrypoint: "workers/mail-heartbeat/src/index.ts",
+    router: false,
+    requiredInputs: ["workers/mail-heartbeat/src/index.ts"],
   },
 ] as const;
 
@@ -117,10 +127,9 @@ describe("closed Maildesk Worker bundles", () => {
         const bytes = readFileSync(resolve(outputDirectory, output.path));
         expect(output.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
       }
-      expect(manifest.outputs.map((output) => output.path).sort()).toEqual([
-        "index.js",
-        "maildesk_router_bg.wasm",
-      ]);
+      expect(manifest.outputs.map((output) => output.path).sort()).toEqual(
+        role.router ? ["index.js", "maildesk_router_bg.wasm"] : ["index.js"],
+      );
     }
 
     const check = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--check"], {

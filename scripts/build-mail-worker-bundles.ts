@@ -21,9 +21,10 @@ const finalWasmDirectory = join(generatedRoot, "router-wasm");
 const finalWorkersDirectory = join(generatedRoot, "mail-workers");
 
 const roles = [
-  { role: "mail-router", entrypoint: "workers/mail-router/src/index.ts" },
-  { role: "mail-outbound", entrypoint: "workers/mail-outbound/src/index.ts" },
-  { role: "mail-canary", entrypoint: "workers/mail-canary/src/index.ts" },
+  { role: "mail-router", entrypoint: "workers/mail-router/src/index.ts", router: true },
+  { role: "mail-outbound", entrypoint: "workers/mail-outbound/src/index.ts", router: true },
+  { role: "mail-canary", entrypoint: "workers/mail-canary/src/index.ts", router: true },
+  { role: "mail-heartbeat", entrypoint: "workers/mail-heartbeat/src/index.ts", router: false },
 ] as const;
 
 interface ManifestEntry {
@@ -101,18 +102,20 @@ async function buildRole(
     metafile: true,
     sourcemap: false,
     treeShaking: true,
-    plugins: [routerWasmPlugin(wasmDirectory)],
+    plugins: role.router ? [routerWasmPlugin(wasmDirectory)] : [],
     logLevel: "silent",
   });
   if (!result.metafile) throw new Error(`${role.role} build did not emit a dependency metafile`);
 
-  copyFileSync(
-    join(wasmDirectory, "maildesk_router_bg.wasm"),
-    join(outputDirectory, "maildesk_router_bg.wasm"),
-  );
+  if (role.router) {
+    copyFileSync(
+      join(wasmDirectory, "maildesk_router_bg.wasm"),
+      join(outputDirectory, "maildesk_router_bg.wasm"),
+    );
+  }
 
-  const inputs = closureInputs(result.metafile, wasmDirectory);
-  const outputs = ["index.js", "maildesk_router_bg.wasm"].map((path) => ({
+  const inputs = closureInputs(result.metafile, wasmDirectory, role.router);
+  const outputs = (role.router ? ["index.js", "maildesk_router_bg.wasm"] : ["index.js"]).map((path) => ({
     path,
     sha256: sha256File(join(outputDirectory, path)),
   }));
@@ -160,7 +163,7 @@ function routerWasmPlugin(wasmDirectory: string): Plugin {
   };
 }
 
-function closureInputs(metafile: Metafile, wasmDirectory: string): ManifestEntry[] {
+function closureInputs(metafile: Metafile, wasmDirectory: string, bindRouter: boolean): ManifestEntry[] {
   const paths = new Map<string, string>();
   for (const input of Object.keys(metafile.inputs)) {
     if (input.startsWith("maildesk-router-wasm:")) {
@@ -172,11 +175,13 @@ function closureInputs(metafile: Metafile, wasmDirectory: string): ManifestEntry
     const logical = repositoryRelative(absolute);
     paths.set(logical, absolute);
   }
-  paths.set(
-    "generated/router-wasm/maildesk_router_bg.wasm",
-    join(wasmDirectory, "maildesk_router_bg.wasm"),
-  );
-  for (const path of rustBuildInputs()) paths.set(path, join(root, path));
+  if (bindRouter) {
+    paths.set(
+      "generated/router-wasm/maildesk_router_bg.wasm",
+      join(wasmDirectory, "maildesk_router_bg.wasm"),
+    );
+    for (const path of rustBuildInputs()) paths.set(path, join(root, path));
+  }
   return [...paths]
     .map(([path, absolute]) => ({ path, sha256: sha256File(absolute) }))
     .sort((left, right) => left.path.localeCompare(right.path));

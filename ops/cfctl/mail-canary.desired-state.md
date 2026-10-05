@@ -21,7 +21,12 @@ Required effects and readback:
 - Enable only this canary with the explicit notification target; read back the
   same deployment's vars and trigger before claiming it is running.
 - Read the body-free canary audit receipt and independently verify recipient
-  inbox delivery. Provider acceptance and receipt are separate.
+  inbox delivery. Provider acceptance and receipt are separate. The receipt
+  reports configuration coverage and independent proof coverage.
+- Deploy `wrangler.mail-heartbeat.toml` separately, disabled, with the relay D1
+  binding and without an Email binding. Read back that absence. Enable it only
+  after one accepted canary notification and a fresh configuration ledger row,
+  then read back one external ping. A missed ping is the monitor's alert.
 
 Every write retains its own hash-bound call/show/approval/run/status/readback
 lifecycle. A catalog gap requires a source-owner cfctl extension or its exact
