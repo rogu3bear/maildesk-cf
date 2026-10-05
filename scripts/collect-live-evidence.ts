@@ -8,6 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSyn
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
+import { roleProofTarget, type RoleProofAlias } from "./mail-proof-target";
 import { collectGitCandidate } from "./git-candidate";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 import {
@@ -1584,11 +1585,16 @@ function collectResendDomains(): Record<string, string> {
 
 function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof> {
   const proofs: Record<string, InboundProof> = {};
+  const policy = JSON.parse(readFileSync(policyPath, "utf8")) as {
+    domains: Record<string, { role_aliases: Record<string, RoleProofAlias> }>;
+  };
   const selected = new Set(readScope.selected_domains);
   for (const domain of desiredState.domains.filter((entry) =>
     selected.has(entry.name) && entry.inbound_mx_provider === "google_workspace"
   )) {
-    const target = `founders@${domain.name}`;
+    const selection = roleProofTarget(domain.name, policy.domains[domain.name]?.role_aliases ?? {}, domain.role_aliases ?? []);
+    if (!selection) continue;
+    const target = selection.address;
     const result = spawnSync(bin, ["resource", "search", "--json", target], {
       cwd: root,
       encoding: "utf8",
@@ -1611,7 +1617,7 @@ function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof>
       operator_count: members.length,
       operator_set_sha256: sha256(JSON.stringify(members)),
       forward_errors: [],
-      default_reply_identity: target,
+      default_reply_identity: selection.replyIdentity,
       audit_event_at: parsed?.snapshot_captured_at,
       provider: "google_workspace",
       external_receipt_path: parsed?.receipt_path,

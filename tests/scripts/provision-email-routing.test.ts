@@ -11,9 +11,47 @@ interface Scenario {
   enabled?: boolean;
   existingRuleAddresses?: string[];
   mxContent?: string;
+  catchAllEnabled?: boolean;
+  ruleReadFails?: boolean;
+  ruleDisabled?: boolean;
 }
 
 describe("governed email-routing provisioning reconciler", () => {
+  test("catch-all enable and disable emit concrete requests without executing", () => {
+    for (const desiredEnabled of [true, false]) {
+      const { cfctl, state } = fixture({ zoneFound: true, enabled: true, catchAllEnabled: !desiredEnabled });
+      const desired = JSON.parse(readFileSync(state, "utf8"));
+      desired.domains[0].catch_all = desiredEnabled;
+      writeFileSync(state, JSON.stringify(desired));
+      const result = run(["--desired-state", state, "--cfctl", cfctl, "--json"]);
+      expect(result.status).toBe(0);
+      const pending = JSON.parse(result.stdout).domains[0].pending.find((item: any) => item.item === "catch-all");
+      expect(pending.request).toEqual({ capability_id: "email-routing-routing-rules-update-catch-all-rule",
+        selectors: { zone_id: "zone-123" }, body: { name: "maildesk:catch-all", enabled: desiredEnabled,
+          matchers: [{ type: "all" }], actions: desiredEnabled ? [{ type: "worker", value: ["maildesk-cf-router"] }] : [{ type: "drop" }] } });
+    }
+  });
+
+  test("failed rule reads do not manufacture create requests; disabled rules fail closed", () => {
+    for (const scenario of [{ ruleReadFails: true }, { existingRuleAddresses: ["founders@example.com"], ruleDisabled: true }]) {
+      const { cfctl, state } = fixture({ zoneFound: true, enabled: true, ...scenario });
+      const result = run(["--desired-state", state, "--cfctl", cfctl, "--json"]);
+      expect(result.status).toBe(1);
+      const domain = JSON.parse(result.stdout).domains[0];
+      expect(domain.failed.length).toBeGreaterThan(0);
+      if ("ruleReadFails" in scenario) expect(domain.pending).toEqual([]);
+      expect(domain.already).not.toContain("rule:founders@example.com (drift)");
+    }
+  });
+
+  test("third-party root MX and unknown domain filters cannot produce successful convergence", () => {
+    const { cfctl, state } = fixture({ zoneFound: true, enabled: true, mxContent: "aspmx.l.google.com" });
+    expect(run(["--desired-state", state, "--cfctl", cfctl, "--json"]).status).toBe(1);
+    const unknown = run(["--desired-state", state, "--cfctl", cfctl, "--domain", "absent.example.com", "--json"]);
+    expect(unknown.status).toBe(1);
+    expect(unknown.stderr).toContain("absent from desired state");
+  });
+
   test("plan mode drafts nothing and lists the deltas as pending", () => {
     const { cfctl, logPath, state } = fixture({ zoneFound: true, enabled: false, existingRuleAddresses: [] });
     const out = run(["--plan", "--desired-state", state, "--cfctl", cfctl, "--json"]);
@@ -62,7 +100,7 @@ describe("governed email-routing provisioning reconciler", () => {
     expect(out.status).toBe(0);
     const d = JSON.parse(out.stdout).domains[0];
     expect(d.applied).toEqual([]);
-    expect(d.already.sort()).toEqual(["enable-routing", "rule:founders@example.com", "rule:support@example.com"]);
+    expect(d.already.sort()).toEqual(["catch-all", "enable-routing", "rule:founders@example.com", "rule:support@example.com"]);
     expect(d.failed).toEqual([]);
   });
 
@@ -162,12 +200,13 @@ function fakeCfctl(dir: string, logPath: string, s: Scenario): string {
   const rules = JSON.stringify(
     (s.existingRuleAddresses ?? []).map((addr) => ({
       name: `maildesk:${addr}`,
+      enabled: !s.ruleDisabled,
       matchers: [{ type: "literal", field: "to", value: addr }],
       actions: [{ type: "worker", value: ["maildesk-cf-router"] }],
     })),
   );
   const zoneResult = s.zoneFound === false ? "[]" : '[{"name":"example.com","status":"active","id":"zone-123"}]';
-  const mx = s.mxContent ?? "mx.cloudflare.net";
+  const mx = s.mxContent ?? "route1.mx.cloudflare.net";
   const path = join(dir, "cfctl");
   writeFileSync(
     path,
@@ -177,7 +216,8 @@ case "$*" in
   "auth profiles --json") echo '{"schema_version":2,"ok":true,"performed":false,"result":{"profiles":[{"id":"profile-example","account_id":"account-example"}]},"error":null}' ;;
   *"call zones-get"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"zones-get","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":${zoneResult}},"error":null}' ;;
   *"settings-get-email-routing-settings"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-settings-get-email-routing-settings","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":{"enabled":${enabled}}},"error":null}' ;;
-  *"rules-list-routing-rules"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":${rules.replace(/'/g, "'\\''")}},"error":null}' ;;
+  *"rules-list-routing-rules"*) echo '{"schema_version":2,"ok":${!s.ruleReadFails},"performed":true,"capability_id":"email-routing-routing-rules-list-routing-rules","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":${rules.replace(/'/g, "'\\''")}},"error":null}' ;;
+  *"get-catch-all-rule"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"email-routing-routing-rules-get-catch-all-rule","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":{"enabled":${s.catchAllEnabled ?? false},"matchers":[{"type":"all"}],"actions":[{"type":"worker","value":["maildesk-cf-router"]}]}},"error":null}' ;;
   *"list-dns-records"*) echo '{"schema_version":2,"ok":true,"performed":true,"capability_id":"dns-records-for-a-zone-list-dns-records","profile_id":"profile-example","account_id":"account-example","evidence":[{"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"result":{"result":[{"content":"${mx}"}]},"error":null}' ;;
   *) echo '{"schema_version":2,"ok":false,"performed":false,"error":{"code":"UNEXPECTED_CALL"}}' ;;
 esac

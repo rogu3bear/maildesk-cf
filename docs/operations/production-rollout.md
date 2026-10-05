@@ -118,12 +118,17 @@ credential have been reviewed.
 
 After deploy, verify:
 
-- API `/readyz`;
+- authenticated routing-health readback and governed Worker/binding readback;
 - Email Routing rule points at the Email Worker;
 - D1 tables exist;
 - R2 policy object exists;
 - Queue binding exists;
 - one targeted inbound probe only when delivery proof is needed.
+
+The relay router is email-only and the outbound Worker is queue-only. Neither
+exposes HTTP `/readyz`; that endpoint belongs to the legacy web-desk API.
+Use the isolated routing-health Worker and the cfctl evidence contract for relay
+readiness. A successful legacy readiness response does not qualify the relay trio.
 
 ## 7. Outbound Reply Readiness
 
