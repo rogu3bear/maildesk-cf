@@ -2,11 +2,13 @@
 
 The optional `mail-canary` Worker checks every enabled route in the active
 policy once an hour. It loads the immutable R2 policy through the existing
-active-policy loader, compares the D1 route count with the revision's expected
-count, and checks independent edge, inbox and reply receipt freshness for each
-route. Missing rows, revision drift, incomplete coverage, disabled processing,
+active-policy loader, compares D1 route membership and routing fields with
+decisions from the Rust router, and checks independent edge, inbox and reply
+receipt freshness for each route. Missing rows, revision drift, incomplete coverage, disabled processing,
 stale proofs and delivery failures cannot produce a current receipt result.
 Intentional sink routes require an explicit excluded disposition.
+Route IDs, domains, aliases, kinds and default reply identities must agree with
+the immutable policy; matching counts and revision labels alone cannot pass.
 
 It sends one body-free notification on the first check, on aggregate status
 changes, and every 24 hours while the aggregate result is unchanged. Recovery

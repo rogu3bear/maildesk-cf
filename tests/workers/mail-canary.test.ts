@@ -4,10 +4,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { runCanary, type CanaryEnv } from "../../workers/mail-canary/src/index";
 import { reportRoutes, type CanarySnapshot } from "../../workers/mail-canary/src/report";
+import { assertPolicyRoutes, type RouteInventoryRow } from "../../workers/mail-canary/src/policy-routes";
+import type { RouterPolicy } from "../../workers/shared/router";
 
 const now = Date.parse("2026-10-05T12:00:00Z");
 const recent = "2026-10-05 11:30:00";
-const policyJson = JSON.stringify({ domains: { "example.com": {
+const policyJson = JSON.stringify({ default_reply_mode: "role_first", domains: { "example.com": {
   role_aliases: { postmaster: { operators: ["operator@example.com"], reply_identity: "postmaster@example.com" } },
   personal_aliases: {},
 } } });
@@ -105,6 +107,48 @@ test("missing R2 policy alerts unverified rather than reporting a healthy empty 
   } finally { f.db.close(); }
 });
 
+test("equal-count projection substitutions and changed routing fields cannot report current receipts", async () => {
+  for (const change of [
+    "UPDATE alias_routes SET id = 'route:example.com:other'; UPDATE route_health SET route_id = 'route:example.com:other'; UPDATE route_proofs SET route_id = 'route:example.com:other'",
+    "UPDATE alias_routes SET local_part = 'other'",
+    "UPDATE alias_routes SET decision_kind = 'personal_alias'",
+    "UPDATE alias_routes SET kind = 'personal'",
+    "UPDATE domains SET domain = 'example.net'",
+  ]) {
+    const f = await fixture();
+    try {
+      f.db.exec(change);
+      expect((await runCanary(f.env, now))?.issues).toEqual({ policy_or_route_inventory_unavailable: 1 });
+      expect(f.sent[0]!.subject).toContain("unverified");
+    } finally { f.db.close(); }
+  }
+});
+
+test("Rust-derived inventory preserves personal, sink and catch-all decisions", () => {
+  const policy = JSON.parse(policyJson) as RouterPolicy;
+  const domain = policy.domains["example.com"]!;
+  domain.role_aliases["maildesk-canary"] = { operators: [], reply_identity: "discard@example.com", sink: true };
+  domain.personal_aliases["person"] = { operator: "operator@example.com", reply_identity: "person@example.com" };
+  domain.catch_all = { operators: ["operator@example.com"], reply_identity: "postmaster@example.com" };
+  const row = (alias: string, kind: string, identity: string, storage = "role"): RouteInventoryRow => ({
+    ...goodSnapshot().routes[0]!, route_id: `route:example.com:${encodeURIComponent(alias)}`,
+    domain_id: "domain:example.com", domain: "example.com", local_part: alias, decision_kind: kind,
+    storage_kind: storage, reply_identity_id: `identity:${encodeURIComponent(identity)}`, reply_identity: identity,
+  });
+  const rows = [row("postmaster", "role_alias", "postmaster@example.com"),
+    row("maildesk-canary", "sink", "discard@example.com"),
+    row("person", "personal_alias", "person@example.com", "personal"),
+    row("*", "catch_all", "postmaster@example.com")];
+  expect(() => assertPolicyRoutes(policy, rows)).not.toThrow();
+  domain.role_aliases["postmaster"]!.reply_identity = "POSTMASTER@EXAMPLE.COM";
+  expect(() => assertPolicyRoutes(policy, rows)).not.toThrow();
+  rows[0]!.decision_kind = "sink";
+  expect(() => assertPolicyRoutes(policy, rows)).toThrow("differs from policy");
+  rows[0]!.decision_kind = "role_alias";
+  rows[2]!.reply_identity = "postmaster@example.com";
+  expect(() => assertPolicyRoutes(policy, rows)).toThrow("differs from policy");
+});
+
 function goodSnapshot(): CanarySnapshot {
   return { policy_sha256: "a".repeat(64), expected_routes: 1, routes: [{
     route_id: "route-example", decision_kind: "role_alias", health_policy_sha256: "a".repeat(64),
@@ -122,13 +166,13 @@ async function fixture() {
   const hashBytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(policyJson));
   const hash = Array.from(new Uint8Array(hashBytes), (b) => b.toString(16).padStart(2, "0")).join("");
   const key = `config/policy/${hash}.json`;
-  db.run("INSERT INTO domains (id, domain) VALUES ('d', 'example.com')");
-  db.run("INSERT INTO identities (id, domain_id, address, kind) VALUES ('i', 'd', 'postmaster@example.com', 'role')");
+  db.run("INSERT INTO domains (id, domain) VALUES ('domain:example.com', 'example.com')");
+  db.run("INSERT INTO identities (id, domain_id, address, kind) VALUES ('identity:postmaster%40example.com', 'domain:example.com', 'postmaster@example.com', 'role')");
   db.run("INSERT INTO policy_revisions (policy_sha256, r2_object_key, expected_domain_count, expected_route_count) VALUES (?, ?, 1, 1)", [hash, key]);
   db.run("INSERT INTO runtime_state (singleton, active_policy_sha256, active_policy_r2_key) VALUES (1, ?, ?)", [hash, key]);
-  db.run("INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, policy_sha256) VALUES ('r', 'd', 'postmaster', 'role', 'i', ?)", [hash]);
-  db.run("INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, reply_identity, policy_sha256, inbound_status, reply_status, last_inbox_verified_at, last_reply_verified_at) VALUES ('r', 'postmaster@example.com', 'role_alias', 'cloudflare_email_routing', 'postmaster@example.com', ?, 'inbox_verified', 'reply_verified', ?, ?)", [hash, recent, recent]);
-  db.run("INSERT INTO route_proofs (id, route_id, policy_sha256, proof_kind, evidence_sha256, verified_at) VALUES ('p', 'r', ?, 'edge_verified', ?, ?)", [hash, "a".repeat(64), recent]);
+  db.run("INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, policy_sha256) VALUES ('route:example.com:postmaster', 'domain:example.com', 'postmaster', 'role', 'identity:postmaster%40example.com', ?)", [hash]);
+  db.run("INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, reply_identity, policy_sha256, inbound_status, reply_status, last_inbox_verified_at, last_reply_verified_at) VALUES ('route:example.com:postmaster', 'postmaster@example.com', 'role_alias', 'cloudflare_email_routing', 'postmaster@example.com', ?, 'inbox_verified', 'reply_verified', ?, ?)", [hash, recent, recent]);
+  db.run("INSERT INTO route_proofs (id, route_id, policy_sha256, proof_kind, evidence_sha256, verified_at) VALUES ('p', 'route:example.com:postmaster', ?, 'edge_verified', ?, ?)", [hash, "a".repeat(64), recent]);
   const sent: Array<{ to: string[]; subject: string; text: string }> = [];
   const adapter = {
     prepare(sql: string) {

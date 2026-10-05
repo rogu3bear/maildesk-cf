@@ -1,5 +1,6 @@
 import { loadActivePolicy } from "../../shared/policy-store";
-import { reportRoutes, type CanaryReport, type RouteSnapshot } from "./report";
+import { reportRoutes, type CanaryReport } from "./report";
+import { assertPolicyRoutes, type RouteInventoryRow } from "./policy-routes";
 
 export interface CanaryEnv {
   DB: D1Database;
@@ -15,12 +16,16 @@ export interface CanaryEnv {
 
 const HOUR = 3_600_000;
 export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind,
+  ar.domain_id, d.domain, ar.local_part, ar.kind AS storage_kind,
+  ar.default_reply_identity_id AS reply_identity_id, i.address AS reply_identity,
   rh.policy_sha256 AS health_policy_sha256, rh.inbound_status, rh.reply_status,
   rh.last_inbox_verified_at, rh.last_reply_verified_at,
   (SELECT MAX(rp.verified_at) FROM route_proofs rp
    WHERE rp.route_id = ar.id AND rp.policy_sha256 = ar.policy_sha256
      AND rp.proof_kind = 'edge_verified') AS edge_verified_at
   FROM alias_routes ar
+  JOIN domains d ON d.id = ar.domain_id
+  JOIN identities i ON i.id = ar.default_reply_identity_id
   JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256
   LEFT JOIN route_health rh ON rh.route_id = ar.id AND rh.policy_sha256 = ar.policy_sha256
   WHERE ar.enabled = 1 AND ar.policy_sha256 = ?1 ORDER BY ar.id LIMIT 10001`;
@@ -45,8 +50,9 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
       "SELECT pr.expected_route_count FROM runtime_state rs JOIN policy_revisions pr ON pr.policy_sha256 = rs.active_policy_sha256 WHERE rs.singleton = 1 AND rs.active_policy_sha256 = ?1",
     ).bind(active.sha256).first<{ expected_route_count: number }>();
     if (!revision) throw new Error("policy changed during canary");
-    const routes = await env.DB.prepare(ROUTES_SQL).bind(active.sha256).all<RouteSnapshot>();
+    const routes = await env.DB.prepare(ROUTES_SQL).bind(active.sha256).all<RouteInventoryRow>();
     if (!routes.success || !routes.results || routes.results.length > 10000) throw new Error("route inventory unavailable");
+    assertPolicyRoutes(active.policy, routes.results);
     report = reportRoutes({
       policy_sha256: active.sha256,
       expected_routes: revision.expected_route_count,

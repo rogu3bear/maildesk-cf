@@ -61,6 +61,8 @@ const roles = [
     requiredInputs: [
       "workers/mail-canary/src/index.ts",
       "workers/mail-canary/src/report.ts",
+      "workers/mail-canary/src/policy-routes.ts",
+      "workers/shared/router.ts",
       "workers/shared/policy-store.ts",
       "generated/router-wasm/maildesk_router_bg.wasm",
       "Cargo.lock", "Cargo.toml", "crates/maildesk-router/Cargo.toml",
