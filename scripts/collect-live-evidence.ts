@@ -2,6 +2,7 @@ import { buildWorkerUploadManifest } from "./worker-upload-manifest";
 import { WORKER_MODULE_DIGEST_CAPABILITY, qualifyWorkerModules, type WorkerModuleProof } from "./worker-module-proof";
 import { decodeD1Evidence, decodePolicyObjectDigest } from "./cfctl-d1-evidence";
 import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
+import { decodeEmailRoutingRuleSet, projectedRuleRoutesToWorker, type EmailRoutingRule } from "./cfctl-email-routing";
 import { maildeskReadContracts } from "./cfctl-v2-command-contract";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -232,9 +233,6 @@ if (useResend && readScope.mode === "canary") {
 }
 const routerService = desiredState.workers.relay_router.script_name;
 const cfctlProfile = process.env.MAILDESK_CFCTL_PROFILE?.trim();
-const EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION = 1;
-const EMAIL_ROUTING_RULE_PAGE_SIZE = 50;
-const EMAIL_ROUTING_RULE_MAX_PAGES = 100;
 const evidence: Evidence = {
   generated_at: new Date().toISOString(),
 };
@@ -479,9 +477,9 @@ async function collectGovernedCfctlEvidence(profileId: string | undefined): Prom
         alias,
       ]));
       aliases = routingProjection.records
-        .filter((rule) => rule.enabled && projectedRuleRoutesToMaildesk(rule, routerService))
+        .filter((rule) => rule.enabled && projectedRuleRoutesToWorker(rule, routerService))
         .flatMap((rule) => rule.matchers
-          .filter((matcher) => matcher.field === "to")
+          .filter((matcher) => matcher.matcher_type === "literal" && matcher.field === "to")
           .map((matcher) => matcher.value_sha256))
         .map((identity) => identity ? expectedAliasByHash.get(identity) : undefined)
         .filter((alias): alias is string => Boolean(alias))
@@ -1087,7 +1085,7 @@ function collectEmailRoutingRules(
   const receipts = [call.receipt];
   if (!call.ok) return { ok: false, receipts };
 
-  const projection = decodeEmailRoutingRuleSet(call.result);
+  const projection = isRecord(call.result) ? decodeEmailRoutingRuleSet(call.result.result) : null;
   if (!projection) {
     call.receipt.ok = false;
     call.receipt.error_code = "CFCTL_RESULT_SHAPE_MALFORMED";
@@ -1102,36 +1100,6 @@ function collectEmailRoutingRules(
     terminal: projection.complete,
   };
   return { ok: true, records: projection.rules, receipts };
-}
-
-function decodeEmailRoutingRuleSet(value: unknown): EmailRoutingRuleSet | null {
-  if (!isRecord(value) || !isRecord(value.result)) return null;
-  const projection = value.result;
-  if (
-    projection.schema_version !== EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION ||
-    projection.complete !== true ||
-    projection.page_size !== EMAIL_ROUTING_RULE_PAGE_SIZE ||
-    typeof projection.pages !== "number" ||
-    !Number.isInteger(projection.pages) ||
-    projection.pages < 1 ||
-    projection.pages > EMAIL_ROUTING_RULE_MAX_PAGES ||
-    typeof projection.rule_count !== "number" ||
-    !Number.isInteger(projection.rule_count) ||
-    projection.rule_count < 0 ||
-    projection.rule_count > (projection.pages - 1) * EMAIL_ROUTING_RULE_PAGE_SIZE ||
-    !Array.isArray(projection.rules) ||
-    projection.rule_count !== projection.rules.length
-  ) return null;
-  const rules = projection.rules.filter(isRecord);
-  if (rules.length !== projection.rules.length || !rules.every(validProjectedRoutingRule)) return null;
-  return {
-    schema_version: EMAIL_ROUTING_RULE_SET_SCHEMA_VERSION,
-    complete: true,
-    page_size: EMAIL_ROUTING_RULE_PAGE_SIZE,
-    pages: projection.pages,
-    rule_count: projection.rule_count,
-    rules: rules as unknown as EmailRoutingRule[],
-  };
 }
 
 function paginationStatus(value: unknown, contract: PaginationContract): {
@@ -1322,40 +1290,6 @@ function validZoneRecord(value: Record<string, unknown>): boolean {
   return typeof value.id === "string" &&
     typeof value.name === "string" &&
     typeof value.status === "string";
-}
-
-function validProjectedRoutingRule(value: Record<string, unknown>): boolean {
-  if (
-    typeof value.enabled !== "boolean" ||
-    !Array.isArray(value.matchers) ||
-    value.matchers.length === 0 ||
-    !Array.isArray(value.actions) ||
-    value.actions.length === 0
-  ) return false;
-  const matchersValid = value.matchers.every((matcher) => {
-    if (!isRecord(matcher) || typeof matcher.matcher_type !== "string" || matcher.matcher_type.length === 0) {
-      return false;
-    }
-    const fieldPresent = typeof matcher.field === "string" && matcher.field.length > 0;
-    const identityPresent = typeof matcher.value_sha256 === "string" &&
-      /^sha256:[a-f0-9]{64}$/.test(matcher.value_sha256);
-    return (matcher.field === undefined && matcher.value_sha256 === undefined) ||
-      (fieldPresent && identityPresent);
-  });
-  const actionsValid = value.actions.every((action) =>
-    isRecord(action) &&
-    typeof action.action_type === "string" &&
-    action.action_type.length > 0 &&
-    Array.isArray(action.worker_targets) &&
-    action.worker_targets.every((entry) => typeof entry === "string" && entry.length > 0) &&
-    typeof action.value_count === "number" &&
-    Number.isInteger(action.value_count) &&
-    action.value_count >= action.worker_targets.length &&
-    (action.action_type === "worker"
-      ? action.value_count === action.worker_targets.length
-      : action.worker_targets.length === 0)
-  );
-  return matchersValid && actionsValid;
 }
 
 function validDnsRecord(value: Record<string, unknown>): boolean {
@@ -1633,12 +1567,6 @@ function routesToMaildesk(rule: RoutingRule, routerService: string): boolean {
   });
 }
 
-function projectedRuleRoutesToMaildesk(rule: EmailRoutingRule, routerService: string): boolean {
-  return rule.actions.some((action) =>
-    action.action_type === "worker" && action.worker_targets.includes(routerService)
-  );
-}
-
 function parseJson<T>(value: string): T | null {
   try {
     return JSON.parse(value) as T;
@@ -1672,29 +1600,6 @@ interface RoutingRule {
   enabled?: boolean;
   matchers?: Array<{ field?: string; value?: string }>;
   actions?: Array<{ type?: string; value?: string[] }>;
-}
-
-interface EmailRoutingRuleSet {
-  schema_version: 1;
-  complete: true;
-  page_size: 50;
-  pages: number;
-  rule_count: number;
-  rules: EmailRoutingRule[];
-}
-
-interface EmailRoutingRule {
-  enabled: boolean;
-  matchers: Array<{
-    matcher_type: string;
-    field?: string;
-    value_sha256?: string;
-  }>;
-  actions: Array<{
-    action_type: string;
-    worker_targets: string[];
-    value_count: number;
-  }>;
 }
 
 interface GoogleResourceSearch {

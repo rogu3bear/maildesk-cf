@@ -1,4 +1,5 @@
 import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
+import { decodeEmailRoutingRuleSet, projectedRuleRoutesToWorker, routingRuleHasAlias } from "./cfctl-email-routing";
 // scripts/provision-email-routing.ts — governed inbound Email Routing provisioning.
 //
 // A state RECONCILER over cfctl's governed lane, not an imperative script:
@@ -148,9 +149,10 @@ function reconcileDomain(domain: DesiredDomain) {
   const settings = cfctlRead("email-routing-settings-get-email-routing-settings", { zone_id: zoneId });
   const observedEnabled = settings.ok && typeof settings.result?.enabled === "boolean" ? settings.result.enabled : null;
   if (observedEnabled === null) failed.push({ item: "read:settings", reason: "routing settings unavailable or malformed" });
-  const rulesRead = cfctlRead("email-routing-routing-rules-list-routing-rules", { zone_id: zoneId }, { page: "1", per_page: "100" });
-  const observedRules: EmailRule[] = rulesRead.ok && Array.isArray(rulesRead.result) ? rulesRead.result : [];
-  const rulesKnown = rulesRead.ok && Array.isArray(rulesRead.result) && observedRules.length < 100;
+  const rulesRead = cfctlRead("email-routing-routing-rules-list-routing-rules", { zone_id: zoneId });
+  const projection = rulesRead.ok ? decodeEmailRoutingRuleSet(rulesRead.result) : null;
+  const observedRules = projection?.rules ?? [];
+  const rulesKnown = projection !== null;
   if (!rulesKnown) failed.push({ item: "read:rules", reason: "routing rule inventory unavailable, malformed or incomplete" });
   const catchAllRead = cfctlRead("email-routing-routing-rules-get-catch-all-rule", { zone_id: zoneId });
   const catchAllKnown = catchAllRead.ok && typeof catchAllRead.result?.enabled === "boolean";
@@ -185,10 +187,11 @@ function reconcileDomain(domain: DesiredDomain) {
   for (const alias of rulesKnown && workerScript ? aliases : []) {
     const address = `${alias}@${domain.name}`;
     const desired = desiredRule(address, workerScript ?? "");
-    const existing = observedRules.find((r) => literalMatcherValue(r) === address.toLowerCase());
-    if (!existing) {
+    const existing = observedRules.filter((rule) => routingRuleHasAlias(rule, address));
+    if (existing.length === 0) {
       deltas.push({ item: `rule:${address}`, capability: "email-routing-routing-rules-create-routing-rule", body: desired });
-    } else if (!ruleMatchesDesired(existing, workerScript ?? "")) {
+    } else if (existing.length !== 1 || existing[0]!.matchers.length !== 1 ||
+        !projectedRuleRoutesToWorker(existing[0]!, workerScript ?? "")) {
       // Matcher exists but action drifted (e.g. points at a different worker).
       warnings.push(`rule for ${address} exists but does not route to ${workerScript}; leaving it (manual review)`);
       failed.push({ item: `rule:${address}`, reason: "existing rule is disabled or has a different action; review before replacement" });
@@ -267,11 +270,6 @@ function desiredRule(address: string, worker: string): unknown {
     actions: [{ type: "worker", value: [worker] }],
     priority: 0,
   };
-}
-
-function literalMatcherValue(rule: EmailRule): string | null {
-  const m = (rule.matchers ?? []).find((x) => x.type === "literal" && x.field === "to");
-  return m?.value ? m.value.toLowerCase() : null;
 }
 
 function ruleMatchesDesired(rule: EmailRule, worker: string): boolean {
