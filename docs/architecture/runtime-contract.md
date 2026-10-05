@@ -1,6 +1,13 @@
 # Runtime Contract
 
 This document defines the first complete runtime shape for `maildesk-cf`.
+
+The optional scheduled `mail-canary` adapter reads the active immutable policy
+and body-free route receipts, and sends bounded status notifications through
+Email Service. It owns no routing policy and no inbound or reply probe path.
+Its `receipts_current` result is distinct from fresh provider or mailbox
+acceptance. See [route canary](../operations/mail-canary.md) for its coverage,
+notification claim, and uncertain-send recovery contract.
 Everything here should remain template-safe: use reserved domains, no account
 IDs, no operator names, no live receipts, and no secret values.
 

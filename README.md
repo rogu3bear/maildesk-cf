@@ -114,6 +114,12 @@ identity without binding preview storage to any production Worker.
 
 The routing-health dashboard exposes declared provider state and proof status,
 never subjects, message bodies, attachments, thread history, or a composer.
+
+An optional [route canary](docs/operations/mail-canary.md) checks full active
+route coverage and receipt freshness hourly, with body-free email alerts,
+recovery notices and a daily heartbeat. `wrangler.mail-canary.toml` is disabled
+by default. Current receipts, live provider configuration, and new mailbox
+probe results remain separate evidence.
 When `MAILDESK_OPERATOR_DELIVERY_MODE=inbox_relay`, `/desk/thread/:id` and web
 reply submission fail closed. The legacy shared-token `POST /api/replies` surface is disabled by default with
 `MAILDESK_REPLY_API_MODE=disabled`. The existing Google-hosted operator inbox

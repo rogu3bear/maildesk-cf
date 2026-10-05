@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { inheritedBuildStdio } from "../../scripts/inherited-build-stdio";
 
 const root = resolve(import.meta.dir, "../..");
 
@@ -53,6 +54,20 @@ const roles = [
       "scripts/build-router-wasm.ts",
     ],
   },
+  {
+    role: "mail-canary",
+    config: "wrangler.mail-canary.toml",
+    entrypoint: "workers/mail-canary/src/index.ts",
+    requiredInputs: [
+      "workers/mail-canary/src/index.ts",
+      "workers/mail-canary/src/report.ts",
+      "workers/shared/policy-store.ts",
+      "generated/router-wasm/maildesk_router_bg.wasm",
+      "Cargo.lock", "Cargo.toml", "crates/maildesk-router/Cargo.toml",
+      "crates/maildesk-router/src/lib.rs",
+      "scripts/build-mail-worker-bundles.ts", "scripts/build-router-wasm.ts",
+    ],
+  },
 ] as const;
 
 describe("closed Maildesk Worker bundles", () => {
@@ -65,7 +80,8 @@ describe("closed Maildesk Worker bundles", () => {
       expect(config.build?.command).toBe("bun run check:mail-worker-bundles");
     }
 
-    const build = spawnSync("bun", ["run", "build:mail-workers"], {
+    const build = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts"], {
+      stdio: inheritedBuildStdio(),
       cwd: root,
       encoding: "utf8",
     });
@@ -105,7 +121,8 @@ describe("closed Maildesk Worker bundles", () => {
       ]);
     }
 
-    const check = spawnSync("bun", ["run", "check:mail-worker-bundles"], {
+    const check = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--check"], {
+      stdio: inheritedBuildStdio(),
       cwd: root,
       encoding: "utf8",
     });
@@ -113,7 +130,8 @@ describe("closed Maildesk Worker bundles", () => {
   });
 
   test("verification fails when an imported shared source drifts from the reviewed artifact", () => {
-    const build = spawnSync("bun", ["run", "build:mail-workers"], {
+    const build = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts"], {
+      stdio: inheritedBuildStdio(),
       cwd: root,
       encoding: "utf8",
     });
@@ -123,7 +141,8 @@ describe("closed Maildesk Worker bundles", () => {
     const original = readFileSync(sharedSource);
     try {
       writeFileSync(sharedSource, Buffer.concat([original, Buffer.from("\n// closure drift probe\n")]));
-      const drifted = spawnSync("bun", ["run", "check:mail-worker-bundles"], {
+      const drifted = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--check"], {
+        stdio: inheritedBuildStdio(),
         cwd: root,
         encoding: "utf8",
       });
@@ -134,7 +153,8 @@ describe("closed Maildesk Worker bundles", () => {
       writeFileSync(sharedSource, original);
     }
 
-    const restored = spawnSync("bun", ["run", "check:mail-worker-bundles"], {
+    const restored = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--check"], {
+      stdio: inheritedBuildStdio(),
       cwd: root,
       encoding: "utf8",
     });

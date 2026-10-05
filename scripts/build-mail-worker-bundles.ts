@@ -23,6 +23,7 @@ const finalWorkersDirectory = join(generatedRoot, "mail-workers");
 const roles = [
   { role: "mail-router", entrypoint: "workers/mail-router/src/index.ts" },
   { role: "mail-outbound", entrypoint: "workers/mail-outbound/src/index.ts" },
+  { role: "mail-canary", entrypoint: "workers/mail-canary/src/index.ts" },
 ] as const;
 
 interface ManifestEntry {
@@ -188,6 +189,7 @@ function rustBuildInputs(): string[] {
     "crates/maildesk-router/Cargo.toml",
     "scripts/build-mail-worker-bundles.ts",
     "scripts/build-router-wasm.ts",
+    "scripts/inherited-build-stdio.ts",
   ];
   return [...fixed, ...regularFiles(join(root, "crates/maildesk-router/src"))]
     .map((path) => isAbsolute(path) ? repositoryRelative(path) : path)

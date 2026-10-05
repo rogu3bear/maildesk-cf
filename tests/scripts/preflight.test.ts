@@ -2,11 +2,14 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnChild } from "node:child_process";
+import { inheritedBuildStdio } from "../../scripts/inherited-build-stdio";
 import { maildeskPrivateReadContracts, maildeskReadContracts } from "../../scripts/cfctl-v2-command-contract";
 import { loadEnvFile } from "../../scripts/env-file";
 
 const root = resolve(import.meta.dir, "../..");
+const spawnSync: typeof spawnChild = ((command: string, args: string[], options: any) =>
+  spawnChild(command, args, { ...options, stdio: inheritedBuildStdio() })) as typeof spawnChild;
 
 setDefaultTimeout(30_000);
 

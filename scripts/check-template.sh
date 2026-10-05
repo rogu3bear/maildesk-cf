@@ -80,8 +80,9 @@ cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" --package maildesk-router --b
 
 echo "== worker typecheck"
 if [[ -d "${ROOT_DIR}/node_modules" ]]; then
-  (cd "${ROOT_DIR}" && bun run typecheck)
-  (cd "${ROOT_DIR}" && bun run preflight:template)
+  (cd "${ROOT_DIR}" && bun scripts/build-mail-worker-bundles.ts)
+  (cd "${ROOT_DIR}" && bun node_modules/typescript/bin/tsc --noEmit)
+  (cd "${ROOT_DIR}" && bun scripts/preflight.ts --mode template)
   (cd "${ROOT_DIR}" && bun run check:cfctl-provisioning -- --json >/dev/null)
   (cd "${ROOT_DIR}" && bun run verify:maildesk -- --json >/dev/null)
 else

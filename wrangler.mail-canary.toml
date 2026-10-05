@@ -1,0 +1,30 @@
+name = "maildesk-cf-canary"
+main = "generated/mail-workers/mail-canary/index.js"
+compatibility_date = "2026-08-12"
+workers_dev = false
+send_email = [{ name = "EMAIL" }]
+
+[build]
+command = "bun run check:mail-worker-bundles"
+
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+MAILDESK_CANARY_MODE = "disabled"
+MAILDESK_CANARY_FROM = "postmaster@example.com"
+MAILDESK_CANARY_TO = "operator@example.com"
+MAILDESK_CANARY_MAX_PROOF_AGE_HOURS = "24"
+# These declarations must match the deployed mail router switches.
+MAILDESK_CANARY_INBOUND_MODE = "disabled"
+MAILDESK_CANARY_REPLY_MODE = "disabled"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-relay-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "POLICY_STORE"
+bucket_name = "maildesk-cf-policy"
