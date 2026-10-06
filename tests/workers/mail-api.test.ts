@@ -1545,6 +1545,22 @@ describe("mail API outbound sender modes", () => {
     });
   });
 
+  test("inbox-relay readiness uses policy and spool bindings without legacy raw storage", async () => {
+    const response = await mailApiWorker.fetch(new Request("https://maildesk.example.com/readyz"), {
+      DB: new D1Recorder(), MAIL_JOBS: {}, POLICY_STORE: {}, RELAY_SPOOL: {}, EMAIL: {},
+      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay", MAILDESK_INBOUND_RELAY_MODE: "enabled",
+      MAILDESK_REPLY_RELAY_MODE: "disabled", MAILDESK_REPLY_DOMAIN: "reply.example.com",
+    } as unknown as Env);
+    const report = await response.json() as { checks: Array<{ name: string; ok: boolean }> };
+    expect(response.status).toBe(200);
+    expect(report.checks.some((check) => check.name === "raw_mail_binding")).toBe(false);
+    const legacy = await mailApiWorker.fetch(new Request("https://maildesk.example.com/readyz"), {
+      DB: new D1Recorder(), MAIL_JOBS: {}, MAILDESK_POLICY_JSON: JSON.stringify({ domains: {} }),
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+    } as unknown as Env);
+    expect(legacy.status).toBe(503);
+  });
+
   test("readiness rejects an omitted operator delivery mode", async () => {
     const response = await mailApiWorker.fetch(
       new Request("https://maildesk.example.com/readyz"),

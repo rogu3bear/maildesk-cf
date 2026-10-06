@@ -28,9 +28,8 @@ work.
 for provisioning and verification. It is compatible with `leptos-cf` app
 patterns, but it must work as a standalone app.
 
-The long-term strategy is not to build a private mailbox. The long-term
-strategy is to build a reusable extension template that proves a broader
-Cloudflare-native stack:
+Build a reusable Cloudflare-native extension template, not a private mailbox.
+The stack is:
 
 - `cfctl` for account state;
 - Rust for the mail router and policy core;
@@ -212,9 +211,8 @@ Production checks before Cloudflare mutation:
 bun run preflight:production
 ```
 
-Production preflight must fail if required Cloudflare/cfctl inputs are missing,
-if `wrangler.toml` still contains placeholder IDs, or if policy validation does
-not pass. Do not skip it to make a deployment feel green.
+Production preflight must reject missing Cloudflare/cfctl inputs, placeholder
+IDs in `wrangler.toml`, and invalid policy. Do not skip the gate.
 
 ## Cloudflare Credentials
 
@@ -235,7 +233,6 @@ minter, external rotation script, or credential-directory dependency.
 - Ordinary mutations retain the capability-specific call/plan/approve/run/status
   lifecycle above. A missing capability or unhealthy secret store is a blocker
   with a governed next action, never permission to call Cloudflare directly.
-- Production build adapters require the purpose-scoped deployment token named
-  by preflight. Profile custody and deployment-token availability are separate
-  checks; runtime bindings do not require copying an account credential into
+- Production adapters use the explicit account-pinned cfctl profile checked by
+  preflight. Runtime bindings do not require copying an account credential into
   application code.

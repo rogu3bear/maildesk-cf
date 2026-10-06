@@ -49,4 +49,8 @@ bun run test:scripts
 bash scripts/check-template.sh
 ```
 
-On this host, the normal cargo wrapper may be unable to start `sccache` inside a restricted sandbox. The exact-tree repository gate passed with `CARGO_GATE_BYPASS=1 RUSTC_WRAPPER=`; this changes only the host execution wrapper, not the checks executed by `bun run ci`.
+When a host admission tool provides a locked build reservation, launch
+`bash scripts/ci.sh` directly through that tool. CI invokes Bun entrypoints
+directly and the WASM builder forwards the existing reservation descriptor to
+its child process. A closed descriptor is a hold; preserve its token and repair
+the parent launch. Do not bypass the host wrapper or clear reservation state.

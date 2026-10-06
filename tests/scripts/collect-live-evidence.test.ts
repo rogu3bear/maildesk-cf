@@ -699,7 +699,7 @@ esac
       googleAdmin,
       `#!/bin/sh
 echo "$*" >> "$MAILDESK_TEST_PROVIDER_LOG"
-printf '%s\n' '${JSON.stringify({ snapshot_captured_at: "2026-08-18T00:03:00.000Z", resources: [{ id: `workspace:group:founders@${fixture.domains[0]}`, type: "workspace.group" }, { type: "workspace.group_membership", record: { email: "operator@example.com" } }] })}'
+printf '%s\n' '${JSON.stringify({ snapshot_captured_at: "2026-08-18T00:03:00.000Z", resources: [{ id: `workspace:group:inbox@${fixture.domains[0]}`, type: "workspace.group" }, { type: "workspace.group_membership", record: { email: "operator@example.com" } }] })}'
 `,
       { mode: 0o755 },
     );
@@ -744,6 +744,8 @@ printf '%s\n' '${JSON.stringify({ snapshot_captured_at: "2026-08-18T00:03:00.000
     expect(result.status).toBe(0);
     const providerCalls = readFileSync(providerLog, "utf8");
     expect(providerCalls).toContain(fixture.domains[0]!);
+    expect(providerCalls).toContain(`inbox@${fixture.domains[0]}`);
+    expect(providerCalls).not.toContain("founders@");
     expect(providerCalls).not.toContain(fixture.domains[1]!);
     expect(providerCalls).not.toContain(fixture.domains[2]!);
     const evidence = JSON.parse(readFileSync(out, "utf8")) as {

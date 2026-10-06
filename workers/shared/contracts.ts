@@ -279,9 +279,12 @@ export function operatorDeliveryConfig(env: MaildeskEnv): OperatorDeliveryConfig
 
 export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
   const replyApiMode = env.MAILDESK_REPLY_API_MODE ?? "disabled";
+  const delivery = operatorDeliveryConfig(env);
   const checks: ReadinessCheck[] = [
     { name: "db_binding", ok: Boolean(env.DB) },
-    { name: "raw_mail_binding", ok: Boolean(env.RAW_MAIL) },
+    ...(delivery.mode === "web_desk"
+      ? [{ name: "raw_mail_binding", ok: Boolean(env.RAW_MAIL) }]
+      : []),
     { name: "mail_jobs_binding", ok: Boolean(env.MAIL_JOBS) },
     {
       name: "reply_api",
@@ -297,7 +300,6 @@ export async function readiness(env: MaildeskEnv): Promise<ReadinessReport> {
     },
   ];
 
-  const delivery = operatorDeliveryConfig(env);
   checks.push({
     name: "operator_delivery_mode",
     ok: delivery.mode !== "invalid",

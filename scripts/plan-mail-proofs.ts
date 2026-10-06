@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
+import { roleProofTarget } from "./mail-proof-target";
 import { admitGitCandidateBinding, type GitCandidate } from "./git-candidate";
 import {
   planLifecycle,
@@ -50,6 +51,7 @@ interface PolicyDomain {
 interface RoleAlias {
   operators: string[];
   reply_identity: string;
+  sink?: boolean;
 }
 
 interface PersonalAlias {
@@ -163,6 +165,10 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
         });
       } else {
         const target = inboundTarget(gap.domain, policyDomain);
+        if (!target) {
+          actions.push({ kind: "blocked", domain: gap.domain, blocked_by: "inbound_proof", description: "no non-sink policy route is available for a targeted probe" });
+          continue;
+        }
         actions.push({
           kind: "targeted_inbound_probe",
           domain: gap.domain,
@@ -205,6 +211,10 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
         });
       } else {
         const identity = outboundIdentity(gap.domain, policyDomain);
+        if (!identity) {
+          actions.push({ kind: "blocked", domain: gap.domain, blocked_by: "inbound_proof", description: "no non-sink policy identity is available for a reply probe" });
+          continue;
+        }
         actions.push({
           kind: "targeted_outbound_reply_probe",
           domain: gap.domain,
@@ -235,24 +245,20 @@ function senderDomainPlanSummary(actions: ProofAction[]): SenderDomainPlanSummar
   };
 }
 
-function inboundTarget(domain: string, policyDomain: PolicyDomain): string {
-  if (policyDomain.role_aliases.founders) return `founders@${domain}`;
-  const role = Object.keys(policyDomain.role_aliases).sort()[0];
-  if (role) return `${role}@${domain}`;
+function inboundTarget(domain: string, policyDomain: PolicyDomain): string | null {
+  const role = roleProofTarget(domain, policyDomain.role_aliases);
+  if (role) return role.address;
   const personal = Object.keys(policyDomain.personal_aliases).sort()[0];
-  return `${personal}@${domain}`;
+  return personal ? `${personal}@${domain}` : null;
 }
 
-function outboundIdentity(domain: string, policyDomain: PolicyDomain): string {
-  if (policyDomain.role_aliases.founders) return policyDomain.role_aliases.founders.reply_identity;
-  const role = Object.values(policyDomain.role_aliases).sort((left, right) =>
-    left.reply_identity.localeCompare(right.reply_identity),
-  )[0];
-  if (role) return role.reply_identity;
+function outboundIdentity(domain: string, policyDomain: PolicyDomain): string | null {
+  const role = roleProofTarget(domain, policyDomain.role_aliases);
+  if (role) return role.replyIdentity;
   const personal = Object.values(policyDomain.personal_aliases).sort((left, right) =>
     left.reply_identity.localeCompare(right.reply_identity),
   )[0];
-  return personal?.reply_identity ?? `postmaster@${domain}`;
+  return personal?.reply_identity ?? null;
 }
 
 function isReservedExampleDomain(domain: string): boolean {

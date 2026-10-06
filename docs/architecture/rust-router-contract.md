@@ -35,7 +35,7 @@ exports JSON adapter functions for route decisions and reply authorization;
 `workers/shared/router.ts` translates field names and validates the response
 shape without reimplementing policy.
 
-Generated WASM and the two role-specific closed Worker bundles are build
+Generated WASM and the role-specific closed Worker bundles are build
 artifacts and are not tracked. Build the deployment closure with:
 
 ```bash

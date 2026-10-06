@@ -49,10 +49,11 @@ if (!skipCollect) {
     ...forwardValue("--policy"),
     ...forwardValue("--desired-state"),
     ...forwardValue("--cfctl"),
-    ...forwardValue("--wrangler"),
     ...forwardValue("--readyz-url"),
-    ...forwardValue("--d1-database"),
     ...forwardValue("--google-admin"),
+    ...forwardPresentValue("--scope-manifest"),
+    ...forwardPresentValue("--acceptance-profile"),
+    ...(args.includes("--verify-worker-modules") ? ["--verify-worker-modules"] : []),
     ...(args.includes("--no-resend") ? ["--no-resend"] : []),
   ];
   runInherited("collect live evidence", ["run", "scripts/collect-live-evidence.ts", "--", ...collectArgs]);
@@ -146,6 +147,14 @@ function argValue(name: string): string | undefined {
 function forwardValue(name: string): string[] {
   const value = argValue(name);
   return value ? [name, value] : [];
+}
+
+// Coverage selections must reach the collector even when malformed, so its
+// validation rejects them instead of this wrapper silently widening scope.
+function forwardPresentValue(name: string): string[] {
+  if (!args.includes(name)) return [];
+  const value = argValue(name);
+  return value === undefined ? [name] : [name, value];
 }
 
 function runInherited(label: string, commandArgs: string[]): void {

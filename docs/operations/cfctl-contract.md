@@ -26,6 +26,14 @@ application owns runtime behavior.
 The template fixture is `config/desired-state.example.json`.
 The schema is `ops/cfctl/maildesk-cf.desired-state.schema.json`.
 
+Email Routing rule inventory uses cfctl's complete body-free projection:
+schema version 1, `complete: true`, page size 50, bounded page count, rule count,
+hashed matcher identities and Worker targets. The capability owns pagination
+and includes a terminal empty-page probe. Consumers do not request a raw page
+or infer completeness from array length. Reconciliation and evidence collection
+share `scripts/cfctl-email-routing.ts`; unavailable or malformed projections
+cannot authorize missing-rule requests.
+
 Before asking `cfctl` to plan account mutation, prove the checkout-side lane
 input locally:
 

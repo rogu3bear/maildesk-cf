@@ -24,17 +24,21 @@ cargo clippy --all-targets -- -D warnings
 step "cargo test --workspace --all-features"
 cargo test --workspace --all-features
 
-step "bun run typecheck"
-bun run typecheck
+step "build closed mail Worker bundles"
+# Direct Bun execution keeps inherited host reservation descriptors intact.
+bun scripts/build-mail-worker-bundles.ts
+
+step "TypeScript typecheck"
+bun node_modules/typescript/bin/tsc --noEmit
 
 step "bun run build:ui"
-bun run build:ui
+bash scripts/build-ui-edge.sh
 
 step "bun run test:workers"
-bun run test:workers
+bun test ./tests/workers
 
 step "bun run test:scripts"
-bun run test:scripts
+bun test ./tests/scripts
 
 step "scripts/check-template.sh"
 bash scripts/check-template.sh

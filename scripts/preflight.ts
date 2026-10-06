@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { inheritedBuildStdio } from "./inherited-build-stdio";
 import { loadEnvFile } from "./env-file";
 import { cfctlAccountTarget, cfctlExecutable, managedProfileHealthy } from "./cfctl-profile-contract";
 import { canonicalWorkerConfigFailure, isRepositoryRelativePath } from "./wrangler-config";
@@ -165,7 +166,7 @@ function checkPolicy(path: string) {
   const result = spawnSync(
     "cargo",
     ["run", "--quiet", "--package", "maildesk-router", "--bin", "maildesk-policy-check", "--", path],
-    { cwd: root, encoding: "utf8", env: process.env },
+    { cwd: root, encoding: "utf8", env: process.env, stdio: inheritedBuildStdio() },
   );
   if (result.status === 0) return;
 

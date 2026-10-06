@@ -1,0 +1,23 @@
+name = "maildesk-cf-heartbeat"
+main = "generated/mail-workers/mail-heartbeat/index.js"
+compatibility_date = "2026-08-12"
+workers_dev = false
+
+[build]
+command = "bun run check:mail-worker-bundles"
+
+[triggers]
+# Offset from the canary at :00 so its in-flight notification does not withhold the ping.
+crons = ["30 * * * *"]
+
+[vars]
+MAILDESK_HEARTBEAT_MODE = "disabled"
+MAILDESK_HEARTBEAT_URL = "https://heartbeat.example.com/maildesk"
+MAILDESK_HEARTBEAT_MAX_AGE_HOURS = "2"
+
+# Same relay database as the canary. This Worker has no Email binding.
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-relay-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"

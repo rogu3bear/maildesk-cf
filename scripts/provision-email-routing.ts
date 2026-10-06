@@ -1,4 +1,5 @@
 import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
+import { decodeEmailRoutingRuleSet, projectedRuleRoutesToWorker, routingRuleHasAlias } from "./cfctl-email-routing";
 // scripts/provision-email-routing.ts — governed inbound Email Routing provisioning.
 //
 // A state RECONCILER over cfctl's governed lane, not an imperative script:
@@ -7,7 +8,7 @@ import { cfctlAccountTarget, cfctlExecutable } from "./cfctl-profile-contract";
 //
 // Inbound aliases route to the Rust `relay_router` Worker (action type `worker`),
 // which needs no verified destination address — matching the architecture where
-// the Rust router owns policy. See docs/architecture/email-routing-provisioning.md.
+// the Rust router owns policy. See docs/architecture/inbox-reply-relay.md.
 //
 // Usage:
 //   MAILDESK_CFCTL_PROFILE=<profile> \
@@ -30,6 +31,7 @@ interface DesiredDomain {
   inbound_mx_provider: InboundMxProvider;
   role_aliases: string[];
   personal_aliases: string[];
+  catch_all?: boolean;
   zone_id?: string; // optional pin; otherwise resolved by name (edge case 4)
 }
 
@@ -39,7 +41,7 @@ interface DesiredState extends CanonicalDesiredTopology {
 }
 
 // The Email Routing MX hostnames Cloudflare publishes for inbound routing.
-const CF_EMAIL_ROUTING_MX = ["mx.cloudflare.net", "route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"];
+const CF_EMAIL_ROUTING_MX = ["route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"];
 
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
@@ -72,6 +74,10 @@ const skippedNonCf = state.domains
   .map((d) => ({ domain: d.name, provider: d.inbound_mx_provider }));
 
 const domainResults = targets.map(reconcileDomain);
+if (domainFilter && !state.domains.some((domain) => domain.name === domainFilter)) {
+  console.error("requested domain is absent from desired state");
+  process.exit(1);
+}
 
 const summary = {
   mode: "plan",
@@ -113,7 +119,7 @@ function reconcileDomain(domain: DesiredDomain) {
   const warnings: string[] = [];
   const applied: Array<{ item: string; operation_id: string }> = [];
   const already: string[] = [];
-  const pending: Array<{ item: string; reason: string }> = [];
+  const pending: Array<{ item: string; reason: string; request: { capability_id: string; selectors: { zone_id: string }; body: unknown } }> = [];
   const failed: Array<{ item: string; reason: string }> = [];
 
   // Edge case 4: resolve domain -> exactly one active zone (or an explicit pin).
@@ -141,14 +147,21 @@ function reconcileDomain(domain: DesiredDomain) {
 
   // Observe current state (edge cases 1, 2, 8 hinge on this).
   const settings = cfctlRead("email-routing-settings-get-email-routing-settings", { zone_id: zoneId });
-  const observedEnabled = settings.ok ? Boolean(settings.result?.enabled) : null;
+  const observedEnabled = settings.ok && typeof settings.result?.enabled === "boolean" ? settings.result.enabled : null;
+  if (observedEnabled === null) failed.push({ item: "read:settings", reason: "routing settings unavailable or malformed" });
   const rulesRead = cfctlRead("email-routing-routing-rules-list-routing-rules", { zone_id: zoneId });
-  const observedRules: EmailRule[] = rulesRead.ok && Array.isArray(rulesRead.result) ? rulesRead.result : [];
-  if (!rulesRead.ok) warnings.push("could not list existing routing rules; treating as empty (re-run to reconcile)");
+  const projection = rulesRead.ok ? decodeEmailRoutingRuleSet(rulesRead.result) : null;
+  const observedRules = projection?.rules ?? [];
+  const rulesKnown = projection !== null;
+  if (!rulesKnown) failed.push({ item: "read:rules", reason: "routing rule inventory unavailable, malformed or incomplete" });
+  const catchAllRead = cfctlRead("email-routing-routing-rules-get-catch-all-rule", { zone_id: zoneId });
+  const catchAllKnown = catchAllRead.ok && typeof catchAllRead.result?.enabled === "boolean";
+  if (!catchAllKnown) failed.push({ item: "read:catch-all", reason: "catch-all rule unavailable or malformed" });
 
   // Edge case 10: enabled(setting) != mx_converged(delivery). Read both.
-  const mx = readMx(zoneId);
+  const mx = readMx(zoneId, domain.name);
   const mxConverged = mx.records.length > 0 && mx.records.every((r) => CF_EMAIL_ROUTING_MX.includes(r.toLowerCase()));
+  if (!mxConverged) failed.push({ item: "delivery:mx", reason: "root-domain MX delivery does not converge to Cloudflare" });
   if (mx.records.length > 0 && !mxConverged) {
     warnings.push(
       `zone MX points elsewhere (${mx.records.join(", ")}); Email Routing will not deliver until MX targets Cloudflare. ` +
@@ -171,18 +184,33 @@ function reconcileDomain(domain: DesiredDomain) {
   // Edge case 2: dedupe aliases, key desired rules by matcher identity, create
   // only the missing ones. Edge case 5: worker action -> no destination address.
   const aliases = [...new Set([...(domain.role_aliases ?? []), ...(domain.personal_aliases ?? [])])];
-  for (const alias of aliases) {
+  for (const alias of rulesKnown && workerScript ? aliases : []) {
     const address = `${alias}@${domain.name}`;
-    const desired = desiredRule(address, workerScript ?? "", domain.name);
-    const existing = observedRules.find((r) => literalMatcherValue(r) === address.toLowerCase());
-    if (!existing) {
+    const desired = desiredRule(address, workerScript ?? "");
+    const existing = observedRules.filter((rule) => routingRuleHasAlias(rule, address));
+    if (existing.length === 0) {
       deltas.push({ item: `rule:${address}`, capability: "email-routing-routing-rules-create-routing-rule", body: desired });
-    } else if (!ruleMatchesDesired(existing, workerScript ?? "")) {
+    } else if (existing.length !== 1 || existing[0]!.matchers.length !== 1 ||
+        !projectedRuleRoutesToWorker(existing[0]!, workerScript ?? "")) {
       // Matcher exists but action drifted (e.g. points at a different worker).
       warnings.push(`rule for ${address} exists but does not route to ${workerScript}; leaving it (manual review)`);
-      already.push(`rule:${address} (drift)`);
+      failed.push({ item: `rule:${address}`, reason: "existing rule is disabled or has a different action; review before replacement" });
     } else {
       already.push(`rule:${address}`);
+    }
+  }
+
+  if (catchAllKnown) {
+    const desiredEnabled = domain.catch_all === true;
+    if (catchAllRead.result.enabled === desiredEnabled &&
+        (!desiredEnabled || ruleMatchesDesired(catchAllRead.result, workerScript ?? ""))) {
+      already.push("catch-all");
+    } else if (!desiredEnabled || workerScript) {
+      deltas.push({
+        item: "catch-all", capability: "email-routing-routing-rules-update-catch-all-rule",
+        body: { name: "maildesk:catch-all", enabled: desiredEnabled, matchers: [{ type: "all" }],
+          actions: desiredEnabled ? [{ type: "worker", value: [workerScript] }] : [{ type: "drop" }] },
+      });
     }
   }
 
@@ -193,6 +221,7 @@ function reconcileDomain(domain: DesiredDomain) {
       pending.push({
         item: d.item,
         reason: `PlanV2 required for capability ${d.capability}; resolve, inspect, and create one exact plan`,
+        request: { capability_id: d.capability, selectors: { zone_id: zoneId }, body: d.body ?? null },
       });
     }
   }
@@ -233,7 +262,7 @@ function resolveZone(domain: DesiredDomain): { zone_id?: string; error?: string 
 }
 
 // A per-alias literal rule routing to the relay_router Worker (edge case 5).
-function desiredRule(address: string, worker: string, domainName: string): unknown {
+function desiredRule(address: string, worker: string): unknown {
   return {
     name: `maildesk:${address}`, // stable identity for reconciliation
     enabled: true,
@@ -243,20 +272,16 @@ function desiredRule(address: string, worker: string, domainName: string): unkno
   };
 }
 
-function literalMatcherValue(rule: EmailRule): string | null {
-  const m = (rule.matchers ?? []).find((x) => x.type === "literal" && x.field === "to");
-  return m?.value ? m.value.toLowerCase() : null;
-}
-
 function ruleMatchesDesired(rule: EmailRule, worker: string): boolean {
   const a = (rule.actions ?? []).find((x) => x.type === "worker");
-  return Boolean(a && Array.isArray(a.value) && a.value.includes(worker));
+  return rule.enabled === true && rule.actions?.length === 1 &&
+    Boolean(a && Array.isArray(a.value) && a.value.length === 1 && a.value[0] === worker);
 }
 
 // Edge case 10: read the zone's MX so we can report delivery convergence and
 // warn on third-party MX — without ever mutating DNS.
-function readMx(zoneId: string): { records: string[] } {
-  const res = cfctlRead("dns-records-for-a-zone-list-dns-records", { zone_id: zoneId }, { type: "MX" });
+function readMx(zoneId: string, domainName: string): { records: string[] } {
+  const res = cfctlRead("dns-records-for-a-zone-list-dns-records", { zone_id: zoneId }, { type: "MX", name: domainName });
   if (!res.ok || !Array.isArray(res.result)) return { records: [] };
   return { records: res.result.map((r: { content?: string }) => (r.content ?? "").trim()).filter(Boolean) };
 }

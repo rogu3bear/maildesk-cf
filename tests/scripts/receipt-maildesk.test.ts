@@ -216,6 +216,82 @@ describe("maildesk receipt workflow", () => {
   });
 });
 
+describe("maildesk receipt collection handoff", () => {
+  test("forwards coverage and module-proof selections to the collector", () => {
+    const { log, env } = collectorShim();
+    const result = spawnSync(
+      process.execPath,
+      [
+        "run",
+        "scripts/receipt-maildesk.ts",
+        "--",
+        "--scope-manifest",
+        "var/proof/maildesk-read-scope.local.json",
+        "--acceptance-profile",
+        "dark_acceptance_v1",
+        "--verify-worker-modules",
+        "--wrangler",
+        "/bin/false",
+        "--d1-database",
+        "legacy-db",
+        "--no-resend",
+        "--json",
+      ],
+      { cwd: root, encoding: "utf8", env },
+    );
+
+    expect(result.status).toBe(3);
+    const argv = readFileSync(log, "utf8").trim().split("\n");
+    expect(argv.slice(0, 3)).toEqual(["run", "scripts/collect-live-evidence.ts", "--"]);
+    expect(argv).toContain("--verify-worker-modules");
+    expect(argv).toContain("--no-resend");
+    expect(argv[argv.indexOf("--scope-manifest") + 1]).toBe("var/proof/maildesk-read-scope.local.json");
+    expect(argv[argv.indexOf("--acceptance-profile") + 1]).toBe("dark_acceptance_v1");
+    expect(argv).not.toContain("--wrangler");
+    expect(argv).not.toContain("--d1-database");
+  });
+
+  test("forwards a valueless coverage selection so the collector fails closed", () => {
+    const { log, env } = collectorShim();
+    const result = spawnSync(
+      process.execPath,
+      ["run", "scripts/receipt-maildesk.ts", "--", "--scope-manifest"],
+      { cwd: root, encoding: "utf8", env },
+    );
+
+    expect(result.status).toBe(3);
+    expect(readFileSync(log, "utf8").trim().split("\n").at(-1)).toBe("--scope-manifest");
+  });
+});
+
+// Replaces only the collector subprocess so the test observes the exact handoff
+// without provider reads; verification and planning keep the real runtime.
+function collectorShim(): { log: string; env: Record<string, string | undefined> } {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-receipt-collector-"));
+  const log = join(dir, "collector-argv.log");
+  const shim = join(dir, "bun");
+  writeFileSync(
+    shim,
+    `#!/bin/sh
+if [ "$2" = "scripts/collect-live-evidence.ts" ]; then
+  printf '%s\\n' "$@" > "$MAILDESK_TEST_COLLECT_LOG"
+  exit 3
+fi
+exec "$MAILDESK_TEST_REAL_BUN" "$@"
+`,
+    { mode: 0o755 },
+  );
+  return {
+    log,
+    env: {
+      ...process.env,
+      PATH: `${dir}:${process.env.PATH ?? ""}`,
+      MAILDESK_TEST_COLLECT_LOG: log,
+      MAILDESK_TEST_REAL_BUN: process.execPath,
+    },
+  };
+}
+
 function planManifestItem(target: string, operationId: string) {
   return {
     schema_version: 2,

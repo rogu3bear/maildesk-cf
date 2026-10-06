@@ -1,6 +1,15 @@
 # Runtime Contract
 
 This document defines the first complete runtime shape for `maildesk-cf`.
+
+The optional scheduled `mail-canary` adapter reads the active immutable policy
+and records the last independent proof per path. Its notification reports
+configuration coverage and receipt coverage. It owns no routing policy and no
+inbound or reply probe path. `configuration_current` means that read passed.
+`receipts_current` means every non-sink path also has a fresh independent inbox
+and reply proof. A separate `mail-heartbeat` Worker, with no Email binding,
+pings an external monitor only while that ledger is fresh and the notification
+attempt is idle. See [route canary](../operations/mail-canary.md).
 Everything here should remain template-safe: use reserved domains, no account
 IDs, no operator names, no live receipts, and no secret values.
 

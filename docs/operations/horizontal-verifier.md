@@ -435,8 +435,9 @@ route wiring remains `not_checked` until a provider-native adapter supplies
 typed configuration evidence; inbox or delivery receipts do not substitute for
 that control-plane relationship.
 
-`/readyz` is read when `MAILDESK_READYZ_URL` is set, and D1 schema/audit counts
-remain available through the configured Wrangler read lane. Sender-domain
+The legacy API's `/readyz` is read when `MAILDESK_READYZ_URL` is set; the relay
+trio does not expose that endpoint. D1 schema/audit counts remain available
+through the governed cfctl private D1 evidence capability. Sender-domain
 readback follows desired-state `sender.mode`: `cloudflare_email_service` uses
 the governed sending-subdomain capability, `resend` uses the Resend CLI when
 available, and `disabled` skips outbound sender-provider readback. The collector
