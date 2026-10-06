@@ -7,7 +7,8 @@ workers_dev = false
 command = "bun run check:mail-worker-bundles"
 
 [triggers]
-crons = ["0 * * * *"]
+# Offset from the canary at :00 so its in-flight notification does not withhold the ping.
+crons = ["30 * * * *"]
 
 [vars]
 MAILDESK_HEARTBEAT_MODE = "disabled"

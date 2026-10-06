@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { runCanary, type CanaryEnv } from "../../workers/mail-canary/src/index";
+import { recordCoverage, runCanary, type CanaryEnv } from "../../workers/mail-canary/src/index";
 import { reportRoutes, selectProbeRotation, type CanarySnapshot } from "../../workers/mail-canary/src/report";
 import { assertPolicyRoutes, type RouteInventoryRow } from "../../workers/mail-canary/src/policy-routes";
 import type { RouterPolicy } from "../../workers/shared/router";
@@ -76,6 +76,64 @@ test("scheduled notification uses real schema, deduplicates, reminds daily and r
     await runCanary(f.env, now + 24 * 3_600_000);
     expect(f.sent).toHaveLength(2);
     expect(f.db.query("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'canary_notification_provider_accepted'").get()).toEqual({ n: 2 });
+  } finally { f.db.close(); }
+});
+
+test("ledger rewrites only changed proofs and stamps coverage in the same transaction", async () => {
+  const f = await fixture();
+  try {
+    await runCanary(f.env, now);
+    const first = f.db.query("SELECT plane, verified_at_ms, updated_at_ms FROM route_proof_ledger ORDER BY plane").all();
+    expect(f.db.query("SELECT last_coverage_at_ms FROM mail_canary_state").get()).toEqual({ last_coverage_at_ms: now });
+    const later = now + 3_600_000;
+    f.db.run("UPDATE route_health SET last_reply_verified_at = '2026-10-05 12:30:00'");
+    await runCanary(f.env, later);
+    const second = f.db.query("SELECT plane, verified_at_ms, updated_at_ms FROM route_proof_ledger ORDER BY plane").all() as Array<{ plane: string; updated_at_ms: number }>;
+    expect(second.filter((row) => row.updated_at_ms === later).map((row) => row.plane)).toEqual(["reply"]);
+    expect(second.find((row) => row.plane === "configuration")).toEqual(first.find((row: any) => row.plane === "configuration"));
+    expect(f.db.query("SELECT last_coverage_at_ms FROM mail_canary_state").get()).toEqual({ last_coverage_at_ms: later });
+  } finally { f.db.close(); }
+});
+
+test("a large inventory saves its ledger in one bounded batch", async () => {
+  const f = await fixture();
+  const sizes: number[] = [];
+  const batch = f.env.DB.batch.bind(f.env.DB);
+  f.env.DB.batch = (async (statements: D1PreparedStatement[]) => { sizes.push(statements.length); return batch(statements); }) as typeof f.env.DB.batch;
+  const routes = Array.from({ length: 2500 }, (_, index) => ({
+    ...goodSnapshot().routes[0]!, route_id: `route:example.com:r${index}`,
+  })) as RouteInventoryRow[];
+  try {
+    for (const route of routes) {
+      f.db.run("INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, policy_sha256) SELECT ?, domain_id, ?, kind, default_reply_identity_id, policy_sha256 FROM alias_routes WHERE id = 'route:example.com:postmaster'", [route.route_id, route.route_id]);
+    }
+    const sha = (f.db.query("SELECT active_policy_sha256 AS s FROM runtime_state").get() as { s: string }).s;
+    await recordCoverage(f.env, sha, routes, now, 3);
+    // Delete + rotation + ceil(10000 / 2000) ledger chunks + coverage stamp.
+    expect(sizes).toEqual([8]);
+    expect(f.db.query("SELECT COUNT(*) AS n FROM route_proof_ledger").get()).toEqual({ n: 10_000 });
+  } finally { f.db.close(); }
+});
+
+test("a failed ledger write keeps inventory counts and leaves the heartbeat stamp unmoved", async () => {
+  const f = await fixture();
+  const batch = f.env.DB.batch.bind(f.env.DB);
+  let calls = 0;
+  f.env.DB.batch = (async (statements: D1PreparedStatement[]) => {
+    calls++;
+    if (calls === 1) {
+      // Run part of the transaction, then fail it as D1 would roll back.
+      return batch([...statements.slice(0, -1), f.env.DB.prepare("INSERT INTO no_such_table VALUES (1)")]);
+    }
+    return batch(statements);
+  }) as typeof f.env.DB.batch;
+  try {
+    await expect(runCanary(f.env, now)).resolves.toMatchObject({
+      status: "unverified", observed_routes: 1, issues: { proof_ledger_unavailable: 1 },
+    });
+    expect(f.db.query("SELECT COUNT(*) AS n FROM route_proof_ledger").get()).toEqual({ n: 0 });
+    expect(f.db.query("SELECT last_coverage_at_ms FROM mail_canary_state").get()).toEqual({ last_coverage_at_ms: 0 });
+    expect(f.sent[0]!.text).toContain("proof_ledger_unavailable: 1");
   } finally { f.db.close(); }
 });
 

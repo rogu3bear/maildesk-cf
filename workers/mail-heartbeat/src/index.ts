@@ -19,26 +19,18 @@ export async function runHeartbeat(
   if (!Number.isSafeInteger(hours) || hours < 1 || hours > 24) throw new Error("invalid heartbeat age");
   const ready = await configurationReady(env, now, hours * HOUR);
   if (!ready) throw new Error("heartbeat withheld; configuration ledger is stale or notification attempt is incomplete");
-  const response = await fetchImpl(url, {
-    method: "POST",
-    redirect: "error",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source: "maildesk-heartbeat", status: "ready" }),
-  });
+  const response = await fetchImpl(url, { method: "POST", redirect: "error" });
   if (!response.ok) throw new Error("heartbeat endpoint rejected the ping");
   return "sent";
 }
 
 async function configurationReady(env: HeartbeatEnv, now: number, maxAgeMs: number): Promise<boolean> {
-  const attempt = await env.DB.prepare(
-    "SELECT attempt_state, last_notified_at_ms FROM mail_canary_state WHERE singleton = 1",
-  ).first<{ attempt_state: string; last_notified_at_ms: number }>();
-  if (!attempt || attempt.attempt_state !== "idle" || !(attempt.last_notified_at_ms > 0)) return false;
-  const ledger = await env.DB.prepare(
-    "SELECT COUNT(*) AS n, MAX(updated_at_ms) AS updated_at_ms FROM route_proof_ledger WHERE plane = 'configuration'",
-  ).first<{ n: number; updated_at_ms: number | null }>();
-  return !!ledger && ledger.n > 0 && ledger.updated_at_ms !== null &&
-    ledger.updated_at_ms <= now && now - ledger.updated_at_ms <= maxAgeMs;
+  // The canary stamps last_coverage_at_ms in the same transaction as its whole ledger.
+  const state = await env.DB.prepare(
+    "SELECT attempt_state, last_notified_at_ms, last_coverage_at_ms FROM mail_canary_state WHERE singleton = 1",
+  ).first<{ attempt_state: string; last_notified_at_ms: number; last_coverage_at_ms: number }>();
+  return !!state && state.attempt_state === "idle" && state.last_notified_at_ms > 0 &&
+    state.last_coverage_at_ms > 0 && state.last_coverage_at_ms <= now && now - state.last_coverage_at_ms <= maxAgeMs;
 }
 
 function heartbeatUrl(value: string | undefined): string {

@@ -46,6 +46,7 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
   ).bind(from).first<{ address: string }>();
   if (sender?.address !== from) throw new Error("canary sender must be an active public role identity");
   let report: CanaryReport;
+  let coverage: { sha256: string; routes: RouteInventoryRow[] } | null = null;
   try {
     const active = await loadActivePolicy({ ...env, MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay" });
     if (!active) throw new Error("active policy unavailable");
@@ -64,7 +65,7 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
       inbound: env.MAILDESK_CANARY_INBOUND_MODE ?? "disabled",
       reply: env.MAILDESK_CANARY_REPLY_MODE ?? "disabled",
     }, batch);
-    await recordCoverage(env, active.sha256, routes.results, now, batch);
+    coverage = { sha256: active.sha256, routes: routes.results };
   } catch {
     // Do not leak policy, addresses, provider payloads or exception text.
     report = {
@@ -75,6 +76,18 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
       issues: { policy_or_route_inventory_unavailable: 1 },
       provider_inventory_checked: false, live_probe_sent: false,
     };
+  }
+  if (coverage) {
+    try {
+      await recordCoverage(env, coverage.sha256, coverage.routes, now, batch);
+    } catch {
+      // The inventory was read; only its ledger was not saved. Keep the counts.
+      report = {
+        ...report,
+        status: report.status === "failed" ? "failed" : "unverified",
+        issues: { ...report.issues, proof_ledger_unavailable: 1 },
+      };
+    }
   }
   await notify(env, from, to, report, now);
   return report;
@@ -115,35 +128,48 @@ async function notify(env: CanaryEnv, from: string, to: string, report: CanaryRe
   }
 }
 
-async function recordCoverage(env: CanaryEnv, policySha256: string, routes: RouteInventoryRow[], now: number, batch: number): Promise<void> {
-  const rotation = selectProbeRotation(routes, now, batch);
+// Ledger rows per JSON parameter. Keeps each bound value well under D1's row size limit.
+const LEDGER_CHUNK = 2000;
+
+// Each ledger statement binds one JSON array, so a run issues a handful of D1
+// queries regardless of inventory size. Unchanged rows are not rewritten, and a
+// configuration row keeps the first time it was read under its policy revision.
+const LEDGER_UPSERT = `INSERT INTO route_proof_ledger (route_id, plane, policy_sha256, verified_at_ms, updated_at_ms)
+  SELECT value ->> '$[0]', value ->> '$[1]', ?1, value ->> '$[2]', ?2 FROM json_each(?3) WHERE true
+  ON CONFLICT(route_id, plane) DO UPDATE SET
+    policy_sha256 = excluded.policy_sha256,
+    verified_at_ms = excluded.verified_at_ms,
+    updated_at_ms = excluded.updated_at_ms
+  WHERE route_proof_ledger.policy_sha256 IS NOT excluded.policy_sha256
+    OR (route_proof_ledger.plane <> 'configuration' AND route_proof_ledger.verified_at_ms IS NOT excluded.verified_at_ms)`;
+
+export async function recordCoverage(env: CanaryEnv, policySha256: string, routes: RouteInventoryRow[], now: number, batch: number): Promise<void> {
+  const rotation = selectProbeRotation(routes, now, batch).map((probe) => [probe.route_id, probe.reason]);
+  const rows: Array<[string, string, number | null]> = [];
+  for (const route of routes) {
+    rows.push(
+      [route.route_id, "configuration", now],
+      [route.route_id, "inbox", proofMillis(route.last_inbox_verified_at, now)],
+      [route.route_id, "reply", proofMillis(route.last_reply_verified_at, now)],
+      [route.route_id, "edge", proofMillis(route.edge_verified_at, now)],
+    );
+  }
   const statements = [
     env.DB.prepare("DELETE FROM mail_canary_probe_rotation"),
-    ...rotation.map((probe) => env.DB.prepare(
-      "INSERT INTO mail_canary_probe_rotation (route_id, selected_at_ms, reason) VALUES (?1, ?2, ?3)",
-    ).bind(probe.route_id, now, probe.reason)),
+    env.DB.prepare(
+      "INSERT INTO mail_canary_probe_rotation (route_id, selected_at_ms, reason) SELECT value ->> '$[0]', ?1, value ->> '$[1]' FROM json_each(?2)",
+    ).bind(now, JSON.stringify(rotation)),
   ];
-  for (const route of routes) {
-    const planes: Array<["configuration" | "inbox" | "reply" | "edge", number | null]> = [
-      ["configuration", now],
-      ["inbox", proofMillis(route.last_inbox_verified_at, now)],
-      ["reply", proofMillis(route.last_reply_verified_at, now)],
-      ["edge", proofMillis(route.edge_verified_at, now)],
-    ];
-    for (const [plane, verifiedAt] of planes) {
-      statements.push(env.DB.prepare(
-        `INSERT INTO route_proof_ledger (route_id, plane, policy_sha256, verified_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(route_id, plane) DO UPDATE SET
-           policy_sha256 = excluded.policy_sha256,
-           verified_at_ms = excluded.verified_at_ms,
-           updated_at_ms = excluded.updated_at_ms`,
-      ).bind(route.route_id, plane, policySha256, verifiedAt, now));
-    }
+  for (let index = 0; index < rows.length; index += LEDGER_CHUNK) {
+    statements.push(env.DB.prepare(LEDGER_UPSERT).bind(policySha256, now, JSON.stringify(rows.slice(index, index + LEDGER_CHUNK))));
   }
-  for (let index = 0; index < statements.length; index += 32) {
-    const saved = await env.DB.batch(statements.slice(index, index + 32));
-    if (saved.some((result) => !result.success)) throw new Error("proof ledger persistence failed");
+  statements.push(env.DB.prepare(
+    "UPDATE mail_canary_state SET last_coverage_at_ms = ?1 WHERE singleton = 1",
+  ).bind(now));
+  // One batch is one transaction: the heartbeat stamp moves only with the whole ledger.
+  const saved = await env.DB.batch(statements);
+  if (saved.some((result) => !result.success) || saved.at(-1)?.meta.changes !== 1) {
+    throw new Error("proof ledger persistence failed");
   }
 }
 

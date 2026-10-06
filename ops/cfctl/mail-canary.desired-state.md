@@ -12,11 +12,12 @@ public role sender, recipient, processing declarations and hourly cron.
 
 Required effects and readback:
 
-- Apply the new canary-state table through the instance's governed migration
-  operation; read back its schema and singleton row.
+- Apply the canary-state, proof-ledger and coverage-stamp migrations in order
+  through the instance's governed migration operation; read back their schema
+  and the singleton row.
 - Deploy the closed Worker artifact disabled with D1, POLICY_STORE and EMAIL;
   read back the active deployment/version identity and exact bindings.
-- Configure `0 * * * *` through the governed trigger capability; read back the
+- Configure `0 * * * *` for the canary through the governed trigger capability; read back the
   exact trigger set. Preserve unrelated schedules and resources.
 - Enable only this canary with the explicit notification target; read back the
   same deployment's vars and trigger before claiming it is running.
@@ -25,8 +26,8 @@ Required effects and readback:
   reports configuration coverage and independent proof coverage.
 - Deploy `wrangler.mail-heartbeat.toml` separately, disabled, with the relay D1
   binding and without an Email binding. Read back that absence. Enable it only
-  after one accepted canary notification and a fresh configuration ledger row,
-  then read back one external ping. A missed ping is the monitor's alert.
+  after one accepted canary notification and a fresh coverage stamp, configure
+  its `30 * * * *` trigger, then read back one external ping. A missed ping is the monitor's alert.
 
 Every write retains its own hash-bound call/show/approval/run/status/readback
 lifecycle. A catalog gap requires a source-owner cfctl extension or its exact

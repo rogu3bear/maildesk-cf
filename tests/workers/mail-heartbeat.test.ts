@@ -7,29 +7,28 @@ test("the heartbeat Worker config binds D1 and has no Email binding", () => {
   const config = Bun.TOML.parse(readFileSync(resolve(import.meta.dir, "../../wrangler.mail-heartbeat.toml"), "utf8")) as Record<string, unknown>;
   expect(config.send_email).toBeUndefined();
   expect(config.d1_databases).toHaveLength(1);
-  expect(config.triggers).toEqual({ crons: ["0 * * * *"] });
+  expect(config.triggers).toEqual({ crons: ["30 * * * *"] });
 });
 import { runHeartbeat, type HeartbeatEnv } from "../../workers/mail-heartbeat/src/index";
 
 const now = Date.parse("2026-10-05T12:00:00Z");
 
-test("a fresh idle canary ledger pings an external https endpoint and does not send mail", async () => {
+test("a fresh idle canary coverage stamp pings an external https endpoint and does not send mail", async () => {
   const db = database();
-  const calls: string[] = [];
+  const calls: Array<{ url: string; body: unknown }> = [];
   try {
-    db.run("UPDATE mail_canary_state SET last_notified_at_ms = ?, attempt_state = 'idle' WHERE singleton = 1", [now - 60_000]);
-    db.run("INSERT INTO route_proof_ledger (route_id, plane, policy_sha256, verified_at_ms, updated_at_ms) VALUES ('route:example.com:postmaster', 'configuration', ?, ?, ?)", ["a".repeat(64), now, now]);
+    db.run("UPDATE mail_canary_state SET last_notified_at_ms = ?, last_coverage_at_ms = ?, attempt_state = 'idle' WHERE singleton = 1", [now - 60_000, now - 60_000]);
     const env = envFor(db);
-    expect(await runHeartbeat(env, async (input) => {
-      calls.push(String(input));
+    expect(await runHeartbeat(env, async (input, init) => {
+      calls.push({ url: String(input), body: init?.body });
       return new Response(null, { status: 202 });
     }, now)).toBe("sent");
-    expect(calls).toEqual(["https://heartbeat.example.com/maildesk"]);
+    expect(calls).toEqual([{ url: "https://heartbeat.example.com/maildesk", body: undefined }]);
     expect(JSON.stringify(env)).not.toContain("EMAIL");
   } finally { db.close(); }
 });
 
-test("dead ledger, incomplete notification, disabled mode, and non-https targets do not ping", async () => {
+test("missing or stale coverage, incomplete notification, disabled mode, and non-https targets do not ping", async () => {
   const db = database();
   let calls = 0;
   const fetchImpl = async () => {
@@ -39,11 +38,13 @@ test("dead ledger, incomplete notification, disabled mode, and non-https targets
   try {
     const env = envFor(db);
     await expect(runHeartbeat(env, fetchImpl, now)).rejects.toThrow("withheld");
-    db.run("UPDATE mail_canary_state SET last_notified_at_ms = ?, attempt_state = 'uncertain' WHERE singleton = 1", [now]);
+    db.run("UPDATE mail_canary_state SET last_notified_at_ms = ?, attempt_state = 'idle' WHERE singleton = 1", [now]);
+    // Per-route ledger rows alone are not a completed run.
     db.run("INSERT INTO route_proof_ledger (route_id, plane, policy_sha256, verified_at_ms, updated_at_ms) VALUES ('route:example.com:postmaster', 'configuration', ?, ?, ?)", ["a".repeat(64), now, now]);
     await expect(runHeartbeat(env, fetchImpl, now)).rejects.toThrow("withheld");
-    db.run("UPDATE mail_canary_state SET attempt_state = 'idle'");
-    db.run("UPDATE route_proof_ledger SET updated_at_ms = ?", [now - 3 * 3_600_000]);
+    db.run("UPDATE mail_canary_state SET last_coverage_at_ms = ?, attempt_state = 'uncertain'", [now]);
+    await expect(runHeartbeat(env, fetchImpl, now)).rejects.toThrow("withheld");
+    db.run("UPDATE mail_canary_state SET attempt_state = 'idle', last_coverage_at_ms = ?", [now - 3 * 3_600_000]);
     await expect(runHeartbeat(env, fetchImpl, now)).rejects.toThrow("withheld");
     expect(await runHeartbeat({ ...env, MAILDESK_HEARTBEAT_MODE: "disabled" }, fetchImpl, now)).toBeNull();
     await expect(runHeartbeat({ ...env, MAILDESK_HEARTBEAT_URL: "http://heartbeat.example.com/maildesk" }, fetchImpl, now)).rejects.toThrow("explicit https");

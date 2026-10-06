@@ -6,10 +6,14 @@ active-policy loader and compares D1 route membership and routing fields with
 decisions from the Rust router. That configuration read is the full-inventory
 check. It does not require a fresh mailbox receipt on every path.
 
-Each path keeps the last independent proof in `route_proof_ledger`: the
-configuration read from this run, plus the newest recorded inbox, reply, and
-edge receipt already stored for that path. The canary copies those receipts; it
-does not invent them. Each run also selects a bounded rotation, default 3 and
+Each path keeps the last independent proof in `route_proof_ledger`: when its
+configuration was first read under the active policy revision, plus the newest
+recorded inbox, reply, and edge receipt already stored for that path. The
+canary copies those receipts; it does not invent them. Unchanged rows are not
+rewritten. Each run saves the ledger, the probe rotation, and one
+`mail_canary_state.last_coverage_at_ms` stamp in a single D1 batch, so a
+partial write cannot look like a completed run. A failed ledger write keeps the
+inventory counts and reports `unverified` with `proof_ledger_unavailable`. Each run also selects a bounded rotation, default 3 and
 at most 8, of the non-sink paths whose inbox or reply proof is missing or
 oldest, and stores that selection in `mail_canary_probe_rotation`. The protected
 probe workflow is what sends those probes. This Worker does not.
@@ -41,9 +45,10 @@ instance's protected acceptance workflow.
 
 `mail-heartbeat` is a separate scheduled Worker. It binds the same relay D1
 database and has no Email binding, no route, and no policy bucket. Once an hour,
-when enabled, it POSTs a body-free ready ping to the configured HTTPS URL only
+at half past so it does not overlap the canary's run at the top of the hour,
+when enabled, it POSTs an empty-bodied ping to the configured HTTPS URL only
 if the notification attempt is idle, a notification has been accepted before,
-and a configuration ledger row was written inside the heartbeat age (default 2
+and the canary's coverage stamp was written inside the heartbeat age (default 2
 hours). A dead database, a stale configuration read, or a notification left
 `sending` or `uncertain` produces no ping. The operator's external monitor is
 what alerts on a missed ping. This Worker cannot email, so a dead sender cannot
@@ -60,8 +65,9 @@ Cloudflare Email Service. It remains disabled in the public example.
    Worker bundle builder includes the canary and its dependency manifest.
 2. Import the accepted reusable mechanism into the private instance under its
    existing provider-import contract. Preserve its migration numbering and
-   private overlays; choose its next unused migration number for
-   `0009_mail_canary.sql` if that number is already occupied there.
+   private overlays; apply `0009_mail_canary.sql`,
+   `0010_route_proof_ledger.sql` and `0011_mail_canary_coverage.sql` in order,
+   renumbering each to the next unused number if it is already occupied there.
 3. Select a verified public **role** sender from an active, non-sink route and
    an explicit notification recipient. The canary refuses undeclared senders.
 4. Bind production D1/R2 resource names and IDs. Set the proof age (default
@@ -69,7 +75,7 @@ Cloudflare Email Service. It remains disabled in the public example.
    and set the two canary processing declarations to match the actual deployed
    router switches. These declarations are configuration inputs, not live
    switch readback. Keep the heartbeat disabled until the canary has completed
-   one accepted notification and a configuration ledger write.
+   one accepted notification and a coverage stamp.
 5. Pass the instance's production preflight and resolve exact deployment,
    migration, Email binding and cron capabilities through cfctl. Use one
    reviewed PlanV2 lifecycle per effect through the registered release owner.
