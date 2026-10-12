@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# --- global git guards chain (fail closed) ---
+# Run the global pre-push guard first; if it fails, exit with its code.
+# stdin (ref updates) is captured once, fed to the guard, then re-fed below.
+# GIT_GUARDS_CHAINED stops recursion: the global hook may delegate back into
+# this pinned repo hook, and that nested run must not chain again.
+GIT_GUARDS_PUSH_STDIN="$(cat)"
+if [ -z "${GIT_GUARDS_CHAINED:-}" ] && [ -f "$HOME/.config/git/hooks/pre-push" ]; then
+  if [ -n "$GIT_GUARDS_PUSH_STDIN" ]; then
+    printf '%s\n' "$GIT_GUARDS_PUSH_STDIN" | GIT_GUARDS_CHAINED=1 "$HOME/.config/git/hooks/pre-push" "$@" || exit $?
+  else
+    GIT_GUARDS_CHAINED=1 "$HOME/.config/git/hooks/pre-push" "$@" </dev/null || exit $?
+  fi
+fi
+if [ -n "$GIT_GUARDS_PUSH_STDIN" ]; then
+  exec < <(printf '%s\n' "$GIT_GUARDS_PUSH_STDIN")
+else
+  exec </dev/null
+fi
+unset GIT_GUARDS_PUSH_STDIN
+# --- end global git guards chain ---
 # Local CI gate: run the full check suite before every push.
 # Activate once per clone:  git config core.hooksPath .githooks
 # Bypass a single push with: git push --no-verify
