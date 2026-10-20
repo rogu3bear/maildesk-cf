@@ -2,10 +2,29 @@ import { expect, test } from "bun:test";
 import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPluginCaptureKey, openPluginCapture, assemblePluginCaptureChunks } from "../../scripts/plugin-private-capture";
+import { createPluginCaptureKey, openPluginCapture, assemblePluginCaptureChunks, buildPluginCaptureCodec } from "../../scripts/plugin-private-capture";
 import { PRIVATE_CAPTURE_MAX_BYTES, sealPluginCapture, sealPluginCaptureChunk } from "../../scripts/plugin-private-capture-codec";
 
 const request = `sha256:${"a".repeat(64)}`;
+test("actual browser bundle exposes the codec outside its IIFE without host requires", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "maildesk-codec-bundle-")));
+  try {
+    const key = createPluginCaptureKey(join(root, "key"));
+    const bundle = await buildPluginCaptureCodec();
+    expect(bundle.code).not.toContain("require(");
+    const codec = new Function(`${bundle.code}\nreturn MaildeskPrivateCapture;`)() as {
+      sealPluginCaptureChunk: typeof sealPluginCaptureChunk;
+    };
+    expect(typeof codec.sealPluginCaptureChunk).toBe("function");
+    const part = await codec.sealPluginCaptureChunk({ text: "λ\u0000\n".repeat(6000) }, 0, key.public_key_spki_base64, request);
+    expect(part.count).toBe(15);
+    expect(JSON.stringify(part).length).toBeLessThan(12000);
+    const output = join(key.directory, "chunk.json");
+    openPluginCapture(part.encrypted_capture, key.private_key_path, request, output);
+    expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({ index: 0, count: 15, request_sha256: request });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("plugin encryption returns only ciphertext; host verifies request, key, bytes and exclusive custody", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "maildesk-private-capture-")));
   try {

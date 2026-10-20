@@ -1,9 +1,22 @@
 import { constants, openSync, closeSync, fstatSync, lstatSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, privateDecrypt, constants as cryptoConstants, createDecipheriv } from "node:crypto";
 import { dirname, resolve } from "node:path";
+import { build } from "esbuild";
 import { captureBase64Decode, PRIVATE_CAPTURE_MAX_BYTES, PRIVATE_CAPTURE_CHUNK_BYTES, type SealedPluginCapture } from "./plugin-private-capture-codec";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** Build the actual portable return codec with an explicit outer binding.
+ * A missing global name or unbundled dependency would fail only after a read.
+ * Callers must qualify their complete generated request program separately.
+ */
+export async function buildPluginCaptureCodec() {
+  const result = await build({ entryPoints: [resolve(import.meta.dir, "plugin-private-capture-codec.ts")],
+    bundle: true, platform: "browser", format: "iife", globalName: "MaildeskPrivateCapture", write: false });
+  if (result.outputFiles.length !== 1) throw new Error("private_capture:codec_build_shape");
+  const code = result.outputFiles[0]!.text;
+  return { code, sha256: sha(Buffer.from(code)) };
+}
 
 /** New private directory only. Never replaces existing keys, captures or paths. */
 export function createPluginCaptureKey(directory: string) {
