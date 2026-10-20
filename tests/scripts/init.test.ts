@@ -101,42 +101,40 @@ test.each(["acme-maildesk", "a", "a".repeat(48)])("template initializer preserve
 });
 
 
-test("initialization rejects invalid names, missing inputs, symlinks and bound configs before writes", () => {
-  for (const failure of ["long-name", "extra-argument", "missing-input", "missing-contract", "symlink-input", "bound-config", "bound-preview", "bound-route", "bound-environment"]) {
-    const fixture = mkdtempSync(join(tmpdir(), "maildesk-init-reject-"));
-    try {
-      mkdirSync(resolve(fixture, "scripts"), { recursive: true });
-      copyFileSync(resolve(root, "scripts/init.sh"), resolve(fixture, "scripts/init.sh"));
-      for (const target of [...requiredTargets, ...stableContracts]) {
-        mkdirSync(dirname(resolve(fixture, target)), { recursive: true });
-        copyFileSync(resolve(root, target), resolve(fixture, target));
-      }
-      const firstBefore = readFileSync(resolve(fixture, "Cargo.toml"), "utf8");
-      if (failure === "missing-contract") rmSync(resolve(fixture, stableContracts[0]!));
-      if (failure === "missing-input") rmSync(resolve(fixture, "apps/maildesk-ui/README.md"));
-      if (failure === "symlink-input") {
-        rmSync(resolve(fixture, "apps/maildesk-ui/README.md"));
-        symlinkSync(resolve(fixture, "README.md"), resolve(fixture, "apps/maildesk-ui/README.md"));
-      }
-      if (failure === "bound-config") {
-        const config = resolve(fixture, "wrangler.toml");
-        writeFileSync(config, readFileSync(config, "utf8").replace("00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"));
-      }
-      if (failure === "bound-preview") {
-        const config = resolve(fixture, "wrangler.d1-preview.toml");
-        writeFileSync(config, readFileSync(config, "utf8").replace('preview_database_id = "00000000-0000-0000-0000-000000000000"', 'preview_database_id = "11111111-1111-1111-1111-111111111111"'));
-      }
-      if (failure === "bound-route" || failure === "bound-environment") {
-        const config = resolve(fixture, "wrangler.toml");
-        const binding = failure === "bound-route" ? 'routes = [{pattern="maildesk-cf.example.com/*", zone_name="example.com"}]\n' : '[env.production]\nname = "maildesk-cf-live"\n';
-        writeFileSync(config, failure === "bound-route" ? binding + readFileSync(config, "utf8") : readFileSync(config, "utf8") + binding);
-      }
-      const name = failure === "long-name" ? "a".repeat(49) : "acme-maildesk";
-      const args = ["scripts/init.sh", name, ...(failure === "extra-argument" ? ["unexpected"] : [])];
-      const result = spawnSync("bash", args, { cwd: fixture, encoding: "utf8" });
-      expect(result.status).not.toBe(0);
-      expect(result.stdout).not.toContain("Initialized");
-      expect(readFileSync(resolve(fixture, "Cargo.toml"), "utf8")).toBe(firstBefore);
-    } finally { rmSync(fixture, { recursive: true, force: true }); }
-  }
+test.each(["long-name", "extra-argument", "missing-input", "missing-contract", "symlink-input", "bound-config", "bound-preview", "bound-route", "bound-environment"])("initialization rejects %s before writes", (failure) => {
+  const fixture = mkdtempSync(join(tmpdir(), "maildesk-init-reject-"));
+  try {
+    mkdirSync(resolve(fixture, "scripts"), { recursive: true });
+    copyFileSync(resolve(root, "scripts/init.sh"), resolve(fixture, "scripts/init.sh"));
+    for (const target of [...requiredTargets, ...stableContracts]) {
+      mkdirSync(dirname(resolve(fixture, target)), { recursive: true });
+      copyFileSync(resolve(root, target), resolve(fixture, target));
+    }
+    const firstBefore = readFileSync(resolve(fixture, "Cargo.toml"), "utf8");
+    if (failure === "missing-contract") rmSync(resolve(fixture, stableContracts[0]!));
+    if (failure === "missing-input") rmSync(resolve(fixture, "apps/maildesk-ui/README.md"));
+    if (failure === "symlink-input") {
+      rmSync(resolve(fixture, "apps/maildesk-ui/README.md"));
+      symlinkSync(resolve(fixture, "README.md"), resolve(fixture, "apps/maildesk-ui/README.md"));
+    }
+    if (failure === "bound-config") {
+      const config = resolve(fixture, "wrangler.toml");
+      writeFileSync(config, readFileSync(config, "utf8").replace("00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"));
+    }
+    if (failure === "bound-preview") {
+      const config = resolve(fixture, "wrangler.d1-preview.toml");
+      writeFileSync(config, readFileSync(config, "utf8").replace('preview_database_id = "00000000-0000-0000-0000-000000000000"', 'preview_database_id = "11111111-1111-1111-1111-111111111111"'));
+    }
+    if (failure === "bound-route" || failure === "bound-environment") {
+      const config = resolve(fixture, "wrangler.toml");
+      const binding = failure === "bound-route" ? 'routes = [{pattern="maildesk-cf.example.com/*", zone_name="example.com"}]\n' : '[env.production]\nname = "maildesk-cf-live"\n';
+      writeFileSync(config, failure === "bound-route" ? binding + readFileSync(config, "utf8") : readFileSync(config, "utf8") + binding);
+    }
+    const name = failure === "long-name" ? "a".repeat(49) : "acme-maildesk";
+    const args = ["scripts/init.sh", name, ...(failure === "extra-argument" ? ["unexpected"] : [])];
+    const result = spawnSync("bash", args, { cwd: fixture, encoding: "utf8" });
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("Initialized");
+    expect(readFileSync(resolve(fixture, "Cargo.toml"), "utf8")).toBe(firstBefore);
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
 });
