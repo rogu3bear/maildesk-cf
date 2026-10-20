@@ -1,3 +1,4 @@
+import { inventoryFixture } from "../helpers/policy-inventory";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 
@@ -6,6 +7,7 @@ import type { RouterPolicy } from "../../workers/shared/router";
 import {
   buildOperatorDelivery,
   encodedMessageUpperBound,
+  generateRelayToken,
   outboundReplyPayload,
   parseRelayEmail,
   relayAddress,
@@ -15,6 +17,14 @@ import {
 
 const policy = {
   default_reply_mode: "role_first",
+  identity_profiles: {
+    "security@example.com": {
+      display_name: "Example Security",
+      signature_profile_ref: "signature:security:v1",
+      signature_text: "Example Security\nexample.com",
+      sender_adapter: "cloudflare_email_service",
+    },
+  },
   domains: {
     "example.com": {
       role_aliases: {
@@ -42,6 +52,10 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
 
   expect(message.rejected).toBeUndefined();
   expect(deliveries).toHaveLength(2);
+  expect(deliveries[0]?.text).toContain(
+    "Ordinary replies are not activated. A canary reply requires its own controller admission.",
+  );
+  expect(deliveries[0]?.html).toContain("Example Security");
   expect(deliveries.map((delivery) => delivery.to)).toEqual([
     "operator-a@example.com",
     "operator-b@example.com",
@@ -51,7 +65,8 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
       name: "Alice Example via security@example.com",
       email: "security@example.com",
     });
-    expect(delivery.replyTo).toMatch(/^r\+[a-f0-9]{64}@reply\.maildesk\.example\.com$/);
+    expect(delivery.replyTo).toMatch(/^r\+[a-f0-9]{62}@reply\.maildesk\.example\.com$/);
+    expect(String(delivery.replyTo).split("@", 1)[0]?.length).toBeLessThanOrEqual(64);
     expect(delivery.text).toContain("Received at: security@example.com");
     expect(delivery.text).toContain("Policy result: Delivered to 2 authorized operators");
     expect(delivery.text).toContain("Your personal operator address will not be sent");
@@ -76,7 +91,10 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   expect(recipientAudits.every((call) => !String(call.bindings[5]).includes("operator-b@example.com"))).toBe(true);
   expect(db.calls.some((call) => call.sql.includes("INSERT INTO route_health"))).toBe(false);
   const healthResult = db.calls.find((call) => call.sql.includes("UPDATE route_health SET inbound_status"));
-  expect(healthResult?.sql).toContain("inbound_status = 'inbox_verified'");
+  expect(healthResult?.sql).toContain(
+    "CASE WHEN ?1 = 'provider_accepted' AND inbound_status = 'inbox_verified' THEN inbound_status ELSE ?1 END",
+  );
+  expect(healthResult?.sql).not.toContain("last_inbox_verified_at = CURRENT_TIMESTAMP");
   expect(healthResult?.sql).toContain("policy_sha256 = ?6");
   expect(healthResult?.sql).toContain("rs.active_policy_sha256 = ?6");
   expect(healthResult?.bindings[5]).toBe(
@@ -84,7 +102,32 @@ test("inbox relay creates one bannered delivery per authorized operator and pers
   );
 });
 
-test("inbox relay honors a primary v2 work queue instead of sending its mailbox fallback", async () => {
+test("inbound-only relay labels replies unavailable in both MIME alternatives", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const message = inboundMessage(
+    "sender@example.net",
+    "security@example.com",
+    mime({ from: "Alice Example <sender@example.net>", messageId: "<inbound-only@example.net>" }),
+  );
+
+  await mailRouterWorker.email(message, {
+    ...relayEnv(db, deliveries),
+    MAILDESK_REPLY_RELAY_MODE: "disabled",
+  }, {} as ExecutionContext);
+
+  expect(message.rejected).toBeUndefined();
+  expect(deliveries).toHaveLength(2);
+  for (const delivery of deliveries) {
+    for (const body of [delivery.text, delivery.html]) {
+      expect(body).toContain("Reply unavailable — reply relay is not enabled.");
+      expect(body).not.toContain("Reply normally");
+      expect(body).not.toContain("Maildesk will send the response");
+    }
+  }
+});
+
+test("inbox relay selects the v2 mailbox fallback when only the internal Queue is bound", async () => {
   const db = new RelayD1();
   const deliveries: EmailMessageBuilder[] = [];
   const jobs: unknown[] = [];
@@ -103,18 +146,11 @@ test("inbox relay honors a primary v2 work queue instead of sending its mailbox 
   await mailRouterWorker.email(message, env, {} as ExecutionContext);
 
   expect(message.rejected).toBeUndefined();
-  expect(deliveries).toEqual([]);
+  expect(deliveries).toHaveLength(1);
+  expect(deliveries[0]?.to).toBe("operator@example.org");
   expect(message.forwarded).toEqual([]);
-  expect(jobs).toHaveLength(1);
-  expect(jobs[0]).toMatchObject({
-    kind: "inbound_work_item_received",
-    queueRef: "support-intake",
-    destinationRef: "queue:support",
-    accountableRef: "team:support",
-  });
-  const healthProjection = db.calls.find((call) => call.sql.includes("UPDATE route_health SET last_inbound_at"));
-  expect(healthProjection?.sql).toContain("active_policy_sha256 = ?3");
-  expect(healthProjection?.bindings[2]).toBe(db.activePolicy?.sha256);
+  expect(jobs).toHaveLength(0);
+  expect(db.calls.some((call) => String(call.bindings[4]) === "work_destination_result")).toBe(false);
 });
 
 test("inbox relay rejects oversized v2 work items before Queue or Email effects", async () => {
@@ -316,7 +352,7 @@ test("identical inbound redelivery repairs durable results without repeating pro
 
   const first = inboundMessage("sender@example.net", "security@example.com", raw);
   await mailRouterWorker.email(first, env, {} as ExecutionContext);
-  const firstMessageIds = deliveries.map((delivery) => delivery.headers?.["Message-ID"]);
+  const firstDeliveryIds = deliveries.map((delivery) => delivery.headers?.["X-Maildesk-Delivery-ID"]);
 
   const redelivery = inboundMessage("sender@example.net", "security@example.com", raw);
   await mailRouterWorker.email(redelivery, env, {} as ExecutionContext);
@@ -328,11 +364,12 @@ test("identical inbound redelivery repairs durable results without repeating pro
     "operator-a@example.com",
     "operator-b@example.com",
   ]);
-  expect(firstMessageIds).toHaveLength(2);
-  expect(new Set(firstMessageIds).size).toBe(2);
-  expect(firstMessageIds.every((messageId) =>
-    /^<inbound\.[a-f0-9]{64}\.[a-f0-9]{16}@reply\.maildesk\.example\.com>$/.test(String(messageId))
+  expect(firstDeliveryIds).toHaveLength(2);
+  expect(new Set(firstDeliveryIds).size).toBe(2);
+  expect(firstDeliveryIds.every((deliveryId) =>
+    /^<inbound\.[a-f0-9]{64}\.[a-f0-9]{16}@reply\.maildesk\.example\.com>$/.test(String(deliveryId))
   )).toBe(true);
+  expect(deliveries.every((delivery) => delivery.headers?.["Message-ID"] === undefined)).toBe(true);
   expect(db.inboundDelivery?.status).toBe("provider_accepted");
   expect(db.recipientDeliveries.every((recipient) => recipient.status === "provider_accepted")).toBe(true);
 });
@@ -369,6 +406,42 @@ test("ambiguous recipient projection is never replayed on identical inbound rede
       { ok: true },
     ],
   });
+});
+
+test("Cloudflare Email Service failures retain only a typed body-free error code", async () => {
+  const db = new RelayD1();
+  const deliveries: EmailMessageBuilder[] = [];
+  const env = relayEnv(db, deliveries);
+  env.EMAIL = {
+    send: async (delivery: EmailMessageBuilder) => {
+      deliveries.push(delivery);
+      const error = new Error("private provider diagnostic must not persist");
+      Object.assign(error, { code: "E_HEADER_NOT_ALLOWED" });
+      throw error;
+    },
+  } as SendEmail;
+
+  await mailRouterWorker.email(
+    inboundMessage(
+      "sender@example.net",
+      "security@example.com",
+      mime({ from: "sender@example.net", messageId: "<typed-provider-error@example.net>" }),
+    ),
+    env,
+    {} as ExecutionContext,
+  );
+
+  expect(deliveries).toHaveLength(2);
+  expect(db.inboundDelivery?.status).toBe("recovery_required");
+  expect(db.recipientDeliveries.map((recipient) => recipient.error_code)).toEqual([
+    "E_HEADER_NOT_ALLOWED",
+    "E_HEADER_NOT_ALLOWED",
+  ]);
+  const routeHealthProjection = db.calls.find((call) =>
+    call.sql.includes("UPDATE route_health SET inbound_status")
+  );
+  expect(routeHealthProjection?.bindings[3]).toBe("E_HEADER_NOT_ALLOWED");
+  expect(JSON.stringify(db.calls)).not.toContain("private provider diagnostic");
 });
 
 test("identical redelivery sends a same-policy recipient whose provider claim never occurred", async () => {
@@ -477,25 +550,22 @@ test("tampering a pending recovery payload cannot redirect an operator delivery"
     .toBe("pending");
 });
 
-test("missing pending recipient spool preserves the unsent claim and never repeats accepted recipients", async () => {
+test("missing pending recipient spool retains the unsent claim without replaying accepted recipients", async () => {
   const db = new RelayD1("UPDATE inbound_recipient_deliveries SET status = 'sending'");
   const deliveries: EmailMessageBuilder[] = [];
   const queued: unknown[] = [];
   const env = relayEnv(db, deliveries);
   env.MAIL_JOBS = { send: async (job: unknown) => { queued.push(job); } } as unknown as Queue;
-  // R2 writes succeed, but a later recovery read cannot find the retained body.
+  // The fixture accepts writes but every later spool read returns null.
   const raw = mime({ from: "sender@example.net", messageId: "<missing-recovery@example.net>" });
   await mailRouterWorker.email(inboundMessage("sender@example.net", "security@example.com", raw), env, {} as ExecutionContext);
+  const claimBefore = { ...db.inboundDelivery };
   expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
   await mailRouterWorker.email(inboundMessage("sender@example.net", "security@example.com", raw), env, {} as ExecutionContext);
   expect(deliveries.map((delivery) => delivery.to)).toEqual(["operator-b@example.com"]);
   expect(db.recipientDeliveries.map((recipient) => recipient.status)).toEqual(["pending", "provider_accepted"]);
-  expect(db.inboundDelivery?.status).toBe("partial_delivery");
-  expect(queued.at(-1)).toMatchObject({
-    kind: "inbound_delivery_result",
-    status: "partial_delivery",
-    results: [{ ok: false, errorCode: "recipient_pending" }, { ok: true }],
-  });
+  expect(db.inboundDelivery).toEqual(claimBefore);
+  expect(queued.at(-1)).toMatchObject({ kind: "inbound_delivery_result", status: "partial_delivery" });
 });
 
 test("a superseded all-pending claim is retired before its MIME is rerouted", async () => {
@@ -675,7 +745,7 @@ test("opaque reply relay is side-effect free while relay processing is disabled"
   const effects = { r2: 0, queue: 0 };
   const message = inboundMessage(
     "operator-a@example.com",
-    relayAddress("c".repeat(64), "reply.maildesk.example.com"),
+    relayAddress("c".repeat(62), "reply.maildesk.example.com"),
     mime({ from: "operator-a@example.com", messageId: "<dark-reply@example.com>" }),
   );
   const env = {
@@ -770,7 +840,7 @@ test("omitted delivery configuration fails closed before routing", async () => {
 });
 
 test("reply relay requires cryptographic aligned DKIM before token lookup", async () => {
-  const token = "a".repeat(64);
+  const token = "a".repeat(62);
   const message = inboundMessage(
     "operator-a@example.com",
     relayAddress(token, "reply.maildesk.example.com"),
@@ -794,21 +864,41 @@ test("relay helpers preserve content and bind lowercase opaque addresses", async
     operator: "operator-a@example.com",
     receivedAddress: "unlisted@example.com",
     replyIdentity: "info@example.com",
+    replyProcessingMode: "enabled",
     routeKind: "role_alias",
     operatorCount: 2,
-    relayAddress: relayAddress("b".repeat(64), "reply.maildesk.example.com"),
+    relayAddress: relayAddress("b".repeat(62), "reply.maildesk.example.com"),
     deliveryMessageId: "<delivery@reply.maildesk.example.com>",
   });
-  expect(relayTokenFromRecipient(String(delivery.replyTo), "reply.maildesk.example.com")).toBe("b".repeat(64));
+  expect(relayTokenFromRecipient(String(delivery.replyTo), "reply.maildesk.example.com")).toBe("b".repeat(62));
   expect(delivery.from).toEqual({
     name: "Alice Example via unlisted@example.com",
     email: "info@example.com",
   });
   expect(delivery.text).toContain("Received at: unlisted@example.com");
-  expect(delivery.text).toContain("send the response to the correspondent from info@example.com");
+  expect(delivery.text).toContain(
+    "Reply unavailable — the public identity profile is not configured.",
+  );
   expect(delivery.headers["X-Maildesk-Original-To"]).toBe("unlisted@example.com");
   expect(delivery.headers["X-Maildesk-Reply-Identity"]).toBe("info@example.com");
+  expect(delivery.headers["X-Maildesk-Delivery-ID"]).toBe("<delivery@reply.maildesk.example.com>");
+  expect(delivery.headers["Message-ID"]).toBeUndefined();
   expect(encodedMessageUpperBound(delivery)).toBeGreaterThan(delivery.text.length);
+});
+
+test("opaque relay generation stays inside the RFC mailbox local-part limit while legacy tokens remain readable", () => {
+  const token = generateRelayToken();
+  const address = relayAddress(token, "reply.maildesk.example.com");
+
+  expect(token).toMatch(/^[a-f0-9]{62}$/);
+  expect(address.slice(0, address.indexOf("@"))).toHaveLength(64);
+  expect(relayTokenFromRecipient(address, "reply.maildesk.example.com")).toBe(token);
+  expect(
+    relayTokenFromRecipient(
+      `r+${"a".repeat(64)}@reply.maildesk.example.com`,
+      "reply.maildesk.example.com",
+    ),
+  ).toBe("a".repeat(64));
 });
 
 test("encoded-size ceiling covers transfer encoding and base64 line wrapping", () => {
@@ -853,6 +943,143 @@ test("operator reply HTML is regenerated only from verified plaintext", () => {
     attachments: [],
   })).toThrow("plaintext MIME alternative");
 });
+
+test("outbound identity rendering strips the private signature and quoted banner", () => {
+  const payload = outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "[send as another@example.net]",
+    text: [
+      "We received your report and are investigating.",
+      "",
+      "-- ",
+      "Private Operator",
+      "",
+      "> On Aug 24, 2026, at 10:00 AM, sender@example.net wrote:",
+      "> MAILDESK",
+      "> Reply as Example Security <security@example.com>",
+      "> Original message",
+    ].join("\n"),
+    references: [],
+    attachments: [],
+  }, {
+    profileRef: "security@example.com",
+    publicAddress: "security@example.com",
+    displayName: "Example Security",
+    signatureProfileRef: "signature:security:v1",
+    signatureText: "Example Security\nexample.com",
+    senderAdapter: "cloudflare_email_service",
+  });
+
+  expect(payload.subject).toBe("[send as another@example.net]");
+  expect(payload.text).toBe(
+    "We received your report and are investigating.\n\n-- \nExample Security\nexample.com",
+  );
+  expect(payload.html).toContain("Example Security");
+  expect(payload.html).not.toContain("Private Operator");
+  expect(payload.html).not.toContain("MAILDESK");
+});
+
+test("outbound identity rendering recognizes Apple Mail's quoted attribution", () => {
+  const payload = outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: [
+      "We received your report.",
+      "",
+      "-- ",
+      "Private Operator",
+      "",
+      "> On Aug 24, 2026, at 10:00 AM, sender@example.net wrote:",
+      "> Maildesk route",
+      "> Original message",
+    ].join("\r\n"),
+    references: [],
+    attachments: [],
+  }, publicIdentityProfile());
+
+  expect(payload.text).toBe(
+    "We received your report.\n\n-- \nExample Security\nexample.com",
+  );
+  expect(payload.text).not.toContain("Private Operator");
+  expect(payload.text).not.toContain("Maildesk route");
+});
+
+test("signature-free replies preserve authored paragraphs and a short final paragraph", () => {
+  for (const text of [
+    "We received your report.",
+    "First paragraph.\n\nSecond paragraph.\n\n\nA short final paragraph.",
+    "Public response\nPrivate Operator\nPrivate phone 555-0100",
+    "We received your report.\n\nPrivate Operator\nPrivate phone 555-0100",
+  ]) {
+    const payload = outboundReplyPayload({
+      from: { name: "Private Operator", address: "operator@example.com" }, subject: "Reply",
+      text, references: [], attachments: [],
+    }, publicIdentityProfile());
+    expect(payload.text).toBe(`${text}\n\n-- \nExample Security\nexample.com`);
+  }
+});
+
+test("blank lines before quoted Apple Mail content never justify deleting authored text", () => {
+  const authored = "We received your report.\n\n\nPlease call after lunch.";
+  const payload = outboundReplyPayload({
+    from: { name: "Private Operator", address: "operator@example.com" }, subject: "Reply",
+    text: `${authored}\n\nOn Aug 24, 2026, sender@example.net wrote:\n> Maildesk route`,
+    references: [], attachments: [],
+  }, publicIdentityProfile());
+  expect(payload.text).toBe(`${authored}\n\n-- \nExample Security\nexample.com`);
+});
+
+test("outbound identity rendering rejects unrecognized quote forms that retain a Maildesk banner", () => {
+  expect(() => outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: [
+      "Public response",
+      "",
+      "-- ",
+      "Private Operator",
+      "",
+      "> El 24 ago 2026, remitente@example.net escribió:",
+      "> Maildesk route",
+      "> Reply behavior:",
+    ].join("\n"),
+    references: [],
+    attachments: [],
+  }, publicIdentityProfile())).toThrow("Maildesk routing context");
+});
+
+test("an authored sentence containing attribution words is not treated as a quote boundary", () => {
+  const payload = outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: "Our incident note says On Monday Pat wrote: the patch is ready.\n\n-- \nPrivate Operator",
+    references: [],
+    attachments: [],
+  }, publicIdentityProfile());
+
+  expect(payload.text).toContain("Our incident note says On Monday Pat wrote: the patch is ready.");
+});
+
+test("outbound identity rendering rejects an empty authored reply after safe stripping", () => {
+  expect(() => outboundReplyPayload({
+    from: { address: "operator@example.com" },
+    subject: "Reply",
+    text: "-- \nPrivate Operator\n\n> On Aug 24, 2026, sender@example.net wrote:\n> Maildesk route",
+    references: [],
+    attachments: [],
+  }, publicIdentityProfile())).toThrow("no public message");
+});
+
+function publicIdentityProfile() {
+  return {
+    profileRef: "security@example.com",
+    publicAddress: "security@example.com",
+    displayName: "Example Security",
+    signatureProfileRef: "signature:security:v1",
+    signatureText: "Example Security\nexample.com",
+    senderAdapter: "cloudflare_email_service" as const,
+  };
+}
 
 function relayEnv(db: RelayD1, deliveries: EmailMessageBuilder[], policyValue: RouterPolicy = policy) {
   const policyJson = JSON.stringify(policyValue);
@@ -1034,7 +1261,9 @@ class RelayD1 {
       },
       all: async () => ({
         success: true,
-        results: sql.includes("FROM inbound_recipient_deliveries")
+        results: sql.includes("AS operators_json") && this.activePolicy
+          ? inventoryFixture(this.activePolicy.json)
+          : sql.includes("FROM inbound_recipient_deliveries")
           ? this.recipientDeliveries.filter((row) => row.delivery_id === call.bindings[0])
           : [],
         meta: {},

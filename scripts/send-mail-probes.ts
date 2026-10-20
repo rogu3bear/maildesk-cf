@@ -1,3 +1,4 @@
+import { projectPolicy, routeInbound, type RouterPolicy } from "../workers/shared/router";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,32 +7,7 @@ interface ProofPlan {
   actions: ProofAction[];
 }
 
-interface PolicyFile {
-  destinations?: Record<string, {
-    target:
-      | { kind: "mailbox"; recipients: string[] }
-      | { kind: "work_queue"; queue_ref: string };
-    fallback_destination_ref?: string;
-  }>;
-  domains: Record<string, PolicyDomain>;
-}
-
-interface PolicyDomain {
-  role_aliases: Record<string, RoleAlias>;
-  personal_aliases: Record<string, PersonalAlias>;
-}
-
-interface RoleAlias {
-  operators?: string[];
-  destination_ref?: string;
-  reply_identity: string;
-  allowed_reply_identities: string[];
-}
-
-interface PersonalAlias {
-  operator: string;
-  reply_identity: string;
-}
+type PolicyFile = RouterPolicy;
 
 type ProofAction =
   | {
@@ -52,6 +28,7 @@ type ProofAction =
       description: string;
     };
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const execute = args.includes("--execute");
@@ -97,7 +74,7 @@ if (!Number.isFinite(limit) && !args.includes("--all")) {
 const plan = readJson<ProofPlan>(planPath);
 const policy = readJson<PolicyFile>(policyPath);
 const probes = plan.actions
-  .filter((action) =>
+  .filter((action): action is Exclude<ProofAction, { kind: "blocked" }> =>
     kind === "inbound"
       ? action.kind === "targeted_inbound_probe"
       : action.kind === "targeted_outbound_reply_probe",
@@ -136,7 +113,9 @@ if (jsonOutput) {
   console.log(JSON.stringify(summary, null, 2));
 } else {
   for (const result of results) {
-    console.log(`${result.status} ${result.domain} ${result.target} ${result.id ?? ""}`.trim());
+    const target = "target" in result ? result.target : result.from_identity;
+    const id = "target" in result ? result.id : result.message_id;
+    console.log(`${result.status} ${result.domain} ${target} ${id ?? ""}`.trim());
   }
   console.log(`mode ${summary.mode}`);
   console.log(`probe_count ${summary.probe_count}`);
@@ -256,44 +235,13 @@ function sendOutboundProbe(
 }
 
 function routeOperator(envelopeTo: string): string {
-  const mailbox = parseMailbox(envelopeTo);
-  const domainPolicy = mailbox ? policy.domains[mailbox.domain] : undefined;
-  const route =
-    mailbox && (domainPolicy?.role_aliases[mailbox.localPart] ?? domainPolicy?.personal_aliases[mailbox.localPart]);
-  const operator = route && "reply_identity" in route && "operators" in route
-    ? roleOperators(route)[0]
-    : route && "destination_ref" in route
-      ? roleOperators(route)[0]
-      : route?.operator;
-  if (!operator) {
-    console.error(`no operator found for ${envelopeTo}`);
-    process.exit(1);
-  }
+  const routed = routeInbound(policy, { envelopeTo, headerFrom: "operator@example.com" });
+  const projection = projectPolicy(policy);
+  const route = routed.ok && projection.ok ? projection.value.routes.find((entry) =>
+    entry.domain === routed.value.domain && entry.localPart === routed.value.localPart) : undefined;
+  const operator = route?.operators[0];
+  if (!operator) throw new Error("no canonical policy operator exists for the selected probe route");
   return operator;
-}
-
-function roleOperators(route: RoleAlias): string[] {
-  if (!route.destination_ref) return route.operators ?? [];
-  const seen = new Set<string>();
-  let destinationRef: string | undefined = route.destination_ref;
-  while (destinationRef && !seen.has(destinationRef)) {
-    seen.add(destinationRef);
-    const destination = policy.destinations?.[destinationRef];
-    if (!destination) return [];
-    if (destination.target.kind === "mailbox") return destination.target.recipients;
-    destinationRef = destination.fallback_destination_ref;
-  }
-  return [];
-}
-
-function parseMailbox(address: string): { localPart: string; domain: string } | null {
-  const normalized = address.trim().toLowerCase();
-  const atIndex = normalized.lastIndexOf("@");
-  if (atIndex <= 0 || atIndex === normalized.length - 1) return null;
-  return {
-    localPart: normalized.slice(0, atIndex),
-    domain: normalized.slice(atIndex + 1),
-  };
 }
 
 function defaultPolicyPath(): string {
@@ -328,3 +276,7 @@ function relativePath(path: string): string {
 function tagValue(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]/g, "-");
 }
+
+}
+
+if (import.meta.main) await main();

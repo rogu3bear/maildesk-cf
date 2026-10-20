@@ -49,6 +49,7 @@ interface ProductionWorkerConfigs {
   routingHealth: string;
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
@@ -189,7 +190,7 @@ function checkJson<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(resolve(root, path), "utf8")) as T;
   } catch (error) {
-    failures.push(`invalid JSON in ${path}: ${errorDetail(error)}`);
+    failures.push(`invalid JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }
@@ -491,9 +492,9 @@ function readProductionWorkerConfigs(
 
   if (selected.length !== roles.length) return null;
   return {
-    relayRouter: selected[0],
-    relayOutbound: selected[1],
-    routingHealth: selected[2],
+    relayRouter: selected[0]!,
+    relayOutbound: selected[1]!,
+    routingHealth: selected[2]!,
   };
 }
 
@@ -565,3 +566,7 @@ function isExplicitSenderDomainList(value: string): boolean {
 interface CfctlDoctorSummary {
   healthy: boolean;
 }
+
+}
+
+if (import.meta.main) await main();

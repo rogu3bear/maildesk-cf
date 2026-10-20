@@ -19,6 +19,7 @@ describe("maildesk receipt workflow", () => {
     const summaryPath = join(dir, "receipt-summary.json");
 
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: {
         "tenant.example.com": {
           role_aliases: {

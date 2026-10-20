@@ -87,6 +87,7 @@ describe("maildesk verifier", () => {
     const evidencePath = join(dir, "evidence.json");
     const domains = ["selected.example.com", "unselected.example.com"];
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: Object.fromEntries(domains.map((domain) => [domain, {
         role_aliases: {
           inbox: {
@@ -159,6 +160,7 @@ describe("maildesk verifier", () => {
     const domains = ["selected.example.com", "unselected.example.com"];
     const [selectedDomain, unselectedDomain] = domains as [string, string];
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: Object.fromEntries(domains.map((domain) => [domain, {
         role_aliases: {
           inbox: {
@@ -290,6 +292,8 @@ describe("maildesk verifier", () => {
       local_truth_ok: true,
       edge_ready: false,
       mail_ready: false,
+      canary_receipts_verified: false,
+      operational_ready: false,
       live_evidence_present: false,
     });
   });
@@ -613,6 +617,7 @@ describe("maildesk verifier", () => {
     const evidencePath = join(dir, "evidence.json");
 
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: {
         "example.com": {
           role_aliases: {
@@ -739,6 +744,7 @@ describe("maildesk verifier", () => {
     const evidencePath = join(dir, "evidence.json");
 
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: {
         "tenant.example.com": {
           role_aliases: {
@@ -842,8 +848,9 @@ describe("maildesk verifier", () => {
       }>;
     };
 
-    expect(receipt.status.mail_ready).toBe(true);
-    expect(receipt.gaps.filter((gap) => gap.readiness === "mail")).toHaveLength(0);
+    expect(receipt.status.mail_ready).toBe(false);
+    expect(receipt.status).toMatchObject({ canary_receipts_verified: true, operational_ready: false });
+    expect(receipt.gaps.filter((gap) => gap.readiness === "mail")).toEqual([expect.objectContaining({field:"operational_state"})]);
     expect(receipt.rows[0]?.sender_domain).toMatchObject({
       provider: "disabled",
       provider_status: "disabled",
@@ -879,7 +886,7 @@ describe("maildesk verifier", () => {
       gaps: unknown[];
     };
     expect(inventoryReceipt.status.mail_ready).toBe(false);
-    expect(inventoryReceipt.gaps).toHaveLength(0);
+    expect(inventoryReceipt.gaps).toEqual([expect.objectContaining({field:"operational_state"})]);
   });
 
   test("uses Resend sender-domain readback only for resend mode", () => {
@@ -889,6 +896,7 @@ describe("maildesk verifier", () => {
     const evidencePath = join(dir, "evidence.json");
 
     writeJson(policyPath, {
+      default_reply_mode: "role_first",
       domains: {
         "tenant.example.com": {
           role_aliases: {
@@ -1001,7 +1009,8 @@ describe("maildesk verifier", () => {
       rows: Array<{ outbound_sender: string; outbound_proof: string; sender_domain: { provider: string } }>;
     };
 
-    expect(receipt.status.mail_ready).toBe(true);
+    expect(receipt.status.mail_ready).toBe(false);
+    expect(receipt.status).toMatchObject({ canary_receipts_verified: true, operational_ready: false });
     expect(receipt.rows[0]).toMatchObject({
       outbound_sender: "ok",
       outbound_proof: "ok",

@@ -1698,6 +1698,7 @@ function createCoverageFixture(dir: string) {
   desired.sender = { mode: "disabled", candidate_domains: [] };
   writeJson(desiredPath, desired);
   writeJson(policyPath, {
+    default_reply_mode: "role_first",
     domains: Object.fromEntries(domains.map((domain) => [domain, {
       role_aliases: {
         inbox: {

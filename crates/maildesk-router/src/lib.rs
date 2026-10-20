@@ -1,3 +1,6 @@
+mod projection;
+pub use projection::{project_policy, project_policy_json, PolicyProjection, ProjectedRoute};
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -22,7 +25,32 @@ pub struct RouterPolicy {
     pub accountables: BTreeMap<String, AccountablePolicy>,
     #[serde(default)]
     pub destinations: BTreeMap<String, DestinationPolicy>,
+    #[serde(default)]
+    pub identity_profiles: BTreeMap<String, IdentityProfile>,
     pub domains: BTreeMap<String, DomainPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityProfile {
+    /// Stable profile records may name their public identity explicitly. A
+    /// legacy record omits this field and uses its normalized mailbox key.
+    #[serde(default)]
+    pub public_address: Option<String>,
+    /// Multiple revisions may coexist, but at most one active profile may
+    /// resolve a public address.
+    #[serde(default = "identity_profile_active_default")]
+    pub active: bool,
+    pub display_name: String,
+    pub signature_profile_ref: String,
+    pub signature_text: String,
+    pub sender_adapter: SenderAdapter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderAdapter {
+    CloudflareEmailService,
+    Resend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +141,19 @@ pub struct RouteDecision {
     pub default_reply_identity: String,
     pub allowed_reply_identities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_profile: Option<ResolvedIdentityProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disposition: Option<RouteDisposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedIdentityProfile {
+    pub profile_ref: String,
+    pub public_address: String,
+    pub display_name: String,
+    pub signature_profile_ref: String,
+    pub signature_text: String,
+    pub sender_adapter: SenderAdapter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +173,8 @@ pub struct DispositionCandidate {
 pub struct ReplyAuthorization {
     pub from_identity: String,
     pub envelope_sender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_profile: Option<ResolvedIdentityProfile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +201,12 @@ pub enum RouteError {
     UnauthorizedOperator(String),
     #[error("reply identity is not allowed for this route: {0}")]
     UnauthorizedReplyIdentity(String),
+    #[error("multiple active identity profiles match: {0}")]
+    AmbiguousIdentityProfile(String),
+    #[error("reply target is missing")]
+    MissingReplyTarget,
+    #[error("multiple external reply targets are plausible")]
+    AmbiguousReplyTarget,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -185,6 +233,16 @@ pub enum PolicyError {
     InvalidDestinationTarget(String),
     #[error("destination chain has no mailbox fallback: {0}")]
     MissingMailboxFallback(String),
+    #[error("multiple active identity profiles match: {0}")]
+    AmbiguousIdentityProfile(String),
+    #[error("identity profile key is not a normalized mailbox: {0}")]
+    InvalidIdentityProfileKey(String),
+    #[error("identity profile has an invalid display name: {0}")]
+    InvalidIdentityDisplayName(String),
+    #[error("identity profile has an invalid signature reference: {0}")]
+    InvalidSignatureProfileRef(String),
+    #[error("identity profile has invalid signature text: {0}")]
+    InvalidSignatureText(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +257,16 @@ struct ReplyAdapterRequest {
     envelope_to: String,
     operator: String,
     requested_identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplyTargetAdapterRequest {
+    candidates: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplyTargetAdapterResponse {
+    recipient: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,11 +297,11 @@ pub fn route_message(
     }
 
     if let Some(personal_policy) = domain_policy.personal_aliases.get(&local_part) {
-        return personal_decision(domain, local_part, personal_policy);
+        return personal_decision(policy, domain, local_part, personal_policy);
     }
 
     if let Some(catch_all_policy) = &domain_policy.catch_all {
-        return catch_all_decision(domain, "*".to_string(), catch_all_policy);
+        return catch_all_decision(policy, domain, "*".to_string(), catch_all_policy);
     }
 
     Err(RouteError::UnknownAlias(local_part, domain))
@@ -268,8 +336,31 @@ pub fn authorize_reply(
 
     Ok(ReplyAuthorization {
         from_identity: identity.clone(),
-        envelope_sender: identity,
+        envelope_sender: identity.clone(),
+        identity_profile: if decision.default_reply_identity == identity {
+            decision.identity_profile.clone()
+        } else {
+            None
+        },
     })
+}
+
+/// Resolve the externally visible recipient from durable thread state. Exact
+/// normalized duplicates collapse to one value; distinct candidates never
+/// acquire ordering or Reply-All semantics.
+pub fn resolve_reply_target(candidates: &[String]) -> Result<String, RouteError> {
+    let targets = candidates
+        .iter()
+        .map(|candidate| normalize_mailbox(candidate))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    match targets.len() {
+        0 => Err(RouteError::MissingReplyTarget),
+        1 => targets
+            .into_iter()
+            .next()
+            .ok_or(RouteError::MissingReplyTarget),
+        _ => Err(RouteError::AmbiguousReplyTarget),
+    }
 }
 
 pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
@@ -284,6 +375,7 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
     }
 
     validate_destinations(policy)?;
+    validate_identity_profiles(policy)?;
 
     let mut route_count = 0usize;
     for (domain, domain_policy) in &policy.domains {
@@ -294,6 +386,22 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
             return Err(PolicyError::EmptyDomain(domain.clone()));
         }
 
+        for local_part in domain_policy
+            .role_aliases
+            .keys()
+            .chain(domain_policy.personal_aliases.keys())
+        {
+            let address = format!("{local_part}@{domain}");
+            if local_part == "*"
+                || normalize_mailbox(&address).ok().as_deref() != Some(address.as_str())
+            {
+                return Err(PolicyError::InvalidRoute(
+                    local_part.clone(),
+                    domain.clone(),
+                    RouteError::InvalidRecipient,
+                ));
+            }
+        }
         for (local_part, role_policy) in &domain_policy.role_aliases {
             let decision = route_for_policy_check(policy, local_part, domain)?;
             if role_policy.destination_ref.is_none()
@@ -322,10 +430,11 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
         }
 
         if let Some(catch_all_policy) = &domain_policy.catch_all {
-            let decision = catch_all_decision(domain.clone(), "*".to_string(), catch_all_policy)
-                .map_err(|error| {
-                    PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
-                })?;
+            let decision =
+                catch_all_decision(policy, domain.clone(), "*".to_string(), catch_all_policy)
+                    .map_err(|error| {
+                        PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
+                    })?;
             if !decision
                 .allowed_reply_identities
                 .contains(&catch_all_policy.reply_identity)
@@ -382,6 +491,19 @@ pub fn authorize_reply_json(request_json: &str) -> String {
     serialize_adapter_response(result)
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn resolve_reply_target_json(request_json: &str) -> String {
+    let result = serde_json::from_str::<ReplyTargetAdapterRequest>(request_json)
+        .map_err(AdapterError::invalid_request)
+        .and_then(|request| {
+            resolve_reply_target(&request.candidates)
+                .map(|recipient| ReplyTargetAdapterResponse { recipient })
+                .map_err(AdapterError::from_route)
+        });
+
+    serialize_adapter_response(result)
+}
+
 fn serialize_adapter_response<T: Serialize>(result: Result<T, AdapterError>) -> String {
     let response = match result {
         Ok(value) => AdapterResponse::Ok { value },
@@ -413,6 +535,9 @@ impl AdapterError {
             RouteError::EmptyOperators(_, _) => "empty_operators",
             RouteError::UnauthorizedOperator(_) => "unauthorized_operator",
             RouteError::UnauthorizedReplyIdentity(_) => "unauthorized_reply_identity",
+            RouteError::AmbiguousIdentityProfile(_) => "ambiguous_identity_profile",
+            RouteError::MissingReplyTarget => "reply_target_missing",
+            RouteError::AmbiguousReplyTarget => "recipient_ambiguous",
         };
 
         Self {
@@ -422,8 +547,15 @@ impl AdapterError {
     }
 
     fn from_policy(error: PolicyError) -> Self {
+        let kind = match &error {
+            PolicyError::AmbiguousIdentityProfile(_)
+            | PolicyError::InvalidRoute(_, _, RouteError::AmbiguousIdentityProfile(_)) => {
+                "ambiguous_identity_profile"
+            }
+            _ => "invalid_policy",
+        };
         Self {
-            kind: "invalid_policy".to_string(),
+            kind: kind.to_string(),
             message: error.to_string(),
         }
     }
@@ -465,6 +597,7 @@ fn role_decision(
             operators: Vec::new(),
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
+            identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
             disposition: None,
         });
     }
@@ -489,6 +622,7 @@ fn role_decision(
             operators,
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
+            identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
         });
     }
 
@@ -503,11 +637,13 @@ fn role_decision(
         operators: role_policy.operators.clone(),
         default_reply_identity: role_policy.reply_identity.clone(),
         allowed_reply_identities,
+        identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
         disposition: None,
     })
 }
 
 fn catch_all_decision(
+    policy: &RouterPolicy,
     domain: String,
     local_part: String,
     catch_all_policy: &CatchAllPolicy,
@@ -525,6 +661,7 @@ fn catch_all_decision(
             operators: Vec::new(),
             default_reply_identity: catch_all_policy.reply_identity.clone(),
             allowed_reply_identities,
+            identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
             disposition: None,
         });
     }
@@ -540,11 +677,13 @@ fn catch_all_decision(
         operators: catch_all_policy.operators.clone(),
         default_reply_identity: catch_all_policy.reply_identity.clone(),
         allowed_reply_identities,
+        identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
         disposition: None,
     })
 }
 
 fn personal_decision(
+    policy: &RouterPolicy,
     domain: String,
     local_part: String,
     personal_policy: &PersonalAliasPolicy,
@@ -560,8 +699,95 @@ fn personal_decision(
         operators: vec![personal_policy.operator.clone()],
         default_reply_identity: personal_policy.reply_identity.clone(),
         allowed_reply_identities: vec![personal_policy.reply_identity.clone()],
+        identity_profile: resolved_identity_profile(policy, &personal_policy.reply_identity)?,
         disposition: None,
     })
+}
+
+fn resolved_identity_profile(
+    policy: &RouterPolicy,
+    identity: &str,
+) -> Result<Option<ResolvedIdentityProfile>, RouteError> {
+    let public_address = normalize_mailbox(identity)?;
+    let mut matches = policy
+        .identity_profiles
+        .iter()
+        .filter_map(|(profile_ref, profile)| {
+            if !profile.active {
+                return None;
+            }
+            let candidate = profile.public_address.as_deref().unwrap_or(profile_ref);
+            (normalize_mailbox(candidate).ok().as_deref() == Some(public_address.as_str()))
+                .then_some((profile_ref, profile))
+        });
+    let Some((profile_ref, profile)) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(RouteError::AmbiguousIdentityProfile(public_address));
+    }
+    Ok(Some(ResolvedIdentityProfile {
+        profile_ref: profile_ref.clone(),
+        public_address,
+        display_name: profile.display_name.trim().to_string(),
+        signature_profile_ref: profile.signature_profile_ref.clone(),
+        signature_text: profile.signature_text.clone(),
+        sender_adapter: profile.sender_adapter,
+    }))
+}
+
+fn validate_identity_profiles(policy: &RouterPolicy) -> Result<(), PolicyError> {
+    let mut active_addresses = BTreeSet::new();
+    for (profile_ref, profile) in &policy.identity_profiles {
+        if profile_ref.is_empty()
+            || profile_ref.len() > 200
+            || !profile_ref
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ":@._-".contains(character))
+        {
+            return Err(PolicyError::InvalidIdentityProfileKey(profile_ref.clone()));
+        }
+        let public_address = profile.public_address.as_deref().unwrap_or(profile_ref);
+        let normalized = normalize_mailbox(public_address)
+            .map_err(|_| PolicyError::InvalidIdentityProfileKey(profile_ref.clone()))?;
+        if profile.active && !active_addresses.insert(normalized.clone()) {
+            return Err(PolicyError::AmbiguousIdentityProfile(normalized));
+        }
+        if normalized != public_address {
+            return Err(PolicyError::InvalidIdentityProfileKey(profile_ref.clone()));
+        }
+        let display_name = profile.display_name.trim();
+        if display_name.is_empty()
+            || display_name.len() > 200
+            || display_name.contains(['\r', '\n'])
+        {
+            return Err(PolicyError::InvalidIdentityDisplayName(profile_ref.clone()));
+        }
+        let signature_ref = profile.signature_profile_ref.trim();
+        if signature_ref.is_empty()
+            || signature_ref.len() > 200
+            || !signature_ref
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ":._-".contains(character))
+        {
+            return Err(PolicyError::InvalidSignatureProfileRef(profile_ref.clone()));
+        }
+        if profile.signature_text.trim().is_empty()
+            || profile.signature_text.len() > 2_000
+            || profile.signature_text.contains('\r')
+            || profile
+                .signature_text
+                .chars()
+                .any(|character| character.is_control() && character != '\n' && character != '\t')
+        {
+            return Err(PolicyError::InvalidSignatureText(profile_ref.clone()));
+        }
+    }
+    Ok(())
+}
+
+const fn identity_profile_active_default() -> bool {
+    true
 }
 
 fn destination_candidates(policy: &RouterPolicy, initial_ref: &str) -> Vec<DispositionCandidate> {
@@ -674,10 +900,26 @@ fn split_mailbox(address: &str) -> Result<(String, String), RouteError> {
 
 fn normalize_mailbox(address: &str) -> Result<String, RouteError> {
     let trimmed = address.trim().to_ascii_lowercase();
-    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return Err(RouteError::InvalidRecipient);
+    };
+    if local.is_empty()
+        || local.len() > 64
+        || domain.is_empty()
+        || domain.len() > 253
+        || domain.contains('@')
+        || trimmed.contains(char::is_whitespace)
+        || trimmed.chars().any(char::is_control)
+        || !domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
         return Err(RouteError::InvalidRecipient);
     }
-
     Ok(trimmed)
 }
 
@@ -887,6 +1129,7 @@ mod tests {
             default_reply_mode: ReplyMode::RoleFirst,
             accountables: BTreeMap::new(),
             destinations: BTreeMap::new(),
+            identity_profiles: BTreeMap::new(),
             domains,
         };
         assert_eq!(validate_policy(&policy)?, 1);
@@ -940,6 +1183,151 @@ mod tests {
         assert_eq!(
             response["value"]["default_reply_identity"],
             "founders@example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_decision_projects_the_policy_owned_public_identity_profile(
+    ) -> Result<(), serde_json::Error> {
+        let mut policy = serde_json::to_value(example_policy())?;
+        policy["identity_profiles"] = serde_json::json!({
+            "founders@example.com": {
+                "display_name": "Example Founders",
+                "signature_profile_ref": "signature:founders:v1",
+                "signature_text": "Example Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            }
+        });
+        let request = serde_json::json!({
+            "policy": policy,
+            "message": {
+                "envelope_to": "founders@example.com",
+                "header_from": "sender@example.net",
+                "message_id": "<identity-profile@example.net>",
+                "subject": "[send as somebody-else@example.org]"
+            }
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&route_message_json(&request.to_string()))?;
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["value"]["identity_profile"],
+            serde_json::json!({
+                "profile_ref": "founders@example.com",
+                "public_address": "founders@example.com",
+                "display_name": "Example Founders",
+                "signature_profile_ref": "signature:founders:v1",
+                "signature_text": "Example Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            })
+        );
+        assert_eq!(
+            response["value"]["default_reply_identity"],
+            "founders@example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_multiple_active_profiles_for_one_public_identity() -> Result<(), serde_json::Error> {
+        let mut policy = serde_json::to_value(example_policy())?;
+        policy["identity_profiles"] = serde_json::json!({
+            "identity:founders:v1": {
+                "public_address": "founders@example.com",
+                "active": true,
+                "display_name": "Example Founders",
+                "signature_profile_ref": "signature:founders:v1",
+                "signature_text": "Example Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            },
+            "identity:founders:v2": {
+                "public_address": "founders@example.com",
+                "active": true,
+                "display_name": "Example Founders",
+                "signature_profile_ref": "signature:founders:v2",
+                "signature_text": "Example Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            }
+        });
+        let request = serde_json::json!({
+            "policy": policy,
+            "message": {
+                "envelope_to": "founders@example.com",
+                "header_from": "sender@example.net"
+            }
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&route_message_json(&request.to_string()))?;
+
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["error"]["kind"], "ambiguous_identity_profile");
+        Ok(())
+    }
+
+    #[test]
+    fn selects_the_only_active_stable_profile_ref() -> Result<(), serde_json::Error> {
+        let mut policy = serde_json::to_value(example_policy())?;
+        policy["identity_profiles"] = serde_json::json!({
+            "identity:founders:v1": {
+                "public_address": "founders@example.com",
+                "active": false,
+                "display_name": "Retired Founders",
+                "signature_profile_ref": "signature:founders:v1",
+                "signature_text": "Retired Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            },
+            "identity:founders:v2": {
+                "public_address": "founders@example.com",
+                "active": true,
+                "display_name": "Example Founders",
+                "signature_profile_ref": "signature:founders:v2",
+                "signature_text": "Example Founders\nexample.com",
+                "sender_adapter": "cloudflare_email_service"
+            }
+        });
+        let request = serde_json::json!({
+            "policy": policy,
+            "message": {
+                "envelope_to": "founders@example.com",
+                "header_from": "sender@example.net"
+            }
+        });
+        let response: serde_json::Value =
+            serde_json::from_str(&route_message_json(&request.to_string()))?;
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["value"]["identity_profile"]["profile_ref"],
+            "identity:founders:v2"
+        );
+        assert_eq!(
+            response["value"]["identity_profile"]["public_address"],
+            "founders@example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_exactly_one_normalized_reply_target() -> Result<(), RouteError> {
+        assert_eq!(
+            resolve_reply_target(&[
+                " Correspondent@Example.NET ".to_string(),
+                "correspondent@example.net".to_string(),
+            ])?,
+            "correspondent@example.net"
+        );
+        assert_eq!(
+            resolve_reply_target(&[]),
+            Err(RouteError::MissingReplyTarget)
+        );
+        assert_eq!(
+            resolve_reply_target(&[
+                "first@example.net".to_string(),
+                "second@example.net".to_string(),
+            ]),
+            Err(RouteError::AmbiguousReplyTarget)
         );
         Ok(())
     }
@@ -1052,11 +1440,13 @@ mod tests {
             }
         }))?;
 
-        let error = validate_policy(&policy).expect_err("fallback cycle must fail closed");
-        assert_eq!(
-            error.to_string(),
-            "destination fallback cycle includes: queue:a"
-        );
+        match validate_policy(&policy) {
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "destination fallback cycle includes: queue:a"
+            ),
+            Ok(_) => return Err(test_failure("fallback cycle must fail closed")),
+        }
         Ok(())
     }
 
@@ -1065,17 +1455,19 @@ mod tests {
         let mut policy: RouterPolicy = serde_json::from_str(include_str!(
             "../../../tests/fixtures/routing-policy-v2.json"
         ))?;
-        policy
-            .destinations
-            .get_mut("queue:support")
-            .expect("fixture queue destination")
-            .fallback_destination_ref = None;
+        if let Some(destination) = policy.destinations.get_mut("queue:support") {
+            destination.fallback_destination_ref = None;
+        } else {
+            return Err(test_failure("fixture queue destination must exist"));
+        }
 
-        let error = validate_policy(&policy).expect_err("queue-only routes cannot be activated");
-        assert_eq!(
-            error.to_string(),
-            "destination chain has no mailbox fallback: queue:support"
-        );
+        match validate_policy(&policy) {
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "destination chain has no mailbox fallback: queue:support"
+            ),
+            Ok(_) => return Err(test_failure("queue-only routes cannot be activated")),
+        }
         Ok(())
     }
 
@@ -1107,6 +1499,7 @@ mod tests {
             default_reply_mode: ReplyMode::RoleFirst,
             accountables: BTreeMap::new(),
             destinations: BTreeMap::new(),
+            identity_profiles: BTreeMap::new(),
             domains,
         }
     }
@@ -1144,6 +1537,7 @@ mod tests {
             default_reply_mode: ReplyMode::RoleFirst,
             accountables: BTreeMap::new(),
             destinations: BTreeMap::new(),
+            identity_profiles: BTreeMap::new(),
             domains,
         }
     }
@@ -1186,12 +1580,30 @@ mod tests {
             },
         );
 
+        let mut identity_profiles = BTreeMap::new();
+        identity_profiles.insert(
+            "founders@example.com".to_string(),
+            IdentityProfile {
+                public_address: None,
+                active: true,
+                display_name: "Example Founders".to_string(),
+                signature_profile_ref: "signature:founders:v1".to_string(),
+                signature_text: "Example Founders\nexample.com".to_string(),
+                sender_adapter: SenderAdapter::CloudflareEmailService,
+            },
+        );
+
         RouterPolicy {
             policy_version: None,
             default_reply_mode: ReplyMode::RoleFirst,
             accountables: BTreeMap::new(),
             destinations: BTreeMap::new(),
+            identity_profiles,
             domains,
         }
+    }
+
+    fn test_failure(message: &str) -> serde_json::Error {
+        serde_json::Error::io(std::io::Error::other(message))
     }
 }

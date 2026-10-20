@@ -236,3 +236,11 @@ minter, external rotation script, or credential-directory dependency.
 - Production adapters use the explicit account-pinned cfctl profile checked by
   preflight. Runtime bindings do not require copying an account credential into
   application code.
+
+## Authorization and recovery ownership
+
+Use the current inbox-relay contract for Rust policy projection, exact D1
+inventory parity, durable dispatch and the separate canary/ordinary variants.
+The internal Queue is not a policy work destination. Preserve terminal sends
+and containment lineage; never replay an ambiguous Cloudflare send. Activation
+proposals are non-performing until a governed provider operation is qualified.

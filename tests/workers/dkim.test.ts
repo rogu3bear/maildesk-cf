@@ -25,6 +25,14 @@ test("aligned rsa-sha256 signature cryptographically authorizes the operator", a
   expect(result.alignedOperatorId).toMatch(/^[a-f0-9]{64}$/);
 });
 
+test("aligned signatures may oversign From to prohibit duplicate header injection", async () => {
+  const raw = await signedMessage("oversigned", privateKey, "from:from:to:subject:date");
+  const result = await verifyOperatorDkim(raw, "operator@example.com", { fetcher: dnsFetcher() });
+
+  expect(result.status).toBe("verified");
+  expect(result.signingDomain).toBe("example.com");
+});
+
 test("body, signing-domain, and signed From tampering fail closed", async () => {
   const valid = decode(await signedMessage());
   const cases = [
@@ -77,7 +85,11 @@ test("a cryptographically valid 1024-bit RSA signature is rejected as weak", asy
   expect(result.boundedErrorCode).toBe("dkim_key_weak");
 });
 
-async function signedMessage(selector = "test", signingKey = privateKey): Promise<ArrayBuffer> {
+async function signedMessage(
+  selector = "test",
+  signingKey = privateKey,
+  signedHeaderNames = "from:to:subject:date",
+): Promise<ArrayBuffer> {
   const headers = [
     "From: operator@example.com",
     "To: relay@example.net",
@@ -86,13 +98,13 @@ async function signedMessage(selector = "test", signingKey = privateKey): Promis
   ];
   const body = "hello\r\n";
   const bodyHash = base64(await crypto.subtle.digest("SHA-256", encode(body)));
-  const value = `v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=${selector}; h=from:to:subject:date; bh=${bodyHash}; b=`;
+  const value = `v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=${selector}; h=${signedHeaderNames}; bh=${bodyHash}; b=`;
   const canonical = [
     "from:operator@example.com\r\n",
     "to:relay@example.net\r\n",
     "subject:reply\r\n",
     "date:Wed, 12 Aug 2026 12:00:00 +0000\r\n",
-    `dkim-signature:${value}\r\n`,
+    `dkim-signature:${value}`,
   ].join("");
   const signature = base64(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", signingKey, encode(canonical)));
   return encode([`DKIM-Signature: ${value}${signature}`, ...headers, "", body].join("\r\n"));

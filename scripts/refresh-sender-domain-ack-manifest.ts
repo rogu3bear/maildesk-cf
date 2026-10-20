@@ -36,6 +36,7 @@ interface CfctlEnvelope {
   error?: { code?: string } | null;
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
@@ -305,3 +306,7 @@ function writeJson(path: string, value: unknown): void {
 function relativePath(path: string): string {
   return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 }
+
+}
+
+if (import.meta.main) await main();

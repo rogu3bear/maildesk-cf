@@ -43,6 +43,7 @@ interface DesiredState extends CanonicalDesiredTopology {
 // The Email Routing MX hostnames Cloudflare publishes for inbound routing.
 const CF_EMAIL_ROUTING_MX = ["route1.mx.cloudflare.net", "route2.mx.cloudflare.net", "route3.mx.cloudflare.net"];
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
@@ -297,6 +298,7 @@ function cfctlRead(capability: string, selectors: Record<string, string>, query?
 }
 
 function cfctlCall(capability: string, subArgs: string[]): { ok: boolean; envelope: CfctlEnvelope; error?: string } {
+  if (!profileId) throw new Error("missing explicit cfctl profile");
   const result = spawnSync(cfctlBin, [
     ...subArgs,
     "--profile",
@@ -382,7 +384,8 @@ function isRecord(value: unknown): value is Record<string, any> {
 function errText(env: CfctlEnvelope | undefined): string | undefined {
   if (!env) return undefined;
   const e = env.error as { message?: string } | undefined;
-  const cf = Array.isArray(env.result?.errors) ? (env.result?.errors as Array<{ message?: string }>) : [];
+  const payload = isRecord(env.result) ? env.result : {};
+  const cf = Array.isArray(payload.errors) ? (payload.errors as Array<{ message?: string }>) : [];
   return e?.message ?? (cf.map((x) => x.message).filter(Boolean).join("; ") || undefined);
 }
 
@@ -450,3 +453,7 @@ interface CfctlResult {
   result?: any;
   error?: string;
 }
+
+}
+
+if (import.meta.main) await main();

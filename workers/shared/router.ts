@@ -1,5 +1,7 @@
 import {
   authorize_reply_json,
+  project_policy_json,
+  resolve_reply_target_json,
   route_message_json,
 } from "../../generated/router-wasm/maildesk_router.js";
 
@@ -8,7 +10,19 @@ export interface RouterPolicy {
   default_reply_mode: "role_first" | "personal_first";
   accountables?: Record<string, { kind: "team" }>;
   destinations?: Record<string, DestinationPolicy>;
+  identity_profiles?: Record<string, IdentityProfile>;
   domains: Record<string, DomainPolicy>;
+}
+
+export interface IdentityProfile {
+  /** Legacy profiles omit this and use their normalized mailbox map key. */
+  public_address?: string;
+  /** Defaults to true so existing policy documents remain compatible. */
+  active?: boolean;
+  display_name: string;
+  signature_profile_ref: string;
+  signature_text: string;
+  sender_adapter: "cloudflare_email_service" | "resend";
 }
 
 export interface DestinationPolicy {
@@ -59,7 +73,17 @@ export interface RouteDecision {
   operators: string[];
   defaultReplyIdentity: string;
   allowedReplyIdentities: string[];
+  identityProfile?: ResolvedIdentityProfile;
   disposition?: RouteDisposition;
+}
+
+export interface ResolvedIdentityProfile {
+  profileRef: string;
+  publicAddress: string;
+  displayName: string;
+  signatureProfileRef: string;
+  signatureText: string;
+  senderAdapter: "cloudflare_email_service" | "resend";
 }
 
 export interface RouteDisposition {
@@ -78,6 +102,7 @@ export interface DispositionCandidate {
 export interface ReplyAuthorization {
   fromIdentity: string;
   envelopeSender: string;
+  identityProfile?: ResolvedIdentityProfile;
 }
 
 export interface RouterError {
@@ -88,6 +113,25 @@ export interface RouterError {
 export type RouterResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: RouterError };
+
+export interface PolicyProjection {
+  schemaVersion: 1;
+  protectedOperators: string[];
+  routes: Array<RouteDecision & { routeRef: string }>;
+}
+
+/** Rust validates the entire policy before exposing any inventory row. */
+export function projectPolicy(policy: RouterPolicy): RouterResult<PolicyProjection> {
+  return parseAdapterResponse(project_policy_json(JSON.stringify(policy)), (value) => {
+    if (value.schema_version !== 1 || !Array.isArray(value.routes)) {
+      throw new Error("unsupported Rust policy projection");
+    }
+    return { schemaVersion: 1, protectedOperators: requireStringArray(value, "protected_operators"), routes: value.routes.map((row: unknown) => {
+      if (!isRecord(row)) throw new Error("invalid projected route");
+      return { ...mapRouteDecision(row), routeRef: requireString(row, "route_ref") };
+    }) };
+  });
+}
 
 export function routeInbound(
   policy: RouterPolicy,
@@ -125,9 +169,24 @@ export function authorizeReplyWithPolicy(
     }),
   );
 
+  return parseAdapterResponse(response, (value) => {
+    const authorization: ReplyAuthorization = {
+      fromIdentity: requireString(value, "from_identity"),
+      envelopeSender: requireString(value, "envelope_sender"),
+    };
+    if (value.identity_profile !== undefined) {
+      authorization.identityProfile = mapIdentityProfile(value.identity_profile);
+    }
+    return authorization;
+  });
+}
+
+export function resolveReplyTarget(
+  candidates: string[],
+): RouterResult<{ recipient: string }> {
+  const response = resolve_reply_target_json(JSON.stringify({ candidates }));
   return parseAdapterResponse(response, (value) => ({
-    fromIdentity: requireString(value, "from_identity"),
-    envelopeSender: requireString(value, "envelope_sender"),
+    recipient: requireString(value, "recipient"),
   }));
 }
 
@@ -193,10 +252,29 @@ function mapRouteDecision(value: Record<string, unknown>): RouteDecision {
     defaultReplyIdentity: requireString(value, "default_reply_identity"),
     allowedReplyIdentities: requireStringArray(value, "allowed_reply_identities"),
   };
+  if (value.identity_profile !== undefined) {
+    decision.identityProfile = mapIdentityProfile(value.identity_profile);
+  }
   if (value.disposition !== undefined) {
     decision.disposition = mapRouteDisposition(value.disposition);
   }
   return decision;
+}
+
+function mapIdentityProfile(value: unknown): ResolvedIdentityProfile {
+  if (!isRecord(value)) throw new Error("Rust identity profile must be an object");
+  const senderAdapter = requireString(value, "sender_adapter");
+  if (senderAdapter !== "cloudflare_email_service" && senderAdapter !== "resend") {
+    throw new Error(`invalid Rust sender adapter: ${senderAdapter}`);
+  }
+  return {
+    profileRef: requireString(value, "profile_ref"),
+    publicAddress: requireString(value, "public_address"),
+    displayName: requireString(value, "display_name"),
+    signatureProfileRef: requireString(value, "signature_profile_ref"),
+    signatureText: requireString(value, "signature_text"),
+    senderAdapter,
+  };
 }
 
 function mapRouteDisposition(value: unknown): RouteDisposition {

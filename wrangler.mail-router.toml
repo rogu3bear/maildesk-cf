@@ -11,6 +11,7 @@ send_email = [
 command = "bun run check:mail-worker-bundles"
 
 [vars]
+MAILDESK_ORDINARY_REPLY_MODE = "disabled"
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"
 MAILDESK_INBOUND_RELAY_MODE = "disabled"
 MAILDESK_REPLY_RELAY_MODE = "disabled"

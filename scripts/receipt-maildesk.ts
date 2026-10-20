@@ -9,6 +9,8 @@ interface Receipt {
   status?: {
     local_truth_ok?: boolean;
     edge_ready?: boolean;
+    canary_receipts_verified?: boolean;
+    operational_ready?: boolean;
     mail_ready?: boolean;
     live_evidence_present?: boolean;
   };
@@ -30,6 +32,7 @@ interface ProofPlan {
   };
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
@@ -93,6 +96,8 @@ const summary = {
   local_truth_ok: receipt.status?.local_truth_ok ?? false,
   live_evidence_present: receipt.status?.live_evidence_present ?? false,
   edge_ready: receipt.status?.edge_ready ?? false,
+  canary_receipts_verified: receipt.status?.canary_receipts_verified ?? false,
+  operational_ready: receipt.status?.operational_ready ?? false,
   mail_ready: receipt.status?.mail_ready ?? false,
   domain_count: receipt.rows?.length ?? 0,
   gap_count: receipt.gaps?.length ?? 0,
@@ -197,3 +202,7 @@ function countReadiness(receipt: Receipt, readiness: string): number {
 function relativePath(path: string): string {
   return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 }
+
+}
+
+if (import.meta.main) await main();

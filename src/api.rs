@@ -46,6 +46,30 @@ pub struct RouteHealthSummary {
     pub last_reply_provider_message_id: Option<String>,
     pub last_reply_verified_at: Option<String>,
     pub last_error_code: Option<String>,
+    pub projection_state: String,
+    pub operational_status: Option<RouteOperationalStatus>,
+}
+
+/// The Worker-owned projection classifies operational state. Presentation never
+/// infers readiness by combining legacy inbound/reply status strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteOperationalStatus {
+    pub schema_version: u32,
+    pub projection_revision: String,
+    pub observed_at: String,
+    pub classification: String,
+    pub reason_codes: Vec<String>,
+    pub next_action: String,
+    pub inbound_processing: String,
+    pub ordinary_authority_active: bool,
+    pub ordinary_reply_enabled: bool,
+    pub inbound_outcome: String,
+    pub reply_outcome: String,
+    pub inbox_proof: String,
+    pub reply_proof: String,
+    pub pending_dispatch: usize,
+    pub pending_queue: usize,
+    pub unknown_provider_attempts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

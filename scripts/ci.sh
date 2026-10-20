@@ -28,8 +28,11 @@ step "build closed mail Worker bundles"
 # Direct Bun execution keeps inherited host reservation descriptors intact.
 bun scripts/build-mail-worker-bundles.ts
 
-step "TypeScript typecheck"
-bun node_modules/typescript/bin/tsc --noEmit
+step "strict Worker TypeScript"
+bun node_modules/typescript/bin/tsc -p tsconfig.workers.json --noEmit
+
+step "strict operational-script TypeScript"
+bun node_modules/typescript/bin/tsc -p tsconfig.scripts.json --noEmit
 
 step "bun run build:ui"
 bash scripts/build-ui-edge.sh

@@ -1,3 +1,5 @@
+import { addressParser } from "postal-mime";
+import { messageIdentity } from "./message-identity";
 import type { OperatorAuthenticationResult } from "./contracts";
 import { normalizeMailbox, sha256Hex } from "./inbox-relay";
 
@@ -18,6 +20,7 @@ interface DkimSignature {
 export interface DkimVerificationOptions {
   fetcher?: typeof fetch;
   now?: Date;
+  binding?: { recipient: string; messageId: string };
 }
 
 export async function verifyOperatorDkim(
@@ -36,23 +39,34 @@ export async function verifyOperatorDkim(
   } catch {
     return rejected("malformed_message", verifiedAt);
   }
+  if (parsed.headers.filter((header) => singletonHeader(header.name)).some((header, index, all) =>
+      all.findIndex((other) => other.name === header.name) !== index)) {
+    return rejected("ambiguous_singleton_headers", verifiedAt);
+  }
   const signatures = parsed.headers
     .filter((header) => header.name === "dkim-signature")
     .map((header) => ({ header, tags: parseTags(header.unfoldedValue) }));
+  if (signatures.length > 8) return rejected("dkim_signature_limit", verifiedAt);
+  if (signatures.some((signature) => signature.tags.has("invalid-duplicate-tag"))) return rejected("dkim_duplicate_tag", verifiedAt);
   if (signatures.length === 0) return rejected("dkim_missing", verifiedAt);
 
+  let verifiedWithoutBinding: OperatorAuthenticationResult | null = null;
   let sawIndeterminate = false;
   let lastRejection: OperatorAuthenticationResult | null = null;
   for (const signature of signatures) {
     const result = await verifySignature(parsed.headers, parsed.body, signature, mailbox, operatorDomain, {
       fetcher: options.fetcher ?? fetch,
       now: options.now ?? new Date(),
-      verifiedAt,
+      verifiedAt, binding: options.binding,
     });
-    if (result.status === "verified") return result;
+    if (result.status === "verified") {
+      if (!options.binding || result.ordinaryBinding) return result;
+      verifiedWithoutBinding = result;
+    }
     if (result.status === "indeterminate") sawIndeterminate = true;
     if (result.status === "rejected") lastRejection = result;
   }
+  if (verifiedWithoutBinding) return verifiedWithoutBinding;
   return sawIndeterminate
     ? indeterminate("dkim_key_unavailable", verifiedAt)
     : lastRejection ?? rejected("dkim_verification_failed", verifiedAt);
@@ -64,9 +78,10 @@ async function verifySignature(
   signature: DkimSignature,
   operator: string,
   operatorDomain: string,
-  options: { fetcher: typeof fetch; now: Date; verifiedAt: string },
+  options: { fetcher: typeof fetch; now: Date; verifiedAt: string; binding?: DkimVerificationOptions["binding"] },
 ): Promise<OperatorAuthenticationResult> {
   const { tags } = signature;
+  if (tags.has("l")) return rejected("dkim_partial_body_unsupported", options.verifiedAt);
   const algorithm = tags.get("a")?.toLowerCase();
   const signingDomain = tags.get("d")?.toLowerCase();
   const selector = tags.get("s")?.toLowerCase();
@@ -74,7 +89,10 @@ async function verifySignature(
   if (algorithm !== "rsa-sha256") return rejected("dkim_algorithm_rejected", options.verifiedAt);
   if (!signingDomain || signingDomain !== operatorDomain) return rejected("dkim_domain_unaligned", options.verifiedAt);
   if (!selector || !/^[a-z0-9_-]{1,63}$/.test(selector)) return rejected("dkim_selector_invalid", options.verifiedAt);
+  if (!headers.some((header) => header.name === "from")) return rejected("dkim_from_missing", options.verifiedAt);
   if (!signedHeaders.includes("from")) return rejected("dkim_from_unsigned", options.verifiedAt);
+  const signedFrom = singleHeaderMailbox(headers, "from");
+  if (signedFrom !== operator) return rejected("dkim_from_operator_mismatch", options.verifiedAt);
   const expiration = Number(tags.get("x"));
   if (tags.has("x") && (!Number.isSafeInteger(expiration) || expiration * 1000 <= options.now.getTime())) {
     return rejected("dkim_signature_expired", options.verifiedAt);
@@ -120,6 +138,7 @@ async function verifySignature(
       selectorHash: await sha256Hex(selector),
       alignedOperatorId: await sha256Hex(`operator\0${operator}`),
       verifiedAt: options.verifiedAt,
+      ...await ordinaryBinding(headers, signedHeaders, options.binding),
     };
   } catch {
     return rejected("dkim_key_invalid", options.verifiedAt);
@@ -154,20 +173,25 @@ async function resolveDkimKey(
   const spki = decodeBase64(tags.get("p") ?? "");
   if (!spki || spki.byteLength < 128) throw new Error("dns_key_invalid");
   const ttl = Math.max(0, Math.min(MAX_DNS_TTL_SECONDS, Number(answer.TTL) || 0));
+  if (keyCache.size >= 512) keyCache.clear();
   keyCache.set(name, { expiresAt: nowMs + ttl * 1000, spki: spki.slice(0) });
   return spki;
 }
 
 function parseRawMessage(rawMessage: ArrayBuffer): { headers: RawHeader[]; body: Uint8Array } {
-  const normalized = byteString(new Uint8Array(rawMessage)).replace(/\r?\n/g, "\r\n");
+  if (rawMessage.byteLength > 5 * 1024 * 1024) throw new Error("message_limit");
+  const input = byteString(new Uint8Array(rawMessage));
+  if (/\r(?!\n)/.test(input)) throw new Error("ambiguous_line_endings");
+  const normalized = input.replace(/\r?\n/g, "\r\n");
   const boundary = normalized.indexOf("\r\n\r\n");
   if (boundary < 0) throw new Error("header_boundary_missing");
+  if (boundary > 256 * 1024) throw new Error("header_limit");
   const headerText = normalized.slice(0, boundary);
   const bodyText = normalized.slice(boundary + 4);
   const blocks = headerText.split(/\r\n(?=[^ \t])/);
   const headers = blocks.map((raw): RawHeader => {
     const colon = raw.indexOf(":");
-    if (colon <= 0) throw new Error("header_malformed");
+    if (colon <= 0 || !/^[!#-9;-~]+$/.test(raw.slice(0, colon))) throw new Error("header_malformed");
     return {
       name: raw.slice(0, colon).trim().toLowerCase(),
       raw,
@@ -183,7 +207,8 @@ function parseTags(value: string): Map<string, string> {
     const equals = section.indexOf("=");
     if (equals <= 0) continue;
     const name = section.slice(0, equals).trim().toLowerCase();
-    if (!tags.has(name)) tags.set(name, section.slice(equals + 1).trim());
+    if (tags.has(name)) tags.set("invalid-duplicate-tag", "true");
+    else tags.set(name, section.slice(equals + 1).trim());
   }
   return tags;
 }
@@ -218,12 +243,17 @@ function canonicalizeSignedHeaders(
     const matches = headers.filter((header) => header.name === name);
     const used = consumed.get(name) ?? 0;
     const header = matches[matches.length - 1 - used];
-    if (!header) return null;
     consumed.set(name, used + 1);
+    // RFC 6376 section 5.4 permits a signer to list a header more times than
+    // it exists. The nonexistent occurrence contributes the null string and
+    // thereby prevents an intermediary from injecting another field later.
+    if (!header) continue;
     selected.push(canonicalizeHeader(header.raw, mode));
   }
   const withoutSignature = signature.header.raw.replace(/\bb\s*=\s*([^;\r\n]*(?:\r\n[ \t]+[^;\r\n]*)*)/i, "b=");
-  selected.push(canonicalizeHeader(withoutSignature, mode));
+  // RFC 6376 section 3.7 hashes the DKIM-Signature field itself after
+  // removing b=, but excludes that final field's trailing CRLF.
+  selected.push(canonicalizeHeader(withoutSignature, mode, false));
   return byteArray(selected.join(""));
 }
 
@@ -290,4 +320,34 @@ function byteString(bytes: Uint8Array): string {
 
 function byteArray(value: string): Uint8Array {
   return Uint8Array.from(value, (character) => character.charCodeAt(0));
+}
+
+function singletonHeader(name: string): boolean {
+  return ["from", "sender", "to", "cc", "bcc", "reply-to", "message-id", "subject", "date", "mime-version", "in-reply-to", "references"].includes(name) || name.startsWith("content-");
+}
+
+function singleHeaderMailbox(headers: RawHeader[], name: string): string | null {
+  const values = headers.filter((header) => header.name === name);
+  if (values.length !== 1) return null;
+  const addresses = addressParser(values[0]!.unfoldedValue);
+  return addresses.length === 1 && addresses[0]?.address
+    ? normalizeMailbox(addresses[0].address) || null : null;
+}
+
+async function ordinaryBinding(
+  headers: RawHeader[], signed: string[], binding: DkimVerificationOptions["binding"],
+): Promise<Pick<OperatorAuthenticationResult, "ordinaryBinding" | "ordinaryBindingError">> {
+  if (!binding) return {};
+  const required = new Set(["from", "to", "message-id"]);
+  for (const header of headers) {
+    if (header.name === "subject" || header.name === "mime-version" || header.name.startsWith("content-")) {
+      required.add(header.name);
+    }
+  }
+  if ([...required].some((name) => !signed.includes(name))) return { ordinaryBindingError: "ordinary_consumed_header_unsigned" };
+  const recipient = singleHeaderMailbox(headers, "to");
+  const messageId = headers.find((header) => header.name === "message-id")?.unfoldedValue;
+  if (!recipient || recipient !== normalizeMailbox(binding.recipient)) return { ordinaryBindingError: "ordinary_relay_recipient_mismatch" };
+  if (!messageIdentity(messageId) || messageId !== binding.messageId) return { ordinaryBindingError: "ordinary_message_identity_mismatch" };
+  return { ordinaryBinding: { schemaVersion: 1, recipientSha256: await sha256Hex(recipient), messageIdSha256: await sha256Hex(messageId) } };
 }

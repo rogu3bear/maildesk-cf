@@ -61,6 +61,7 @@ interface PersonalAlias {
 
 type Status = "ok" | "drift" | "missing" | "not_checked";
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
@@ -230,7 +231,7 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
 
 function senderDomainPlanSummary(actions: ProofAction[]): SenderDomainPlanSummary {
   const blocked = actions.filter(
-    (action) => action.kind === "blocked" && action.blocked_by === "sender_domain_not_verified",
+    (action): action is Extract<ProofAction, { kind: "blocked" }> => action.kind === "blocked" && action.blocked_by === "sender_domain_not_verified",
   );
   const ready = blocked.filter(
     (action) =>
@@ -401,6 +402,7 @@ interface SenderDomainRepairCommands {
 }
 
 interface SenderRepairAction extends Partial<SenderDomainRepairCommands> {
+  verify_command?: string;
   blocked_by: Extract<
     ProofAction,
     { kind: "blocked" }
@@ -422,3 +424,7 @@ interface SenderDomainPlanSummary {
   ready: number;
   missing: number;
 }
+
+}
+
+if (import.meta.main) await main();

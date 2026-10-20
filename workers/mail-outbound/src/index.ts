@@ -1,5 +1,5 @@
 import type { MailJob, MaildeskEnv } from "../../shared/contracts";
-import { processQueueBatch } from "../../mail-api/src/index";
+import { processQueueBatch } from "../../shared/outbound/queue";
 
 export default {
   async queue(batch: MessageBatch<MailJob>, env: MaildeskEnv): Promise<void> {

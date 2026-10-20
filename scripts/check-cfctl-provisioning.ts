@@ -94,6 +94,7 @@ interface DesiredAccess {
   };
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const jsonOutput = args.includes("--json");
@@ -797,3 +798,7 @@ function relativePath(path: string): string {
 function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+}
+
+if (import.meta.main) await main();

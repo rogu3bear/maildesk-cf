@@ -1,5 +1,6 @@
 import type { MaildeskEnv } from "./contracts";
-import type { RouterPolicy } from "./router";
+import { projectPolicy, type PolicyProjection, type RouterPolicy } from "./router";
+import { assertPolicyInventory, POLICY_INVENTORY_SQL, type PolicyInventoryRow } from "./policy-inventory";
 
 interface ActivePolicyRow {
   active_policy_sha256: string;
@@ -16,6 +17,7 @@ export interface ActivePolicy {
   policy: RouterPolicy;
   sha256: string;
   r2ObjectKey: string;
+  projection: PolicyProjection;
 }
 
 /** Loads the D1-selected immutable R2 policy and proves all three digests agree. */
@@ -33,8 +35,9 @@ export async function loadActivePolicy(
   // requires the active D1 pointer and its exact immutable R2 object.
   if (env.MAILDESK_OPERATOR_DELIVERY_MODE === "web_desk" && env.MAILDESK_POLICY_JSON) {
     const policy = parsePolicy(env.MAILDESK_POLICY_JSON);
-    return policy
-      ? { policy, sha256: await sha256Hex(env.MAILDESK_POLICY_JSON), r2ObjectKey: "inline:development" }
+    const projection = policy && projectPolicy(policy);
+    return policy && projection?.ok
+      ? { policy, projection: projection.value, sha256: await sha256Hex(env.MAILDESK_POLICY_JSON), r2ObjectKey: "inline:development" }
       : null;
   }
   if (!env.POLICY_STORE) return null;
@@ -59,20 +62,19 @@ export async function loadActivePolicy(
   const bytes = await object.arrayBuffer();
   if ((await sha256Hex(bytes)) !== row.active_policy_sha256) return null;
   const policy = parsePolicy(new TextDecoder().decode(bytes));
-  if (
-    !policy ||
-    Object.keys(policy.domains).length !== Number(row.expected_domain_count) ||
-    policyRouteCount(policy) !== Number(row.expected_route_count)
-  ) return null;
-  return { policy, sha256: row.active_policy_sha256, r2ObjectKey: expectedKey };
-}
-
-function policyRouteCount(policy: RouterPolicy): number {
-  return Object.values(policy.domains).reduce(
-    (count, domain) =>
-      count + Object.keys(domain.role_aliases).length + Object.keys(domain.personal_aliases).length + Number(Boolean(domain.catch_all)),
-    0,
-  );
+  if (!policy) return null;
+  const projection = projectPolicy(policy);
+  if (!projection.ok ||
+      new Set(projection.value.routes.map((route) => route.domain)).size !== Number(row.expected_domain_count) ||
+      projection.value.routes.length !== Number(row.expected_route_count)) return null;
+  try {
+    const inventory = await env.DB.prepare(POLICY_INVENTORY_SQL).all<PolicyInventoryRow>();
+    if (!inventory.success || !inventory.results) return null;
+    assertPolicyInventory(projection.value, inventory.results, row.active_policy_sha256);
+  } catch {
+    return null;
+  }
+  return { policy, projection: projection.value, sha256: row.active_policy_sha256, r2ObjectKey: expectedKey };
 }
 
 function parsePolicy(value: string): RouterPolicy | null {

@@ -5,6 +5,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+/** @param {string} cmd @param {string[]} args */
 function runOrThrow(cmd, args) {
   const proc = Bun.spawnSync([cmd, ...args], {
     stdout: "pipe",
@@ -18,10 +19,12 @@ function runOrThrow(cmd, args) {
   return new TextDecoder().decode(proc.stdout);
 }
 
+/** @param {Uint8Array} buffer */
 function shortHash(buffer) {
   return createHash("sha256").update(buffer).digest("hex").slice(0, 16);
 }
 
+/** @param {string} pkgDir @param {string} outputName @param {string} extension */
 async function removeStaleHashedFiles(pkgDir, outputName, extension) {
   const escaped = outputName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`^${escaped}\\.[a-f0-9]{16}\\.${extension}$`);
@@ -30,9 +33,10 @@ async function removeStaleHashedFiles(pkgDir, outputName, extension) {
   }
 }
 
+/** @param {string} outputName @param {Uint8Array} jsBuffer @param {Uint8Array} wasmBuffer @param {Uint8Array} cssBuffer */
 export function hashUiAssets(outputName, jsBuffer, wasmBuffer, cssBuffer) {
-  const hashes = { wasm: shortHash(wasmBuffer), css: shortHash(cssBuffer) };
-  const names = { wasm: `${outputName}.${hashes.wasm}.wasm`, css: `${outputName}.${hashes.css}.css` };
+  const hashes = { js: "", wasm: shortHash(wasmBuffer), css: shortHash(cssBuffer) };
+  const names = { js: "", wasm: `${outputName}.${hashes.wasm}.wasm`, css: `${outputName}.${hashes.css}.css` };
   const escaped = outputName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const reference = new RegExp(`new URL\\(\\s*(["'])${escaped}(?:_bg)?\\.wasm\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`, "g");
   const js = new TextDecoder().decode(jsBuffer);
@@ -44,6 +48,7 @@ export function hashUiAssets(outputName, jsBuffer, wasmBuffer, cssBuffer) {
 }
 
 async function main() {
+  /** @type {{workspace_root: string, packages: Array<{manifest_path: string, metadata?: {leptos?: {"output-name": string, "site-root": string, "site-pkg-dir": string}}}>}} */
   const metadata = JSON.parse(runOrThrow("cargo", ["metadata", "--no-deps", "--format-version", "1"]));
   const workspaceRoot = metadata.workspace_root;
   const manifestPath = join(workspaceRoot, "Cargo.toml");
@@ -71,7 +76,7 @@ async function main() {
   const wasmBuffer = await readFile(paths.wasm);
   const cssBuffer = await readFile(paths.css);
   const { hashes, names, rewrittenJs } = hashUiAssets(outputName, jsBuffer, wasmBuffer, cssBuffer);
-  for (const extension of ["js", "wasm", "css"]) {
+  for (const extension of /** @type {const} */ (["js", "wasm", "css"])) {
     await removeStaleHashedFiles(pkgDir, outputName, extension);
   }
   await writeFile(join(pkgDir, names.js), rewrittenJs);
@@ -80,7 +85,7 @@ async function main() {
   await rm(paths.js, { force: true });
   await rm(paths.css, { force: true });
 
-  for (const extension of ["js", "wasm", "css"]) {
+  for (const extension of /** @type {const} */ (["js", "wasm", "css"])) {
     if (shortHash(await readFile(join(pkgDir, names[extension]))) !== hashes[extension]) {
       throw new Error(`written ${extension} bytes do not match the asset manifest digest`);
     }

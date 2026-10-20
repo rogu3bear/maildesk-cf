@@ -1,3 +1,4 @@
+import { assertWorkerImportBoundary } from "./worker-import-boundary";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -15,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { build, version as esbuildVersion, type Metafile, type Plugin } from "esbuild";
 import { buildRouterWasm } from "./build-router-wasm";
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const generatedRoot = join(root, "generated");
 const finalWasmDirectory = join(generatedRoot, "router-wasm");
@@ -106,6 +108,7 @@ async function buildRole(
     logLevel: "silent",
   });
   if (!result.metafile) throw new Error(`${role.role} build did not emit a dependency metafile`);
+  assertWorkerImportBoundary(Object.keys(result.metafile.inputs), role.entrypoint);
 
   if (role.router) {
     copyFileSync(
@@ -174,6 +177,9 @@ function closureInputs(metafile: Metafile, wasmDirectory: string, bindRouter: bo
     const absolute = isAbsolute(input) ? input : resolve(root, input);
     const logical = repositoryRelative(absolute);
     paths.set(logical, absolute);
+  }
+  for (const path of ["package.json", "bun.lock", "scripts/build-mail-worker-bundles.ts", "scripts/worker-import-boundary.ts", "scripts/inherited-build-stdio.ts"]) {
+    paths.set(path, join(root, path));
   }
   if (bindRouter) {
     paths.set(
@@ -268,3 +274,7 @@ function exists(path: string): boolean {
     return false;
   }
 }
+
+}
+
+if (import.meta.main) await main();

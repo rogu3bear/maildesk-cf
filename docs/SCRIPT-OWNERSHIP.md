@@ -5,6 +5,11 @@ logging, and keep live mutation behind explicit operator action.
 
 | Script | Class | Owner Contract |
 | --- | --- | --- |
+| `scripts/plugin-inventory-contract.ts` | operator-planning | Prepares bounded, source/target/connector-bound plugin metadata reads with explicit dirty-source informational status. Projects closed schema/migration metadata only; never grants protected release or mail readiness and never executes a request. |
+| `scripts/plugin-runtime-inventory.ts` | proof-helper | Informational schema/version preparation and private binary capture boundaries; never execution or readiness authority. |
+| `scripts/plugin-module-digests.ts` | proof-helper | Portable, body-free decoded module digest projection and synthetic executor checks; no API calls or readiness grant. |
+| `scripts/plugin-private-capture-codec.ts`, `scripts/plugin-private-capture.ts` | proof-helper | Encrypted plugin return and exclusive local capture; temporary public-key transport, no provider execution or readiness grant. |
+| `scripts/compile-policy-change.ts` | operator-planning | Compiles a private, exclusive affected-alias/group review and guarded projection import from exact base/candidate policy and desired-state bytes. Rust owns decisions. Additive migration 0016 rejects a changed base; one qualified atomic import retains review and membership together. Performs no provider work or activation. See `docs/operations/policy-changes.md`. |
 | `scripts/ci.sh` | gated | Full local CI lane for template changes. Runs install, format, lint, typecheck, and template checks. |
 | `scripts/check-template.sh` | gated | Public template hygiene check. Verifies required files, reserved examples, router tests, policy fixture, typecheck, preflight, and verifier. |
 | `scripts/env-file.ts` | helper | Repo-local `.env`/`.dev.vars` loader for scripts that need ignored private values. Must never print secret values or read files outside the repository root. |

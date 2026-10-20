@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+async function main() {
 const root = process.cwd();
 const workerBundle = join(root, "build/index.js");
 const workerWasm = join(root, "build/index_bg.wasm");
@@ -42,3 +43,7 @@ await writeFile(shimPath, [
 ].join("\n"));
 
 console.log("[write-ui-worker-shim] wrote build/_worker.js");
+
+}
+
+if (import.meta.main) await main();

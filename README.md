@@ -144,6 +144,10 @@ The Worker build requires `wasm-pack`, `cargo-leptos`, `worker-build`, the Rust
 locked `wasm-bindgen` ABI and install its matching CLI under ignored local
 tooling state so generated JavaScript and WASM stay compatible.
 
+UI builds pin `cargo-leptos` to `0.3.5` and `worker-build` to `0.7.5`.
+The UI wrapper validates the selected version and prefers the ignored
+`var/cargo-tools/cargo-leptos-0.3.5/bin/cargo-leptos` executable when present.
+
 Current local checks:
 
 ```bash
@@ -319,3 +323,10 @@ bun run check:cfctl-provisioning -- --installed --desired-state config/desired-s
 A passing result establishes the consumed read-capability contract only.
 Mutation planning, account permissions, deployment and mail receipts remain
 separate gates. Production preflight includes this compatibility check.
+
+## Explicit ordinary reply activation
+
+The current [inbox relay contract](docs/architecture/inbox-reply-relay.md) separates
+single-use canary qualification from durable explicit ordinary-route activation.
+Mode switches alone grant no authority. Ordinary processing is disabled by
+default; activation and claim-ID recovery proposals perform no provider effect.

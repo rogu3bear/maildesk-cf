@@ -1700,3 +1700,11 @@ a {
     border: 1px solid CanvasText;
   }
 }
+
+/* Operational reasons and recovery actions must remain readable on narrow screens. */
+.route-health-copy small {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}

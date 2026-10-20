@@ -1,5 +1,10 @@
+import { readRouteStatusProjection, operationalReadinessBlocker, type RouteStatusRead } from "../../shared/route-status-reader";
+import { proofMillis, proofFreshness, deliveryOutcome } from "../../shared/route-status";
+export { proofMillis } from "../../shared/route-status";
 export interface RouteSnapshot {
   route_id: string;
+  status_generation?: number;
+  operational_status?: unknown;
   decision_kind: string;
   health_policy_sha256: string | null;
   inbound_status: string | null;
@@ -36,12 +41,13 @@ export interface CanaryReport {
   reply_proofs_recorded: number;
   probe_due: number;
   issues: Record<string, number>;
+  operational_status: Array<RouteStatusRead & { route_id: string }>;
   // Configuration coverage never sends a provider or mailbox probe.
   provider_inventory_checked: false;
   live_probe_sent: false;
 }
 
-const FAILURES = new Set(["failed", "partial_delivery", "recovery_required"]);
+const FAILURES = new Set(["failed", "partial_delivery", "unknown"]);
 const ROUTE_KINDS = new Set(["role_alias", "personal_alias", "catch_all"]);
 
 export function reportRoutes(
@@ -59,6 +65,7 @@ export function reportRoutes(
   }
   const issues: Record<string, number> = {};
   const issue = (code: string) => { issues[code] = (issues[code] ?? 0) + 1; };
+  const operational: CanaryReport["operational_status"] = [];
   let failed = false;
   let excluded = 0;
   let current = 0;
@@ -77,6 +84,12 @@ export function reportRoutes(
   if (processing.inbound !== "enabled") issue("inbound_processing_disabled");
   if (processing.reply !== "enabled") issue("reply_processing_disabled");
   for (const route of snapshot.routes) {
+    const read = readRouteStatusProjection(route.operational_status, {
+      policySha256: snapshot.policy_sha256, sourceGeneration: route.status_generation, now,
+    });
+    operational.push({ route_id: route.route_id, ...read });
+    const blocker = operationalReadinessBlocker(read);
+    if (blocker) issue(blocker);
     if (route.health_policy_sha256 !== snapshot.policy_sha256) {
       issue("route_health_revision_missing");
       continue;
@@ -94,7 +107,7 @@ export function reportRoutes(
       issue("route_kind_invalid");
       continue;
     }
-    if (FAILURES.has(route.inbound_status ?? "") || FAILURES.has(route.reply_status ?? "")) {
+    if (FAILURES.has(deliveryOutcome(route.inbound_status)) || FAILURES.has(deliveryOutcome(route.reply_status))) {
       failed = true;
       issue("route_delivery_failed");
       continue;
@@ -105,9 +118,10 @@ export function reportRoutes(
     const reply = proofMillis(route.last_reply_verified_at, now);
     if (inbox !== null) inboxRecorded++;
     if (reply !== null) replyRecorded++;
-    if (inbox !== null && now - inbox <= maxProofAgeMs) inboxFresh++;
-    if (reply !== null && now - reply <= maxProofAgeMs) replyFresh++;
-    if (inbox !== null && reply !== null && now - inbox <= maxProofAgeMs && now - reply <= maxProofAgeMs) current++;
+    if (proofFreshness(route.last_inbox_verified_at, now, maxProofAgeMs) === "fresh") inboxFresh++;
+    if (proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh") replyFresh++;
+    if (proofFreshness(route.last_inbox_verified_at, now, maxProofAgeMs) === "fresh" &&
+        proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh") current++;
   }
   const status = failed ? "failed"
     : Object.keys(issues).length ? "unverified"
@@ -128,7 +142,7 @@ export function reportRoutes(
     inbox_proofs_recorded: inboxRecorded,
     reply_proofs_recorded: replyRecorded,
     probe_due: selectProbeRotation(snapshot.routes, now, probeBatch).length,
-    issues,
+    issues, operational_status: operational,
     provider_inventory_checked: false,
     live_probe_sent: false,
   };
@@ -156,14 +170,4 @@ export function selectProbeRotation(routes: RouteSnapshot[], now: number, batch:
     })
     .slice(0, batch)
     .map(({ route_id, reason }) => ({ route_id, reason }));
-}
-
-export function proofMillis(value: string | null, now: number): number | null {
-  if (!value) return null;
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
-    ? value.replace(" ", "T") + "Z" : value;
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)) return null;
-  const timestamp = Date.parse(normalized);
-  if (!Number.isFinite(timestamp) || timestamp > now) return null;
-  return timestamp;
 }

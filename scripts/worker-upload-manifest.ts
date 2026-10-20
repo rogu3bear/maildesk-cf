@@ -9,12 +9,12 @@ import { deploymentArtifactSha256 } from "./worker-runtime-provenance";
 export async function parseWorkerUpload(bytes: Uint8Array, hasAssets: boolean): Promise<LocalModuleUpload> {
   if (bytes.length === 0 || bytes.length > 64 * 1024 * 1024) throw new Error("Worker upload size invalid");
   const firstLine = Buffer.from(bytes).subarray(0, 256).toString("utf8").split("\r\n")[0];
-  if (!/^--[a-zA-Z0-9-]{1,200}$/.test(firstLine)) throw new Error("Worker upload boundary invalid");
+  if (!firstLine || !/^--[a-zA-Z0-9-]{1,200}$/.test(firstLine)) throw new Error("Worker upload boundary invalid");
   const boundary = Buffer.from(firstLine);
   const buffer = Buffer.from(bytes);
   const modules: ModuleDigest[] = [];
   let hasSourceMaps = false;
-  let metadata: Record<string, any> | undefined;
+  let metadata: Record<string, unknown> | undefined;
   let offset = boundary.length;
   let parts = 0;
   const delimiter = Buffer.from(`\r\n${firstLine}`);
@@ -31,8 +31,8 @@ export async function parseWorkerUpload(bytes: Uint8Array, hasAssets: boolean): 
     if (disposition.length !== 1 || types.length > 1 || headers.length !== disposition.length + types.length) {
       throw new Error("Worker upload headers ambiguous");
     }
-    const match = /^Content-Disposition: form-data; name="([^"\r\n]+)"(?:; filename="([^"\r\n]+)")?$/i.exec(disposition[0]);
-    if (!match) throw new Error("Worker upload disposition unsupported");
+    const match = /^Content-Disposition: form-data; name="([^"\r\n]+)"(?:; filename="([^"\r\n]+)")?$/i.exec(disposition[0]!);
+    if (!match || !match[1]) throw new Error("Worker upload disposition unsupported");
     const end = buffer.indexOf(delimiter, headerEnd + 4);
     if (end < 0) throw new Error("Worker upload truncated");
     const content = buffer.subarray(headerEnd + 4, end);
@@ -44,7 +44,7 @@ export async function parseWorkerUpload(bytes: Uint8Array, hasAssets: boolean): 
       }
     } else {
       if (!match[2] || types.length !== 1) throw new Error("Worker upload module must be a typed file");
-      const contentType = types[0].slice(types[0].indexOf(":") + 1).trim();
+      const contentType = types[0]!.slice(types[0]!.indexOf(":") + 1).trim();
       if (contentType === "application/source-map") hasSourceMaps = true;
       else modules.push({ name: match[1], content_type: contentType, byte_count: content.length, sha256: digest(content) });
     }
@@ -66,6 +66,7 @@ export async function buildWorkerUploadManifest(root: string, configPath: string
   }
   const configBytes = readFileSync(config);
   const parsed = Bun.TOML.parse(configBytes.toString("utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Worker config is invalid");
   const before = deploymentArtifactSha256(root, configPath);
   const directory = mkdtempSync(join(tmpdir(), "maildesk-upload-"));
   chmodSync(directory, 0o700);
@@ -81,7 +82,7 @@ export async function buildWorkerUploadManifest(root: string, configPath: string
       throw new Error("Worker upload inputs changed during dry-run");
     }
     if (lstatSync(outfile).size > 64 * 1024 * 1024) throw new Error("Worker upload size invalid");
-    return { ...await parseWorkerUpload(readFileSync(outfile), parsed.assets !== undefined),
+    return { ...await parseWorkerUpload(readFileSync(outfile), "assets" in parsed && parsed.assets !== undefined),
       artifact_sha256: before, config_sha256: digest(configBytes) };
   } finally {
     rmSync(directory, { recursive: true, force: true });

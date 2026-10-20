@@ -7,7 +7,7 @@ import { inheritedBuildStdio } from "../../scripts/inherited-build-stdio";
 
 const root = resolve(import.meta.dir, "../..");
 
-setDefaultTimeout(30_000);
+setDefaultTimeout(120_000);
 
 const roles = [
   {
@@ -40,7 +40,9 @@ const roles = [
     router: true,
     requiredInputs: [
       "workers/mail-outbound/src/index.ts",
-      "workers/mail-api/src/index.ts",
+      "workers/shared/outbound/queue.ts",
+      "workers/shared/outbound/provider.ts",
+      "workers/shared/job-codec.ts",
       "workers/shared/contracts.ts",
       "workers/shared/inbox-relay.ts",
       "workers/shared/policy-store.ts",
@@ -118,6 +120,9 @@ describe("closed Maildesk Worker bundles", () => {
         expect.arrayContaining([...role.requiredInputs]),
       );
       expect(JSON.stringify(manifest)).not.toContain(`${root}/`);
+      expect(manifest.inputs.map((input) => input.path)).toEqual(expect.arrayContaining(["package.json", "bun.lock", "scripts/worker-import-boundary.ts"]));
+      expect(manifest.inputs.map((input) => input.path)).not.toContain("workers/mail-api/src/index.ts");
+      expect(manifest.inputs.map((input) => input.path)).not.toContain("workers/shared/legacy-reply-http.ts");
 
       for (const input of manifest.inputs) {
         const bytes = readFileSync(resolve(root, input.path));

@@ -17,6 +17,10 @@ export interface MaildeskEnv {
   MAILDESK_RELAY_PROCESSING_MODE?: "disabled" | "enabled";
   MAILDESK_INBOUND_RELAY_MODE?: "disabled" | "enabled";
   MAILDESK_REPLY_RELAY_MODE?: "disabled" | "enabled";
+  /** Rollout kill switch: explicit route authority is still independently required. */
+  MAILDESK_ORDINARY_REPLY_MODE?: "disabled" | "enabled";
+  MAILDESK_RUNTIME_ARTIFACTS_SHA256?: string;
+  MAILDESK_TOPOLOGY_SHA256?: string;
   MAILDESK_REPLY_DOMAIN?: string;
   MAILDESK_REPLY_TOKEN_TTL_DAYS?: string;
   MAILDESK_SPOOL_RETENTION_DAYS?: string;
@@ -84,6 +88,9 @@ export interface OperatorAuthenticationResult {
   alignedOperatorId?: string;
   boundedErrorCode?: string;
   verifiedAt: string;
+  /** Present only when one accepted DKIM signature binds the ordinary message. */
+  ordinaryBinding?: { schemaVersion: 1; recipientSha256: string; messageIdSha256: string };
+  ordinaryBindingError?: string;
 }
 
 export interface InboundEmailReceivedJob {
@@ -150,8 +157,18 @@ export interface InboundDeliveryResultJob {
 }
 
 export interface InboxReplyReceivedJob {
+  schemaVersion?: 2;
+  payloadVersion?: 1 | 2;
+  admissionKind?: "canary" | "ordinary";
+  activationId?: string;
   kind: "inbox_reply_received";
   attemptId: string;
+  admissionId: string;
+  transactionSha256: string;
+  attemptSha256: string;
+  claimedPayloadSha256: string;
+  desiredStateSha256: string;
+  identityProfileSha256: string;
   relayId: string;
   operator: string;
   operatorMessageId: string;
@@ -178,12 +195,20 @@ export type MailAttachmentPayload =
     };
 
 export interface OutboundReplyRequestedJob {
+  schemaVersion?: 2;
+  payloadVersion?: 1 | 2;
+  admissionKind?: "canary" | "ordinary";
+  activationId?: string;
   kind: "outbound_reply_requested";
   messageId: string;
   threadId: string;
   operator: string;
   envelopeTo: string;
   fromIdentity: string;
+  fromDisplayName?: string;
+  identityProfileRef?: string;
+  signatureProfileRef?: string;
+  senderAdapter?: "cloudflare_email_service" | "resend";
   to: string[];
   cc?: string[];
   bcc?: string[];
@@ -196,6 +221,13 @@ export interface OutboundReplyRequestedJob {
   requestedIdentity?: string;
   /** Active policy revision that authorized an inbox-relay provider send. */
   policySha256?: string;
+  /** Exact controller admission consumed by this one inbox-relay transaction. */
+  admissionId?: string;
+  transactionSha256?: string;
+  attemptSha256?: string;
+  claimedPayloadSha256?: string;
+  desiredStateSha256?: string;
+  identityProfileSha256?: string;
   relayAttemptId?: string;
   relaySpoolKey?: string;
   queuedAt: string;

@@ -42,7 +42,7 @@ test("routing policy v2 delivers same-local-part mailbox routes without STAR", a
   });
 });
 
-test("routing policy v2 durably admits same-local-part work queues without STAR", async () => {
+test("internal MAIL_JOBS does not qualify a work destination; the declared mailbox fallback wins", async () => {
   const effects: string[] = [];
   const db = new D1Recorder(undefined, effects);
   const rawMail = new R2Recorder(effects);
@@ -64,17 +64,13 @@ test("routing policy v2 durably admits same-local-part work queues without STAR"
   } as unknown as Env, new TestExecutionContext() as unknown as ExecutionContext);
 
   expect(message.rejectedWith).toBeNull();
-  expect(message.forwardedTo).toEqual([]);
-  expect(effects[0]).toBe("r2:put");
+  expect(message.forwardedTo).toEqual(["operator@example.org"]);
+  expect(effects[0]).toBe("mailbox:operator@example.org");
   expect(mailJobs.jobs).toHaveLength(1);
-  expect(mailJobs.jobs[0]).toMatchObject({
-    kind: "inbound_work_item_received",
-    queueRef: "support-intake",
-    routeRef: "route:example.net:security",
-    destinationRef: "queue:support",
-    accountableRef: "team:support",
+  expect(mailJobs.jobs[0]).toMatchObject({ kind: "inbound_email_received" });
+  expect(db.auditDetail("route_disposition_selected")).toMatchObject({
+    destinationRef: "mailbox:support", fallbackUsed: true, targetKind: "mailbox",
   });
-  expect(JSON.stringify(mailJobs.jobs[0])).not.toContain("private-work-item-body");
   expect(JSON.stringify(db.auditDetail("route_disposition_selected"))).not.toContain("private-work-item-body");
 });
 
@@ -131,9 +127,59 @@ test("routing policy v2 rejects fallback cycles before every Worker side effect"
     MAILDESK_POLICY_JSON: JSON.stringify(policy),
   } as unknown as Env, new TestExecutionContext() as unknown as ExecutionContext);
 
-  expect(message.rejectedWith).toContain("destination fallback cycle includes: mailbox:support");
+  // Whole-policy validation rejects before any route is exposed.
+  expect(message.rejectedWith).toBe("maildesk policy unavailable");
   expect(message.forwardedTo).toEqual([]);
   expect(effects).toEqual([]);
+});
+
+test("routing policy v2 rejects invalid closed shapes before every Worker side effect", async () => {
+  const mutations: Array<[string, (policy: any) => void]> = [
+    ["unsupported version", (policy) => { policy.policy_version = 3; }],
+    ["unknown accountable", (policy) => {
+      policy.destinations["mailbox:security"].accountable_ref = "team:missing";
+    }],
+    ["unknown destination", (policy) => {
+      policy.domains["example.com"].role_aliases.security.destination_ref = "mailbox:missing";
+    }],
+    ["unknown fallback", (policy) => {
+      policy.destinations["queue:support"].fallback_destination_ref = "mailbox:missing";
+    }],
+    ["empty mailbox", (policy) => {
+      policy.destinations["mailbox:security"].target.recipients = [];
+    }],
+    ["invalid mailbox", (policy) => {
+      policy.destinations["mailbox:security"].target.recipients = ["operator a@example.com"];
+    }],
+    ["blank queue", (policy) => {
+      policy.destinations["queue:support"].target.queue_ref = "  ";
+    }],
+  ];
+
+  for (const [caseName, mutate] of mutations) {
+    const effects: string[] = [];
+    const policy = JSON.parse(routingPolicyV2);
+    mutate(policy);
+    const message = new TestEmailMessage({
+      from: "sender@example.org",
+      to: "security@example.com",
+      headers: { "message-id": `<invalid-${caseName.replaceAll(" ", "-")}@example.org>` },
+      raw: "From: sender@example.org\r\nTo: security@example.com\r\n\r\ninvalid",
+      effects,
+    });
+
+    await mailRouterWorker.email(message as unknown as ForwardableEmailMessage, {
+      DB: new D1Recorder(undefined, effects),
+      RAW_MAIL: new R2Recorder(effects),
+      MAIL_JOBS: new QueueRecorder(effects),
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: JSON.stringify(policy),
+    } as unknown as Env, new TestExecutionContext() as unknown as ExecutionContext);
+
+    expect(message.rejectedWith, caseName).toBeTruthy();
+    expect(message.forwardedTo, caseName).toEqual([]);
+    expect(effects, caseName).toEqual([]);
+  }
 });
 
 test("accepted inbound role alias persists D1 metadata", async () => {
@@ -190,7 +236,6 @@ test("accepted inbound role alias persists D1 metadata", async () => {
 
   const allBinds = db.statements.flatMap((statement) => statement.binds);
   expect(allBinds).toContain("example.com");
-  expect(allBinds).toContain("route:example.com:founders");
   expect(allBinds).toContain("founders@example.com");
   expect(allBinds).toContain("sender@example.net");
   expect(allBinds).toContain("<message-1@example.net>");
@@ -291,6 +336,103 @@ test("distinct attacker-controlled Message-IDs cannot collapse to one thread id"
   const threadIds = db.bindsFor("INSERT INTO threads").map((values) => values[0]);
   expect(threadIds).toHaveLength(4);
   expect(new Set(threadIds).size).toBe(4);
+});
+
+test("an authenticated reply reference keeps a sender on the existing route thread", async () => {
+  const db = new D1Recorder(undefined, new Map([
+    ["<outbound-1@example.com>|route:example.com:founders|sender@example.net", "thread:existing"],
+  ]));
+  const env = {
+    DB: db,
+    RAW_MAIL: new R2Recorder(),
+    MAIL_JOBS: new QueueRecorder(),
+    MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+    MAILDESK_POLICY_JSON: JSON.stringify({
+      default_reply_mode: "role_first",
+      domains: {
+        "example.com": {
+          role_aliases: {
+            founders: {
+              operators: ["operator-a@example.com"],
+              reply_identity: "founders@example.com",
+              allowed_reply_identities: [],
+            },
+          },
+          personal_aliases: {},
+        },
+      },
+    }),
+  } as unknown as Env;
+
+  await mailRouterWorker.email(
+    new TestEmailMessage({
+      from: "sender@example.net",
+      to: "founders@example.com",
+      headers: {
+        "message-id": "<follow-up@example.net>",
+        "in-reply-to": "<outbound-1@example.com>",
+        references: "<original@example.net> <outbound-1@example.com>",
+      },
+      raw: "Message-ID: <follow-up@example.net>\r\nIn-Reply-To: <outbound-1@example.com>\r\n\r\nhello",
+    }) as unknown as ForwardableEmailMessage,
+    env,
+    new TestExecutionContext() as unknown as ExecutionContext,
+  );
+
+  expect(db.bindsFor("SELECT m.thread_id")[0]).toEqual([
+    "<outbound-1@example.com>",
+    "route:example.com:founders",
+    "sender@example.net",
+  ]);
+  expect(db.bindsFor("INSERT INTO threads")[0]?.[0]).toBe("thread:existing");
+  expect(db.bindsFor("INSERT INTO messages")[0]?.[1]).toBe("thread:existing");
+});
+
+test("a reply reference cannot cross sender or route authority", async () => {
+  const db = new D1Recorder(undefined, new Map([
+    ["<known-outbound@example.com>|route:example.com:founders|sender@example.net", "thread:existing"],
+  ]));
+  const message = new TestEmailMessage({
+    from: "attacker@example.net",
+    to: "founders@example.com",
+    headers: {
+      "message-id": "<attacker-follow-up@example.net>",
+      "in-reply-to": "<known-outbound@example.com>",
+    },
+    raw: "Message-ID: <attacker-follow-up@example.net>\r\n\r\nhello",
+  });
+
+  await mailRouterWorker.email(
+    message as unknown as ForwardableEmailMessage,
+    {
+      DB: db,
+      RAW_MAIL: new R2Recorder(),
+      MAIL_JOBS: new QueueRecorder(),
+      MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: JSON.stringify({
+        default_reply_mode: "role_first",
+        domains: {
+          "example.com": {
+            role_aliases: {
+              founders: {
+                operators: ["operator-a@example.com"],
+                reply_identity: "founders@example.com",
+                allowed_reply_identities: [],
+              },
+            },
+            personal_aliases: {},
+          },
+        },
+      }),
+    } as unknown as Env,
+    new TestExecutionContext() as unknown as ExecutionContext,
+  );
+
+  expect(db.bindsFor("INSERT INTO threads")[0]?.[0]).not.toBe("thread:existing");
+  expect(db.bindsFor("SELECT m.thread_id")[0]?.slice(1)).toEqual([
+    "route:example.com:founders",
+    "attacker@example.net",
+  ]);
 });
 
 test("inbound routing rejects mailbox whitespace through the Rust policy boundary", async () => {
@@ -421,15 +563,24 @@ interface RecordedStatement {
 
 class D1Recorder {
   readonly statements: RecordedStatement[] = [];
+  private readonly threadsByHeader: Map<string, string>;
+  private readonly effects?: string[];
 
   constructor(
     private readonly failOnSql?: string,
-    private readonly effects?: string[],
-  ) {}
+    threadsOrEffects: Map<string, string> | string[] = new Map<string, string>(),
+    effects?: string[],
+  ) {
+    this.threadsByHeader = threadsOrEffects instanceof Map
+      ? threadsOrEffects
+      : new Map<string, string>();
+    this.effects = Array.isArray(threadsOrEffects) ? threadsOrEffects : effects;
+  }
 
   prepare(sql: string): D1PreparedStatement {
     const statements = this.statements;
     const failOnSql = this.failOnSql;
+    const threadsByHeader = this.threadsByHeader;
     const effects = this.effects;
     const record: RecordedStatement = { sql, binds: [] };
     const prepared = {
@@ -447,6 +598,10 @@ class D1Recorder {
       },
       async first() {
         statements.push(record);
+        if (sql.includes("SELECT m.thread_id")) {
+          const threadId = threadsByHeader.get(record.binds.map(String).join("|"));
+          return threadId ? { thread_id: threadId } : null;
+        }
         return { ok: 1 };
       },
     };

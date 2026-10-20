@@ -1,3 +1,4 @@
+import { readRouteStatusProjection, operationalReadinessBlocker, type RouteStatusRead } from "../workers/shared/route-status-reader";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -36,6 +37,8 @@ const GOLDEN_THREAD_PLANES = new Set<Plane>([
   "privacy_proven",
 ]);
 const SINK_NOT_APPLICABLE_PLANES = new Set<Plane>([
+  "inbound_provider_accepted",
+  "inbox_received",
   "reply_authorized",
   "outbound_provider_accepted",
   "recipient_delivered",
@@ -130,6 +133,8 @@ interface RouteEvidence {
   domain_sha256: string;
   golden_thread_sha256: string;
   planes: Partial<Record<Plane, PlaneReceipt>>;
+  status_generation?: unknown;
+  operational_status?: unknown;
 }
 
 interface ValidatedInput {
@@ -173,6 +178,7 @@ export interface FleetReadinessReport {
     transaction_coherent: boolean;
     all_required_planes_proven_and_fresh: boolean;
     full_coverage_proven: boolean;
+    operational_current: boolean;
   };
   counts: {
     configured: number;
@@ -205,6 +211,7 @@ export interface FleetReadinessReport {
     route_kind: RouteKind;
     delivery_contract: DeliveryContract;
     status: "ready" | "blocked" | "killed";
+    operational_status: RouteStatusRead;
     planes: Record<Plane, {
       state: PlaneState;
       source: string | null;
@@ -213,11 +220,11 @@ export interface FleetReadinessReport {
       fresh: boolean | null;
       blocker_code: string | null;
     }>;
-    first_blocker: { plane: Plane; code: string } | null;
+    first_blocker: { plane: Plane | "operational"; code: string } | null;
   }>;
   first_blocker:
     | { plane: "enrollment" | "configured"; code: string; domain_sha256?: string }
-    | { route_sha256: string; plane: Plane; code: string }
+    | { route_sha256: string; plane: Plane | "operational"; code: string }
     | null;
 }
 
@@ -358,7 +365,12 @@ export function compileFleetReadiness(
         plane.state === "failed" && plane.blocker_code !== null && KILL_BLOCKER_CODES.has(plane.blocker_code)
       );
       if (applyGoldenThreadChronology(planes, evidence)) receiptsCoherent = false;
-      const firstBlocker = firstRouteBlocker(planes);
+      const operational = readRouteStatusProjection(evidence?.operational_status, {
+        policySha256: input.binding.policy_sha256, sourceGeneration: evidence?.status_generation, now: evaluatedAtMs,
+      });
+      const operationalBlocker = operationalReadinessBlocker(operational);
+      const firstBlocker = firstRouteBlocker(planes) ?? (operationalBlocker === null ? null
+        : { plane: "operational" as const, code: operationalBlocker });
       const killed = identityKill;
       return {
         route_sha256: route.route_sha256,
@@ -366,7 +378,7 @@ export function compileFleetReadiness(
         route_kind: route.route_kind,
         delivery_contract: route.delivery_contract,
         status: killed ? "killed" as const : firstBlocker === null ? "ready" as const : "blocked" as const,
-        planes,
+        planes, operational_status: operational,
         first_blocker: firstBlocker,
       };
     })
@@ -381,7 +393,7 @@ export function compileFleetReadiness(
   const domains = input.enrollment.domains
     .map((domain) => {
       const requiredRouteCount = routeCounts.get(domain.domain_sha256) ?? 0;
-      const status = domain.decision === "enrolled" ? "required"
+      const status: FleetReadinessReport["domains"][number]["status"] = domain.decision === "enrolled" ? "required"
         : domain.decision === "scheduled_for_migration" ? "scheduled"
         : domain.decision === "pending_owner_decision" ? "pending" : "excluded";
       const firstBlocker = domain.decision === "enrolled" && requiredRouteCount === 0
@@ -405,7 +417,9 @@ export function compileFleetReadiness(
   const allEnrolledRoutesPresent = allEnrolledDomainsHaveRoutes && allEvidenceRowsPresent;
   const transactionCoherent = inventoryBindingCoherent && enrollmentBindingCoherent && routeSetAttested && receiptsCoherent;
   const allRequiredPlanesProvenAndFresh = routes.length > 0 &&
-    routes.every((route) => route.status === "ready");
+    routes.every((route) => Object.values(route.planes).every((plane) =>
+      plane.state === "proven" || plane.state === "not_applicable"));
+  const operationalCurrent = routes.length > 0 && routes.every((route) => operationalReadinessBlocker(route.operational_status) === null);
   const hasUnresolvedEnrollment = input.enrollment.domains.some((domain) =>
     domain.decision === "scheduled_for_migration" || domain.decision === "pending_owner_decision"
   );
@@ -416,7 +430,7 @@ export function compileFleetReadiness(
     routeSetAttested &&
     allEnrolledRoutesPresent &&
     transactionCoherent &&
-    allRequiredPlanesProvenAndFresh;
+    allRequiredPlanesProvenAndFresh && operationalCurrent;
 
   const enrollmentBlocker = firstEnrollmentBlocker(input, domains, enrollmentBindingCoherent);
   const configuredBlocker = enrollmentBlocker === null
@@ -454,7 +468,7 @@ export function compileFleetReadiness(
       all_enrolled_routes_present: allEnrolledRoutesPresent,
       transaction_coherent: transactionCoherent,
       all_required_planes_proven_and_fresh: allRequiredPlanesProvenAndFresh,
-      full_coverage_proven: fullCoverageProven,
+      full_coverage_proven: fullCoverageProven, operational_current: operationalCurrent,
     },
     counts: {
       configured: routes.filter((route) => route.planes.configured.state === "proven").length,
@@ -722,7 +736,8 @@ function firstFleetRouteBlocker(
     code: route.first_blocker.code,
   }] : []);
   candidates.sort((left, right) => {
-    const planeOrder = FLEET_READINESS_PLANES.indexOf(left.plane) - FLEET_READINESS_PLANES.indexOf(right.plane);
+    const order: readonly string[] = [...FLEET_READINESS_PLANES, "operational"];
+    const planeOrder = order.indexOf(left.plane) - order.indexOf(right.plane);
     return planeOrder !== 0 ? planeOrder : left.route_sha256.localeCompare(right.route_sha256);
   });
   return candidates[0] ?? null;
@@ -982,7 +997,7 @@ function validateRouteEvidence(value: unknown, routes: RouteDefinition[]): Route
   const routeByDigest = new Map(routes.map((route) => [route.route_sha256, route]));
   const entries = value.map((entryValue, index) => {
     const entry = record(entryValue, `route_evidence[${index}]`);
-    exactKeys(entry, ["schema_version", "route_sha256", "domain_sha256", "golden_thread_sha256", "planes"], `route_evidence[${index}]`);
+    exactKeys(entry, ["schema_version", "route_sha256", "domain_sha256", "golden_thread_sha256", "planes", "status_generation", "operational_status"], `route_evidence[${index}]`);
     if (entry.schema_version !== 1) throw new Error(`route_evidence[${index}] schema_version must be 1`);
     requireDigest(entry.route_sha256, `route_evidence[${index}].route_sha256`);
     requireDigest(entry.domain_sha256, `route_evidence[${index}].domain_sha256`);
@@ -1002,6 +1017,7 @@ function validateRouteEvidence(value: unknown, routes: RouteDefinition[]): Route
       route_sha256: entry.route_sha256 as string,
       domain_sha256: entry.domain_sha256 as string,
       golden_thread_sha256: entry.golden_thread_sha256 as string,
+      status_generation: entry.status_generation, operational_status: entry.operational_status,
       planes,
     };
   });

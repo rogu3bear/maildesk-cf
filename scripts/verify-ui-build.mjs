@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+async function main() {
 const root = process.cwd();
 const required = [
   "build/_worker.js",
@@ -69,3 +70,7 @@ if (!accessAdapter.includes('headers.set("x-maildesk-access-validated", "1")')) 
 }
 
 console.log("[verify-ui-build] hashed assets and Worker shim verified");
+
+}
+
+if (import.meta.main) await main();

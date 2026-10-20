@@ -1,13 +1,14 @@
+import { projectPolicy, type RouterPolicy } from "../workers/shared/router";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-type InboundProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
-type DecisionKind = "role_alias" | "personal_alias" | "catch_all" | "sink";
+export type InboundProvider = "cloudflare_email_routing" | "google_workspace" | "external" | "excluded";
+export type DecisionKind = "role_alias" | "personal_alias" | "catch_all" | "sink";
 
-interface DesiredState {
+export interface RouteProjectionDesiredState {
   storage: { d1_database: string; d1_preview_database?: string };
   domains: Array<{
     name: string;
@@ -18,35 +19,9 @@ interface DesiredState {
   }>;
 }
 
-interface RouterPolicy {
-  policy_version?: 1 | 2;
-  destinations?: Record<string, {
-    accountable_ref: string;
-    target:
-      | { kind: "mailbox"; recipients: string[] }
-      | { kind: "work_queue"; queue_ref: string };
-    fallback_destination_ref?: string;
-  }>;
-  domains: Record<string, {
-    role_aliases: Record<string, {
-      operators?: string[];
-      destination_ref?: string;
-      reply_identity: string;
-      sink?: boolean;
-    }>;
-    personal_aliases: Record<string, {
-      operator: string;
-      reply_identity: string;
-    }>;
-    catch_all?: {
-      operators: string[];
-      reply_identity: string;
-      sink?: boolean;
-    };
-  }>;
-}
+export type RouteProjectionPolicy = RouterPolicy;
 
-interface ProjectedRoute {
+export interface ProjectedRoute {
   domain: string;
   localPart: string;
   decisionKind: DecisionKind;
@@ -57,65 +32,10 @@ interface ProjectedRoute {
   initialStatus: "local_policy_valid" | "declared" | "intentionally_excluded";
 }
 
-const root = resolve(import.meta.dir, "..");
-const args = process.argv.slice(2);
-const policyPath = resolve(root, argValue("--policy") ?? defaultPath("config/policy.local.json", "config/policy.example.json"));
-const desiredStatePath = resolve(
-  root,
-  argValue("--desired-state") ?? defaultPath("config/desired-state.local.json", "config/desired-state.example.json"),
-);
-const executeLocal = args.includes("--local");
-
-if (args.includes("--remote")) {
-  fail("remote policy sync is a protected action; use a reviewed cfctl plan instead");
-}
-
-const policyBytes = readFile(policyPath, "policy");
-const desiredStateBytes = readFile(desiredStatePath, "desired state");
-const policy = parseJson<RouterPolicy>(policyBytes, "policy");
-const desired = parseJson<DesiredState>(desiredStateBytes, "desired state");
-const routes = projectRoutes(policy, desired);
-const policySha256 = sha256(policyBytes);
-const desiredStateSha256 = sha256(desiredStateBytes);
-const policyR2Key = `config/policy/${policySha256}.json`;
-const { sql: projection, projectionSha256 } = projectionSql(
-  routes,
-  policySha256,
-  policyR2Key,
-  desiredStateSha256,
-);
-
-const outputPath = argValue("--out");
-if (outputPath) {
-  writeFileSync(resolve(outputPath), projection, { encoding: "utf8", mode: 0o600 });
-  chmodSync(resolve(outputPath), 0o600);
-}
-
-if (executeLocal) {
-  executeLocalProjection(
-    projection,
-    argValue("--database") ?? desired.storage.d1_database,
-    argValue("--config") ?? "wrangler.mail-router.toml",
-  );
-}
-
-console.log(JSON.stringify({
-  ok: true,
-  mode: executeLocal ? "local" : "dry_run",
-  domains: new Set(routes.map((route) => route.domain)).size,
-  routes: routes.length,
-  role_routes: routes.filter((route) => route.decisionKind === "role_alias").length,
-  personal_routes: routes.filter((route) => route.decisionKind === "personal_alias").length,
-  catch_all_routes: routes.filter((route) => route.decisionKind === "catch_all").length,
-  sink_routes: routes.filter((route) => route.decisionKind === "sink").length,
-  policy_sha256: policySha256,
-  desired_state_sha256: desiredStateSha256,
-  policy_r2_key: policyR2Key,
-  projection_sha256: projectionSha256,
-  projection_bytes: Buffer.byteLength(projection, "utf8"),
-}, null, 2));
-
-function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRoute[] {
+export function projectRoutes(
+  policy: RouteProjectionPolicy,
+  desired: RouteProjectionDesiredState,
+): ProjectedRoute[] {
   if (!policy.domains || Object.keys(policy.domains).length === 0) fail("policy must contain domains");
   if (!Array.isArray(desired.domains) || desired.domains.length === 0) fail("desired state must contain domains");
   const desiredByDomain = new Map(desired.domains.map((domain) => [normalizeDomain(domain.name), domain]));
@@ -135,41 +55,17 @@ function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRo
       fail(`${domain} catch_all must match between desired state and private policy`);
     }
 
-    for (const [rawLocalPart, route] of Object.entries(domainPolicy.role_aliases)) {
-      const localPart = normalizeLocalPart(rawLocalPart);
-      const decisionKind: DecisionKind = route.sink ? "sink" : "role_alias";
-      routes.push(projectedRoute(
-        domain,
-        localPart,
-        decisionKind,
-        "role",
-        desiredDomain.inbound_mx_provider,
-        route.sink ? [] : routeOperators(policy, route),
-        route.reply_identity,
-      ));
-    }
-    for (const [rawLocalPart, route] of Object.entries(domainPolicy.personal_aliases)) {
-      routes.push(projectedRoute(
-        domain,
-        normalizeLocalPart(rawLocalPart),
-        "personal_alias",
-        "personal",
-        desiredDomain.inbound_mx_provider,
-        [route.operator],
-        route.reply_identity,
-      ));
-    }
-    if (domainPolicy.catch_all) {
-      routes.push(projectedRoute(
-        domain,
-        "*",
-        domainPolicy.catch_all.sink ? "sink" : "catch_all",
-        "role",
-        desiredDomain.inbound_mx_provider,
-        domainPolicy.catch_all.sink ? [] : domainPolicy.catch_all.operators,
-        domainPolicy.catch_all.reply_identity,
-      ));
-    }
+  }
+  const projection = projectPolicy(policy);
+  if (!projection.ok) fail(`Rust policy projection rejected: ${projection.error.kind}`);
+  for (const route of projection.value.routes) {
+    const desiredDomain = desiredByDomain.get(route.domain);
+    if (!desiredDomain) fail(`policy domain is missing from desired state: ${route.domain}`);
+    routes.push(projectedRoute(
+      route.domain, route.localPart, route.routeKind,
+      route.routeKind === "personal_alias" ? "personal" : "role",
+      desiredDomain.inbound_mx_provider, route.operators, route.defaultReplyIdentity,
+    ));
   }
 
   for (const desiredDomain of desired.domains) {
@@ -183,26 +79,6 @@ function projectRoutes(policy: RouterPolicy, desired: DesiredState): ProjectedRo
   return routes.sort((a, b) => `${a.domain}\0${a.localPart}`.localeCompare(`${b.domain}\0${b.localPart}`));
 }
 
-function routeOperators(
-  policy: RouterPolicy,
-  route: { operators?: string[]; destination_ref?: string },
-): string[] {
-  if (route.destination_ref) {
-    const seen = new Set<string>();
-    let destinationRef: string | undefined = route.destination_ref;
-    while (destinationRef) {
-      if (seen.has(destinationRef)) fail(`destination fallback cycle includes: ${destinationRef}`);
-      seen.add(destinationRef);
-      const destination = policy.destinations?.[destinationRef];
-      if (!destination) fail(`destination is not configured: ${destinationRef}`);
-      if (destination.target.kind === "mailbox") return destination.target.recipients;
-      destinationRef = destination.fallback_destination_ref;
-    }
-    fail(`destination chain has no mailbox projection: ${route.destination_ref}`);
-  }
-  return route.operators ?? [];
-}
-
 function projectedRoute(
   domain: string,
   localPart: string,
@@ -212,8 +88,8 @@ function projectedRoute(
   rawOperators: string[],
   rawReplyIdentity: string,
 ): ProjectedRoute {
-  const operators = [...new Set(rawOperators.map(normalizeMailbox))].sort();
-  const replyIdentity = normalizeMailbox(rawReplyIdentity);
+  const operators = rawOperators;
+  const replyIdentity = rawReplyIdentity;
   if (decisionKind !== "sink" && operators.length === 0) fail(`${localPart}@${domain} has no operator destination`);
   const initialStatus = decisionKind === "sink" || provider === "excluded"
     ? "intentionally_excluded"
@@ -223,7 +99,7 @@ function projectedRoute(
   return { domain, localPart, decisionKind, storageKind, desiredProvider: provider, operators, replyIdentity, initialStatus };
 }
 
-function projectionSql(
+export function projectionSql(
   routes: ProjectedRoute[],
   policySha256: string,
   policyR2Key: string,
@@ -283,7 +159,7 @@ function executeLocalProjection(sqlText: string, database: string, config: strin
     const result = spawnSync(
       "bunx",
       ["wrangler", "d1", "execute", database, "--local", "--config", config, "--file", file],
-      { cwd: root, encoding: "utf8", env: process.env },
+      { cwd: resolve(import.meta.dir, ".."), encoding: "utf8", env: process.env },
     );
     if (result.status !== 0) {
       fail(`local D1 policy sync failed: ${boundedError(result.stderr || result.stdout)}`);
@@ -315,16 +191,12 @@ function normalizeLocalPart(value: string): string {
   return localPart;
 }
 
-function normalizeMailbox(value: string): string {
-  const mailbox = value.trim().toLowerCase();
-  const [localPart, domain, extra] = mailbox.split("@");
-  if (!localPart || !domain || extra || /[\s\x00-\x1f\x7f]/.test(mailbox)) fail("mailbox is invalid");
-  normalizeDomain(domain);
-  return mailbox;
-}
-
 function stableId(prefix: string, ...parts: string[]): string {
   return [prefix, ...parts.map((value) => encodeURIComponent(value.trim().toLowerCase()))].join(":");
+}
+
+export function routeReference(route: Pick<ProjectedRoute, "domain" | "localPart">): string {
+  return stableId("route", route.domain, route.localPart);
 }
 
 function sql(value: string): string {
@@ -351,7 +223,7 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function defaultPath(local: string, example: string): string {
+function defaultPath(root: string, local: string, example: string): string {
   try {
     readFileSync(resolve(root, local));
     return local;
@@ -360,7 +232,7 @@ function defaultPath(local: string, example: string): string {
   }
 }
 
-function argValue(name: string): string | undefined {
+function argValue(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
 }
@@ -370,6 +242,75 @@ function boundedError(value: string): string {
 }
 
 function fail(message: string): never {
-  console.error(`fail: ${message}`);
-  process.exit(1);
+  throw new Error(message);
 }
+
+function main(): void {
+  const root = resolve(import.meta.dir, "..");
+  const args = process.argv.slice(2);
+  try {
+    const policyPath = resolve(
+      root,
+      argValue(args, "--policy") ??
+        defaultPath(root, "config/policy.local.json", "config/policy.example.json"),
+    );
+    const desiredStatePath = resolve(
+      root,
+      argValue(args, "--desired-state") ??
+        defaultPath(root, "config/desired-state.local.json", "config/desired-state.example.json"),
+    );
+    const executeLocal = args.includes("--local");
+    if (args.includes("--remote")) {
+      fail("remote policy sync is a protected action; use a reviewed cfctl plan instead");
+    }
+
+    const policyBytes = readFile(policyPath, "policy");
+    const desiredStateBytes = readFile(desiredStatePath, "desired state");
+    const policy = parseJson<RouteProjectionPolicy>(policyBytes, "policy");
+    const desired = parseJson<RouteProjectionDesiredState>(desiredStateBytes, "desired state");
+    const routes = projectRoutes(policy, desired);
+    const policySha256 = sha256(policyBytes);
+    const desiredStateSha256 = sha256(desiredStateBytes);
+    const policyR2Key = `config/policy/${policySha256}.json`;
+    const { sql: projection, projectionSha256 } = projectionSql(
+      routes,
+      policySha256,
+      policyR2Key,
+      desiredStateSha256,
+    );
+
+    const outputPath = argValue(args, "--out");
+    if (outputPath) {
+      writeFileSync(resolve(outputPath), projection, { encoding: "utf8", mode: 0o600 });
+      chmodSync(resolve(outputPath), 0o600);
+    }
+    if (executeLocal) {
+      executeLocalProjection(
+        projection,
+        argValue(args, "--database") ?? desired.storage.d1_database,
+        argValue(args, "--config") ?? "wrangler.mail-router.toml",
+      );
+    }
+
+    console.log(JSON.stringify({
+      ok: true,
+      mode: executeLocal ? "local" : "dry_run",
+      domains: new Set(routes.map((route) => route.domain)).size,
+      routes: routes.length,
+      role_routes: routes.filter((route) => route.decisionKind === "role_alias").length,
+      personal_routes: routes.filter((route) => route.decisionKind === "personal_alias").length,
+      catch_all_routes: routes.filter((route) => route.decisionKind === "catch_all").length,
+      sink_routes: routes.filter((route) => route.decisionKind === "sink").length,
+      policy_sha256: policySha256,
+      desired_state_sha256: desiredStateSha256,
+      policy_r2_key: policyR2Key,
+      projection_sha256: projectionSha256,
+      projection_bytes: Buffer.byteLength(projection, "utf8"),
+    }, null, 2));
+  } catch (error) {
+    console.error(`fail: ${error instanceof Error ? error.message : "unknown error"}`);
+    process.exit(1);
+  }
+}
+
+if (import.meta.main) main();

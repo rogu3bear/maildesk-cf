@@ -1,97 +1,203 @@
 # Inbox Reply Relay
 
-`inbox_relay` is Maildesk's routing-only operator-delivery mode. It uses an
-existing operator inbox as the reading and composition surface without exposing
-that inbox identity to the external correspondent.
+This is the current reply authorization and recovery contract. Existing provider migrations 0001–0011 remain unchanged. Migration 0012
+adds the reusable canary-admission prerequisite; 0013–0015 add dispatch, ordinary
+authority and status. Historical records retain their original meaning. The October 2026 rectification changes ordinary authorization, work
+queue eligibility, signature-free content, and duplicate recovery ordering.
+
+`inbox_relay` uses an existing operator inbox for reading and composing. Maildesk
+owns policy, authorization, bounded recovery spools and body-free operational
+state. Access login does not authorize send-as. The private health UI cannot
+read message bodies or submit replies; generic `web_desk` compatibility remains
+separate and its legacy HTTP reply API is disabled by default.
+
+## Policy and destination authority
+
+Rust validates the entire immutable policy before `project_policy_json` emits
+configured roles, effective personal aliases, wildcard catch-all and sinks.
+It owns precedence, normalized identities, operator sets, ordered destination
+candidates and stable route references. TypeScript joins provider topology and
+formats persistence; it does not reconstruct policy semantics. The active R2
+policy's original bytes keep their existing SHA-256. D1 route IDs, identities,
+operators and enabled inventory must match that canonical projection exactly;
+equal counts cannot validate substituted routes or operator membership.
+
+A policy `work_queue` destination is eligible only when its exact `queue_ref`
+has a supported adapter with a durable handoff contract. `MAIL_JOBS` is the
+internal mail-event queue and never establishes work-destination eligibility.
+No such destination adapter is installed by this change. The supplied baseline
+therefore selects the Rust-declared mailbox fallback before a delivery effect.
+An unknown handoff outcome cannot cause mailbox fallback. Historical internal
+work-item Queue events are reconciliation evidence, never downstream delivery.
 
 ## Inbound invariant
 
-The Rust router selects all operator destinations and the public reply identity.
-The Email Worker generates a 256-bit lowercase token, stores only its SHA-256
-hash, and sends a separately addressed message to each operator. Text and HTML
-alternatives carry the same route banner. The opaque address is the only place
-the raw token exists.
+The Email Worker creates a 248-bit token encoded as 62 lowercase hex characters;
+`r+` and that token fit the 64-character mailbox local-part limit. Historical
+64-character tokens remain readable for reconciliation. D1 stores only a token
+hash. The raw opaque recipient appears in the operator-facing delivery and its
+bounded temporary recovery payload, never in outward correspondent content.
 
-Cloudflare direct forwarding is deliberately unavailable for relay-enabled
-routes: its custom-header surface cannot safely replace `Reply-To` or prepend
-the operator banner.
+Each policy-selected operator receives a separately addressed bannered copy.
+Both MIME alternatives describe the actual availability: disabled, profile
+unavailable, quarantined, canary-only awaiting admission, or explicitly ordinary
+activated. A mode switch alone cannot advertise ordinary authority. The public
+identity is descriptive; the banner itself grants no authority.
 
-Before any operator send, the Worker claims a stable SHA-256 fingerprint over
-the normalized envelope and exact raw MIME, plus one hashed recipient row for
-each policy-selected operator. Each operator delivery uses a deterministic
-Message-ID. Before D1 activation, R2 receives one bounded, immutable delivery
-payload per hashed recipient. A repeated provider invocation may use that exact
-payload only after D1 atomically advances the same-policy recipient from
-`pending` to `sending`; it never repeats a recipient already claimed as
-`sending`, `provider_accepted`, or `recovery_required`. Because Cloudflare Email
-Service provides no idempotency key, an interrupted `sending` transition is
-explicitly `recovery_required` and requires provider reconciliation or manual
-recovery. Possessing a token or an R2 object never bypasses the D1 claim.
+A stable fingerprint binds normalized envelope addresses and exact inbound
+MIME. Immutable per-recipient spools precede durable claims. Cloudflare assigns
+the provider Message-ID; `X-Maildesk-Delivery-ID` carries the deterministic
+Maildesk delivery reference. Only an exact, current-policy `pending` recipient
+may atomically become `sending`. A `sending`, accepted or uncertain recipient
+is never resent automatically. Cloudflare's non-idempotent send boundary cannot
+provide an exactly-once delivery guarantee.
 
-An inbound-result Queue job is projection assistance, not provider authority.
-Before it can advance route health or delete recovery data, the consumer
-requires its delivery, relay, thread, route, policy, raw-spool key, complete
-recipient set, per-recipient payload keys, durable states, provider IDs, and
-bounded errors to match the D1 claim exactly. Cleanup keys are then derived from
-D1 and are deleted only after the durable delivery projection succeeds. The
-raw-spool pointer remains durable cleanup authority until every idempotent R2
-deletion succeeds. A body-free digest receipt is recorded before that pointer
-is cleared, so Queue redelivery can either complete cleanup after a transient
-storage failure or recognize an exact terminal replay without repeating a
-provider send.
+Inbound result jobs must match the durable delivery, relay, route, policy,
+complete recipient set, spool generations and provider results before projection
+or cleanup. An accepted spool's cleanup pointer remains durable until deletion
+and its body-free cleanup receipt complete. Superseded all-pending inbound work
+may be retired only by the existing exact known-unsent guard.
 
-An all-`pending` claim may be retired automatically only when its policy
-revision is no longer active and D1 atomically proves that no recipient crossed
-the provider-send boundary. Each attempt has a token-hash-qualified R2 key, so
-delayed cleanup of the retired attempt cannot delete a replacement spool. The
-replacement route is then evaluated under the current policy. A same-policy
-`pending` recipient is provably unsent and may resume from its exact recovery
-payload under the active-policy, enabled-route, recipient-state, and spool-key
-guards. Every `sending` or terminal recipient remains preserved for explicit
-reconciliation rather than being reset speculatively.
+## Closed reply authorization variants
 
-## Reply invariant
+Canary authorization remains schema 1 in `reply_admissions`: one exact,
+controller-issued, single-use transaction with its original evidence fields.
+The compiler requires evidence within ten minutes and caps validity at fifteen
+minutes; the existing materializer proposes fourteen minutes. Existing expiry
+values are preserved. This distinction does not grant ordinary authority.
 
-The reply-domain Worker accepts a message only when the relay is active, the
-envelope and RFC 5322 sender resolve to the same current operator, the raw reply
-has a cryptographically verified and aligned DKIM signature that signs `From`,
-and Rust authorizes that operator for the stored route identity. Sender-supplied
-authentication-result headers never authorize a reply. The recipient and public
-sender come only from the relay row.
+Ordinary authorization requires an explicit schema-1 `route_reply_authorizations`
+record. It binds route, exact global policy and desired-state hashes, public
+identity/profile, normalized operator-set digest and JSON, sender adapter/domain,
+runtime artifacts, topology, fresh exact golden-thread qualification, separate
+owner authorization and a governed activation receipt. Ingress and the UI have
+no activation path. No enabled flag or historical proof timestamp is backfilled
+into route authority. Source examples remain disabled. Unknown authorization
+variants fail closed.
 
-The Worker hashes the exact DKIM-authenticated RFC 822 bytes and atomically
-stores that digest with the relay-attempt spool key. The Queue job carries the
-same key and digest. Before parsing or outbound delivery, the consumer hashes
-the fetched R2 bytes, requires the Queue pair to match the D1 claim, and fails
-closed on any key, digest, or generation mismatch; authenticated content
-therefore cannot be substituted after the
-authorization boundary.
+After activation, each independently authored ordinary message receives a
+schema-2 `ordinary_reply_admissions` row and its dispatch attempt in one SQLite
+statement/trigger transaction. It binds activation, relay/thread/route, operator,
+authenticated bytes, case-preserving Message-ID digest, signed recipient,
+immutable outward payload, stored external target, policy/profile/provider and
+validity. Expiry cannot exceed the relay or explicit authority expiry. Multiple
+distinct replies, including replies by different authorized operators, are
+permitted; transport redelivery remains one attempt.
 
-Duplicate operator messages use `(relay, normalized operator Message-ID)` as the
-idempotency boundary. Either current operator may make a distinct reply during
-the 90-day relay lifetime; v1 has no assignment or conversation lock.
+Observation freshness and authority expiry are separate. Stale receipt evidence
+does not revoke otherwise current explicit authority. Revocation, actual expiry,
+quarantine, policy/profile/operator/provider/artifact/topology drift, or a master
+kill switch blocks new sends. Both router and outbound bindings must carry the
+same inbound/reply/ordinary processing modes. Ordinary mode additionally needs
+matching runtime artifact and topology digests in Worker environment and D1.
+A local checkout change alone says nothing about deployed runtime authority.
 
-## Content and evidence
+## Authentication, parsing and privacy
 
-Encoded operator deliveries and outbound replies are capped at 5 MiB. MIME is
-parsed ephemerally. R2 temporarily holds the original inbound MIME plus one
-generated operator-delivery recovery payload per pending recipient, all under
-the same seven-day lifecycle ceiling. Recipient provider acceptance deletes its
-payload early; terminal aggregate processing deletes the original MIME. D1 and
-the dashboard never store or show subjects, bodies, attachments, or thread
-history.
+Canaries retain their original aligned DKIM `From` and body contract. Ordinary
+messages additionally require one accepted signature to authenticate the exact
+selected opaque `To`, case-preserving `Message-ID`, and every present consumed
+Subject/MIME/Content-* singleton. Duplicate singleton headers, partial-body
+`l=` signatures, unsigned relevant fields, envelope/signed-recipient mismatch,
+parser disagreement and unsupported algorithms fail closed. DNS uncertainty is
+not authentication. The real Apple Mail/Workspace signing shape must be
+qualified with captured fixtures before ordinary activation.
 
-Inbound attachments are preserved in the separately addressed operator
-delivery. Operator-authored outbound attachments fail closed in this milestone:
-opaque binary formats cannot be proven free of private operator identities by a
-byte scan. A later format-aware attachment policy may enable explicitly
-supported formats without weakening the privacy boundary.
+New reply identity hashes use a domain-separated v2 preimage and preserve case.
+Legacy lowercase hashes are also looked up to prevent reopening historical
+attempts under the new digest. An exact authenticated redelivery resolves its
+original immutable claim before looking for a new admitted transaction. An
+expired or terminal duplicate is reconciled without creating new authority.
 
-Evidence advances independently through `declared`, `local_policy_valid`,
-`edge_verified`, `provider_accepted`, `inbox_verified`, and `reply_verified`.
-`mail_ready` is a derived claim allowed only after inbox and reply receipts;
-deployment and provider acceptance do not imply it.
+A clean nonempty plaintext reply needs no signature. CRLF/CR normalize to LF;
+boundary blank lines are trimmed. Only a conventional `-- ` line or a supported
+Apple attribution followed entirely by quoted lines permits removal. Blank
+paragraphs, short final paragraphs, sender names and attribution words inside
+authored sentences are not signature heuristics. The immutable public signature
+is appended once. New claims use payload version 2; only pre-cutover immutable
+canary claims may use the frozen version-1 renderer, and their stored digest
+must match exactly.
 
-Operator procedure: [recovery.md](../operations/recovery.md) maps these durable
-states to allowed actions and retention deadlines. Local acceptance is defined
-in [acceptance-criteria.md](../acceptance-criteria.md).
+HTML-only replies and outbound attachments remain unsupported. Original HTML
+is never forwarded; escaped HTML is regenerated from the accepted plaintext.
+Unrecognized retained routing banners, known private operator identities and
+opaque relay tokens in text, URLs or outward metadata fail closed. Encoding
+inspection is bounded and includes Unicode normalization, entity and percent
+decoding. This does not promise semantic anonymization of arbitrary prose.
+Encoded messages remain bounded at 5 MiB.
+
+## Dispatch, provider boundary and terminal ownership
+
+Authorization, durable dispatch intent, provider claim and terminal result are
+separate facts. `receiving`/`queued`/`authorized` plus immutable admission fields
+form the dispatch journal. A failed or ambiguous Queue submission retains the
+claim and exact spool. Redelivery or `recoverKnownUnsentDispatch(claimId, env)`
+reconstructs only the allowlisted job from durable rows and rechecks current
+safety. No caller payload or caller-selected R2 path is accepted. Remote redrive
+requires a qualified governed capability; this repository adds no scheduler or
+raw provider client for that purpose.
+
+Canary admission, ordinary admission and the common provider transition each
+compare the exact Rust-projected route row inside their consuming statement:
+domain and local part, route/storage kind, default public identity and complete
+operator set. A mutation between an earlier read and the claim produces zero
+rows; it cannot consume authority, leave an orphaned dispatch or call a provider.
+The current policy/desired-state and quarantine checks remain independent.
+
+One conditional transition owns the first provider call. A competing consumer
+cannot write a false failure over another sender's in-flight outcome. Before-
+boundary rejection conditionally closes only a still-claimed authorization.
+Trigger-backed claims abort the entire statement when ownership is lost; a D1
+batch returning zero changed rows is never treated as rollback. D1 metadata
+counts include trigger writes, so uniquely keyed transitions test positive
+change rather than assuming exactly one total changed row.
+
+Cloudflare `sending` with no confirmed result remains unknown and is never
+replayed. Accepted audit evidence resumes only terminal projection and spool
+cleanup. Resend recovery additionally requires the same provider, idempotency
+key, exact serialized request hash, current safety bindings and an age below
+23 hours, within its documented 24-hour key retention. Historical claims lacking
+that time/hash binding require reconciliation. Provider switching is forbidden.
+The historical `outbound_reply_delivered` audit key remains readable; new records
+explicitly map its outcome to `provider_accepted`, never external receipt.
+
+## Evidence and health
+
+`route_proofs`, `route_proof_ledger`, coverage records and admission/containment
+receipts retain their own historical evidence meaning. `route_health` is a
+mutable operational rollup. `route_status_projection` is a disposable body-free
+read model, revision `route-operational-v1`; it is neither proof nor authority.
+Source-generation changes invalidate it, and publication uses a generation
+check. Its validity stops at the earliest relevant future proof/authority expiry.
+
+The canonical TypeScript projection separates processing modes, ordinary
+activation, provider outcomes, independent inbox/reply freshness, pending
+dispatch, queued work, unknown sends, reasons and one bounded next action.
+Rust consumes these classifications and reports missing/stale/incompatible
+projections as unknown or stale. Sinks are intentional no-delivery routes with
+reply not applicable. Enrollment and fleet coverage remain separately qualified;
+a selected canary never proves the fleet. Canary/fleet receipt validators keep
+plane-specific selectors, chronology and coverage checks. The canary, fleet
+compiler and verifier also consume the same closed operational projection with
+policy, generation and expiry checks. Missing or incompatible fields remain
+unknown; stale projections retain historical authority facts without establishing
+current readiness. Unknown outcomes require reconciliation. Proof expiry is
+inclusive at the expiry instant.
+
+Fresh receipt planes can qualify a canary while an operational blocker remains.
+The verifier exposes `canary_receipts_verified` separately from
+`operational_ready`; `mail_ready` requires both. The controller then stops at
+`operational_reconciliation` with no executable command, so this state cannot
+manufacture activation or recovery permission. Fleet receipt-plane results remain
+visible, while full coverage additionally requires current operational state.
+An explicitly graduated sink records provider-delivery and inbox/reply planes
+as not applicable; it never needs a nonexistent operator inbox receipt.
+The existing provider V2 evidence contract lacks the new operational fields;
+its output therefore remains operationally unknown until a governed extension
+is implemented and qualified. No reviewed capability or query pin is changed.
+
+The activation/recovery/containment compilers are non-performing contracts. No
+ordinary provider capability is claimed installed. Qualify a governed operation
+pack and actual client signing fixtures before activation. Keep ordinary mode
+disabled before considering any downgrade, retain all terminal history, and do
+not downgrade to a binary that cannot interpret new authorization records.

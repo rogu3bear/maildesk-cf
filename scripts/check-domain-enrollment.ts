@@ -25,10 +25,7 @@ interface EnrollmentLedger {
   domains: EnrollmentEntry[];
 }
 
-interface DesiredDomain {
-  name: string;
-  inbound_mx_provider: string;
-}
+
 
 export interface DomainEnrollmentReport {
   schema_version: 1;

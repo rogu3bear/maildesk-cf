@@ -13,6 +13,7 @@
 *.tmp
 *.secret
 *.pem
+.DS_Store
 
 # Local operator/agent strategy files. AGENTS.md is tracked as the scrubbed
 # public template contract; the deeper strategy quartet remains local.

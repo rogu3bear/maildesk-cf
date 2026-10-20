@@ -82,6 +82,7 @@ interface ProtectedCommandHandoff {
   execute_all: string[] | null;
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const jsonOutput = args.includes("--json");
@@ -547,3 +548,7 @@ function commandPath(path: string): string {
   const absolutePath = resolve(root, path);
   return relative(root, absolutePath) || ".";
 }
+
+}
+
+if (import.meta.main) await main();

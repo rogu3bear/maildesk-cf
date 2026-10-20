@@ -10,7 +10,6 @@ import {
 import {
   CLEAR_INBOUND_CLEANUP_AUTHORITY_SQL,
   CLAIMED_INBOUND_RESULT_SQL,
-  CLAIMED_REPLY_SPOOL_SQL,
   PERSIST_INBOUND_DELIVERY_PROJECTION_SQL,
 } from "../../workers/mail-api/src/index";
 
@@ -60,22 +59,8 @@ test("relay attempts persist the authenticated reply-spool digest", () => {
       raw_r2_key: "relay-spool/reply.eml",
       raw_sha256: digest,
     });
-    expect(database.query(CLAIMED_REPLY_SPOOL_SQL).get(
-      "relay-attempt:integrity",
-      "relay:message",
-      "operator@example.com",
-      "<reply@example.com>",
-      "relay-spool/reply.eml",
-      digest,
-    )).toEqual({ id: "relay-attempt:integrity" });
-    expect(database.query(CLAIMED_REPLY_SPOOL_SQL).get(
-      "relay-attempt:integrity",
-      "relay:message",
-      "operator@example.com",
-      "<reply@example.com>",
-      "relay-spool/reply.eml",
-      "7".repeat(64),
-    )).toBeNull();
+    // Raw spool persistence grants no reply authorization. The fully migrated
+    // authenticated-pipeline suite checks every canary/ordinary claim binding.
     expect(() => database.query(
       "INSERT INTO relay_attempts (id, relay_id, operator, operator_message_id, raw_r2_key, raw_sha256, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'receiving')",
     ).run(

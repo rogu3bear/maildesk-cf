@@ -67,6 +67,7 @@ test("private-scale policy projection activates one immutable revision atomicall
     writeFileSync(
       policyPath,
       JSON.stringify({
+        default_reply_mode: "role_first",
         domains: {
           "example.com": {
             role_aliases: aliases,

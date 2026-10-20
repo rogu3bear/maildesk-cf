@@ -1,3 +1,4 @@
+import { inventoryFixture } from "../helpers/policy-inventory";
 import { expect, test } from "bun:test";
 
 import { loadActivePolicy } from "../../workers/shared/policy-store";
@@ -113,11 +114,13 @@ function policyEnv(input: {
   policyJson: string;
   projectedRoutes: number;
   expectedRoutes: number;
+  inventory?: ReturnType<typeof inventoryFixture>;
 }) {
   return {
     MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay",
     DB: {
       prepare: () => ({
+        all: async () => ({ success: true, results: input.inventory ?? inventoryFixture(input.policyJson) }),
         first: async () => ({
           active_policy_sha256: input.digest,
           active_policy_r2_key: input.key,
@@ -142,3 +145,19 @@ async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+
+
+test("equal route/operator counts cannot admit substituted durable inventory", async () => {
+  const digest = await sha256(policyJson);
+  const key = `config/policy/${digest}.json`;
+  for (const corrupt of [
+    (rows: ReturnType<typeof inventoryFixture>) => { rows[0]!.local_part = "substituted"; },
+    (rows: ReturnType<typeof inventoryFixture>) => { rows[0]!.operators_json = '["outsider@example.net"]'; },
+    (rows: ReturnType<typeof inventoryFixture>) => { rows[0]!.reply_identity = "other@example.com"; },
+  ]) {
+    const inventory = inventoryFixture(policyJson);
+    corrupt(inventory);
+    expect(await loadActivePolicy(policyEnv({ digest, key, policyJson,
+      projectedRoutes: 1, expectedRoutes: 1, inventory }) as never)).toBeNull();
+  }
+});

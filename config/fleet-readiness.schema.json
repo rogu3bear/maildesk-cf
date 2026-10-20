@@ -336,12 +336,164 @@
       "properties": {
         "configured": { "$ref": "#/$defs/control_receipt" },
         "cloudflare_active": { "$ref": "#/$defs/control_receipt" },
-        "inbound_provider_accepted": { "$ref": "#/$defs/golden_receipt" },
-        "inbox_received": { "$ref": "#/$defs/golden_receipt" },
+        "inbound_provider_accepted": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
+        "inbox_received": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
         "reply_authorized": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
         "outbound_provider_accepted": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
         "recipient_delivered": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] },
         "privacy_proven": { "oneOf": [{ "$ref": "#/$defs/golden_receipt" }, { "$ref": "#/$defs/not_applicable_receipt" }] }
+      }
+    },
+    "route_operational_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "projection_revision",
+        "source_generation",
+        "policy_sha256",
+        "observed_at",
+        "valid_until",
+        "classification",
+        "inbound_processing",
+        "ordinary_authority_active",
+        "ordinary_reply_enabled",
+        "activation_id",
+        "inbound_outcome",
+        "reply_outcome",
+        "inbox_proof",
+        "reply_proof",
+        "pending_dispatch",
+        "pending_queue",
+        "unknown_provider_attempts",
+        "reason_codes",
+        "next_action"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "projection_revision": {
+          "const": "route-operational-v1"
+        },
+        "source_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "classification": {
+          "enum": [
+            "current",
+            "needs_attention",
+            "unverified",
+            "stale",
+            "intentionally_excluded",
+            "disabled",
+            "pending",
+            "scheduled"
+          ]
+        },
+        "inbound_processing": {
+          "enum": [
+            "enabled",
+            "disabled",
+            "unknown"
+          ]
+        },
+        "ordinary_authority_active": {
+          "type": "boolean"
+        },
+        "ordinary_reply_enabled": {
+          "type": "boolean"
+        },
+        "activation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inbound_outcome": {
+          "enum": [
+            "provider_accepted",
+            "partial_delivery",
+            "failed",
+            "unknown",
+            "unobserved",
+            "not_applicable"
+          ]
+        },
+        "reply_outcome": {
+          "enum": [
+            "provider_accepted",
+            "partial_delivery",
+            "failed",
+            "unknown",
+            "unobserved",
+            "not_applicable"
+          ]
+        },
+        "inbox_proof": {
+          "enum": [
+            "fresh",
+            "stale",
+            "missing",
+            "invalid",
+            "not_applicable"
+          ]
+        },
+        "reply_proof": {
+          "enum": [
+            "fresh",
+            "stale",
+            "missing",
+            "invalid",
+            "not_applicable"
+          ]
+        },
+        "pending_dispatch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_queue": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_provider_attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/code"
+          }
+        },
+        "next_action": {
+          "enum": [
+            "none",
+            "refresh_projection",
+            "review_enrollment",
+            "review_processing_modes",
+            "reconcile_provider_outcome",
+            "recover_dispatch_by_claim_id",
+            "observe_queue",
+            "review_quarantine",
+            "review_route_activation",
+            "record_inbox_receipt",
+            "record_reply_receipt"
+          ]
+        }
       }
     },
     "route_evidence": {
@@ -353,7 +505,9 @@
         "route_sha256": { "$ref": "#/$defs/digest" },
         "domain_sha256": { "$ref": "#/$defs/digest" },
         "golden_thread_sha256": { "$ref": "#/$defs/digest" },
-        "planes": { "$ref": "#/$defs/planes" }
+        "planes": { "$ref": "#/$defs/planes" },
+        "status_generation": { "type": "integer", "minimum": 0 },
+        "operational_status": { "$ref": "#/$defs/route_operational_status" }
       }
     }
   }

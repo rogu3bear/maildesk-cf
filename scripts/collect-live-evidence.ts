@@ -213,6 +213,7 @@ interface OutboundProof {
   audit_event_at?: string;
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const desiredStatePath = resolve(root, argValue("--desired-state") ?? defaultDesiredStatePath());
@@ -380,10 +381,6 @@ function guardedRepoLocalFile(argument: string, label: string): string {
 
 function validAcceptanceProfile(value: unknown): value is CfctlAcceptanceProfile {
   return value === "inventory_v1" || value === "dark_acceptance_v1";
-}
-
-function readJson<T>(path: string): T {
-  return JSON.parse(readFileSync(path, "utf8")) as T;
 }
 
 async function collectGovernedCfctlEvidence(profileId: string | undefined): Promise<{
@@ -1326,9 +1323,10 @@ function validQueueConsumerRecord(value: Record<string, unknown>): boolean {
     typeof value.script_name !== "string" ||
     !isRecord(value.settings)
   ) return false;
+  const settings = value.settings;
   return ["batch_size", "max_concurrency", "max_retries"].every((field) =>
-    typeof value.settings[field] === "number" && Number.isInteger(value.settings[field])
-  ) && typeof value.settings.dead_letter_queue === "string";
+    typeof settings[field] === "number" && Number.isInteger(settings[field])
+  ) && typeof settings.dead_letter_queue === "string";
 }
 
 function queueConsumerMatches(
@@ -1613,3 +1611,7 @@ interface GoogleResourceSearch {
     };
   }>;
 }
+
+}
+
+if (import.meta.main) await main();

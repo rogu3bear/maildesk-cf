@@ -20,6 +20,7 @@ interface DesiredState {
   };
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const desiredPath = process.argv[2] ?? "config/desired-state.example.json";
 const failures: string[] = [];
@@ -238,3 +239,7 @@ function escapeRegex(value: string): string {
 function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+}
+
+if (import.meta.main) await main();

@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.workers.json",
+  "compilerOptions": {
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node",
+      "bun"
+    ],
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "scripts/**/*.mjs"
+  ]
+}

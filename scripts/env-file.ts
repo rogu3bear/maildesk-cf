@@ -69,6 +69,7 @@ export function loadEnvFile(
       continue;
     }
 
+    if (!name) { failures.push("invalid environment variable name"); continue; }
     if (!env[name]) {
       env[name] = parsedValue.value;
       loaded.push(name);

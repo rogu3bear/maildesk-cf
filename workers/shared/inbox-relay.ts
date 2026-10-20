@@ -1,8 +1,17 @@
+import { identityProfileDigestInputV1 } from "./identity-profile-contract";
+import { renderLegacyClaimedReplyText } from "./reply-text-legacy";
+import { renderPublicReplyText } from "./reply-text";
 import PostalMime, { type Address, type Attachment, type Mailbox } from "postal-mime";
 
 import type { MailAttachmentPayload, OperatorDeliveryConfig } from "./contracts";
+import type { ResolvedIdentityProfile } from "./router";
 
-const TOKEN_BYTES = 32;
+// The `r+` routing prefix is part of the mailbox local part, whose RFC ceiling
+// is 64 characters. Thirty-one random bytes encode to 62 hexadecimal
+// characters, preserving 248 bits of entropy while keeping `r+<token>` valid.
+const TOKEN_BYTES = 31;
+const RELAY_TOKEN = /^[a-f0-9]{62}$/;
+const LEGACY_RELAY_TOKEN = /^[a-f0-9]{64}$/;
 const MAX_HEADER_BYTES = 256 * 1024;
 const MAX_MIME_NESTING = 64;
 const MIME_OVERHEAD_BYTES = 16 * 1024;
@@ -33,10 +42,47 @@ export interface OperatorDeliveryInput {
   operator: string;
   receivedAddress: string;
   replyIdentity: string;
+  identityProfile?: ResolvedIdentityProfile;
+  replyProcessingMode: OperatorDeliveryConfig["replyProcessingMode"];
+  replyAvailability?: "canary_only" | "ordinary_activated" | "quarantined";
   routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
   operatorCount: number;
   relayAddress: string;
   deliveryMessageId: string;
+}
+
+export async function publicIdentityProfileSha256(
+  profile: ResolvedIdentityProfile,
+): Promise<string> {
+  return sha256Hex(JSON.stringify(identityProfileDigestInputV1(profile, await sha256Hex(profile.signatureText))));
+}
+
+export async function outboundRelayPayloadSha256(payload: {
+  subject: string;
+  text?: string;
+  html?: string;
+  headers?: Record<string, string>;
+  attachments?: MailAttachmentPayload[];
+}): Promise<string> {
+  const attachments = [];
+  for (const attachment of payload.attachments ?? []) {
+    attachments.push({
+      disposition: attachment.disposition,
+      content_id: attachment.contentId ?? null,
+      filename: attachment.filename,
+      type: attachment.type,
+      content_sha256: await sha256Hex(attachment.content),
+    });
+  }
+  return sha256Hex(JSON.stringify({
+    subject: payload.subject,
+    text: payload.text ?? null,
+    html: payload.html ?? null,
+    headers: Object.fromEntries(
+      Object.entries(payload.headers ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    attachments,
+  }));
 }
 
 export async function parseRelayEmail(raw: ArrayBuffer): Promise<ParsedRelayEmail> {
@@ -71,20 +117,34 @@ export function buildOperatorDelivery(
     input.routeKind === "personal_alias" || input.operatorCount === 1
       ? "Delivered to the designated operator"
       : `Delivered to ${input.operatorCount} authorized operators`;
+  const replyBehavior = input.replyProcessingMode !== "enabled"
+    ? "Reply unavailable — reply relay is not enabled."
+    : !input.identityProfile
+      ? "Reply unavailable — the public identity profile is not configured."
+      : input.replyAvailability === "quarantined"
+        ? "Reply unavailable — this route is quarantined for review."
+        : input.replyAvailability === "ordinary_activated"
+          ? `Reply normally in this inbox. Maildesk will send the response as ${input.identityProfile.displayName} <${input.identityProfile.publicAddress}>.`
+          : "Ordinary replies are not activated. A canary reply requires its own controller admission.";
   const bannerText = [
     "Maildesk route",
     "",
     `Received at: ${input.receivedAddress}`,
     `Original sender: ${formatMailbox(parsed.from)}`,
     `Policy result: ${policyResult}`,
+    ...(input.identityProfile ? [`Public reply identity: ${input.identityProfile.displayName} <${input.identityProfile.publicAddress}>`] : []),
     "",
     "Reply behavior:",
-    `Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${input.replyIdentity}.`,
+    replyBehavior,
     "Your personal operator address will not be sent to the correspondent.",
   ].join("\n");
-  const bannerHtml = `<section style="border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:0 0 20px;font-family:system-ui,sans-serif;color:#0f172a;background:#f8fafc"><strong>Maildesk route</strong><dl><dt>Received at</dt><dd>${escapeHtml(input.receivedAddress)}</dd><dt>Original sender</dt><dd>${escapeHtml(formatMailbox(parsed.from))}</dd><dt>Policy result</dt><dd>${escapeHtml(policyResult)}</dd></dl><p><strong>Reply behavior:</strong><br>Reply normally in this inbox. Maildesk will authenticate your account and send the response to the correspondent from ${escapeHtml(input.replyIdentity)}. Your personal operator address will not be sent to the correspondent.</p></section>`;
+  const identityDescription = input.identityProfile
+    ? `<dt>Public reply identity</dt><dd>${escapeHtml(input.identityProfile.displayName)} &lt;${escapeHtml(input.identityProfile.publicAddress)}&gt;</dd>` : "";
+  const bannerHtml = `<section style="border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin:0 0 20px;font-family:system-ui,sans-serif;color:#0f172a;background:#f8fafc"><strong>Maildesk route</strong><dl><dt>Received at</dt><dd>${escapeHtml(input.receivedAddress)}</dd><dt>Original sender</dt><dd>${escapeHtml(formatMailbox(parsed.from))}</dd><dt>Policy result</dt><dd>${escapeHtml(policyResult)}</dd>${identityDescription}</dl><p><strong>Reply behavior:</strong><br>${escapeHtml(replyBehavior)} Your personal operator address will not be sent to the correspondent.</p></section>`;
   const headers: Record<string, string> = {
-    "Message-ID": input.deliveryMessageId,
+    // Cloudflare Email Service owns Message-ID. Keep Maildesk's deterministic
+    // recipient-delivery identity in an allowed X-header for recovery binding.
+    "X-Maildesk-Delivery-ID": input.deliveryMessageId,
     "X-Maildesk-Original-To": input.receivedAddress,
     "X-Maildesk-Route-Kind": input.routeKind,
     "X-Maildesk-Reply-Identity": input.replyIdentity,
@@ -108,7 +168,11 @@ export function buildOperatorDelivery(
   };
 }
 
-export function outboundReplyPayload(parsed: ParsedRelayEmail): {
+export function outboundReplyPayload(
+  parsed: ParsedRelayEmail,
+  identityProfile?: ResolvedIdentityProfile,
+  payloadVersion: 1 | 2 = 2,
+): {
   subject: string;
   text?: string;
   html?: string;
@@ -117,10 +181,15 @@ export function outboundReplyPayload(parsed: ParsedRelayEmail): {
   if (!parsed.text.trim()) {
     throw new Error("operator replies require a plaintext MIME alternative");
   }
+  const text = identityProfile
+    ? payloadVersion === 1
+      ? renderLegacyClaimedReplyText(parsed.text, identityProfile, parsed.from.name)
+      : renderPublicReplyText(parsed.text, identityProfile.signatureText)
+    : parsed.text;
   return {
     subject: parsed.subject,
-    text: parsed.text,
-    html: `<pre style="white-space:pre-wrap">${escapeHtml(parsed.text)}</pre>`,
+    text,
+    html: `<pre style="white-space:pre-wrap">${escapeHtml(text)}</pre>`,
     attachments: parsed.attachments.length > 0 ? parsed.attachments : undefined,
   };
 }
@@ -183,7 +252,7 @@ export async function sha256Hex(value: string | ArrayBuffer | ArrayBufferView): 
 }
 
 export function relayAddress(token: string, replyDomain: string): string {
-  if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("relay token is invalid");
+  if (!RELAY_TOKEN.test(token)) throw new Error("relay token is invalid");
   return `r+${token}@${replyDomain}`;
 }
 
@@ -192,8 +261,9 @@ export function relayTokenFromRecipient(recipient: string, replyDomain: string):
   const suffix = `@${replyDomain}`;
   if (!mailbox.endsWith(suffix)) return null;
   const localPart = mailbox.slice(0, -suffix.length);
-  const match = /^r\+([a-f0-9]{64})$/.exec(localPart);
-  return match?.[1] ?? null;
+  if (!localPart.startsWith("r+")) return null;
+  const token = localPart.slice(2);
+  return RELAY_TOKEN.test(token) || LEGACY_RELAY_TOKEN.test(token) ? token : null;
 }
 
 export function tokenExpiresAt(now: Date, ttlDays: number): string {

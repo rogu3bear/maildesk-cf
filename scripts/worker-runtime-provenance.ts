@@ -184,8 +184,8 @@ function versionDetail(value: unknown): {
   return {
     versionId: result.id,
     message,
-    sourceSha: match[1],
-    artifactSha256: match[2],
+    sourceSha: match[1]!,
+    artifactSha256: match[2]!,
     scriptEtag: script.etag,
     metadataSource,
   };

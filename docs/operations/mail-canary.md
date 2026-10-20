@@ -33,6 +33,11 @@ reads, independent proofs inside the window, recorded proofs, and the size of
 the probe rotation. Reports contain counts and bounded issue codes; they
 contain no mail subjects, bodies, attachments, or operator identities.
 
+A current canonical operational projection is also required for a current
+report. Pending dispatch, unknown provider outcome, disabled/invalid operation
+or missing/stale projection is reported separately without deleting recorded
+receipt counts.
+
 `receipts_current` means every non-sink path has an independent inbox proof and
 an independent reply proof inside the configured age limit. `configuration_current`
 means the configuration read passed while at least one of those proofs is older

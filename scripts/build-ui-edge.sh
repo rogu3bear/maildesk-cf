@@ -7,6 +7,12 @@ EXPECTED_WORKER_BUILD_VERSION="0.7.5"
 
 cd "$ROOT_DIR"
 
+# Keep the repository's pinned UI tool independent of host-wide CLI upgrades.
+LEPTOS_TOOL_BIN="$ROOT_DIR/var/cargo-tools/cargo-leptos-$EXPECTED_CARGO_LEPTOS_VERSION/bin"
+if [ -x "$LEPTOS_TOOL_BIN/cargo-leptos" ]; then
+  export PATH="$LEPTOS_TOOL_BIN:$PATH"
+fi
+
 if ! cargo leptos --version >/dev/null 2>&1; then
   printf '[build-ui] cargo-leptos %s is required.\n' "$EXPECTED_CARGO_LEPTOS_VERSION" >&2
   exit 1

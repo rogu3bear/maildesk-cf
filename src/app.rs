@@ -493,11 +493,7 @@ fn RoutingHealthDashboard(
         .count();
     let ready_count = routes
         .iter()
-        .filter(|route| {
-            route.enabled
-                && route.inbound_status == "inbox_verified"
-                && route.reply_status == "reply_verified"
-        })
+        .filter(|route| projected_route_class(route) == "current")
         .count();
     let route_count = routes.len();
 
@@ -521,7 +517,7 @@ fn RoutingHealthDashboard(
                     <nav aria-label="Routing navigation">
                         <a class="desk-nav-item desk-nav-item--active" href="#routes"><span>"Declared routes"</span><b>{route_count}</b></a>
                         <a class="desk-nav-item" href="#exceptions"><span>"Exceptions"</span><b>{exception_count}</b></a>
-                        <a class="desk-nav-item" href="#proof"><span>"Mail-ready"</span><b>{ready_count}</b></a>
+                        <a class="desk-nav-item" href="#proof"><span>"Current observations"</span><b>{ready_count}</b></a>
                     </nav>
                     <div class="sidebar-note">
                         <span>"Product boundary"</span>
@@ -544,7 +540,7 @@ fn RoutingHealthDashboard(
                             view! { <div class="desk-empty"><h3>"No routes have been projected."</h3><p>"Run the policy-sync command against a migrated local D1 database before deployment planning."</p></div> }.into_any()
                         } else {
                             view! {
-                                <ol class="thread-list">
+                                <ol class="thread-list" id="proof">
                                     {routes.into_iter().map(|route| {
                                         let needs_attention = route_needs_attention(&route);
                                         let observed = route.observed_provider.clone().unwrap_or_else(|| "unobserved".to_string());
@@ -556,17 +552,34 @@ fn RoutingHealthDashboard(
                                         let reply_verified = proof_timestamp(route.last_reply_verified_at.as_deref());
                                         let next = next_route_action(&route);
                                         let revision = route.policy_sha256.clone().unwrap_or_else(|| "unbound".to_string());
-                                        let route_state = if route.enabled { "enabled" } else { "disabled" };
+                                        let route_state = projected_route_class(&route).to_string();
+                                        let projection = route.operational_status.as_ref().filter(|_| route.projection_state == "current");
+                                        let observed_at = projection.map(|status| status.observed_at.clone()).unwrap_or_else(|| "Not observed".to_string());
+                                        let processing = projection.map(|status| status.inbound_processing.clone()).unwrap_or_else(|| "unknown".to_string());
+                                        let activation = projection.map(|status| if status.ordinary_authority_active { "Authorized" } else { "Inactive" }).unwrap_or("Unknown");
+                                        let reply_processing = projection.map(|status| if status.ordinary_reply_enabled { "Enabled" } else { "Disabled" }).unwrap_or("Unknown");
+                                        let dispatch = projection.map(|status| status.pending_dispatch.to_string()).unwrap_or_else(|| "Unknown".to_string());
+                                        let proof_freshness = projection.map(|status| format!("Inbox {} · reply {}", status.inbox_proof, status.reply_proof)).unwrap_or_else(|| "Unknown".to_string());
+                                        let reasons = projection.map(|status| status.reason_codes.join(", ")).unwrap_or_else(|| "projection_unavailable".to_string());
+                                        let projection_revision = projection.map(|status| status.projection_revision.clone()).unwrap_or_else(|| "unavailable".to_string());
+                                        let outcomes = projection.map(|status| format!("Inbound {} · reply {}", status.inbound_outcome, status.reply_outcome)).unwrap_or_else(|| "Unknown".to_string());
+                                        let queue_state = projection.map(|status| format!("Queue pending {} · unresolved provider outcomes {}", status.pending_queue, status.unknown_provider_attempts)).unwrap_or_else(|| "Queue and provider state unknown".to_string());
                                         view! {
                                             <li>
-                                                <article class="thread-row" id="proof">
+                                                <article class="thread-row">
                                                     <div class="thread-status" data-status=if needs_attention { "open" } else { "closed" }></div>
-                                                    <div class="thread-copy">
+                                                    <div class="thread-copy route-health-copy">
                                                         <span>{route.decision_kind.clone()}" · "{route_state}" · "{route.operator_count}" destinations"</span>
                                                         <strong>{route.route_address.clone()}</strong>
                                                         <small>"Reply as "{route.reply_identity.clone()}</small>
                                                         <small>"Desired "{route.desired_provider.clone()}" · observed "{observed}</small>
-                                                        <small>"Inbound "{route.inbound_status.clone()}" · reply "{route.reply_status.clone()}</small>
+                                                        <small>"Inbound processing: "{processing}" · ordinary authority: "{activation}</small>
+                                                        <small>"Ordinary reply processing: "{reply_processing}" · pending dispatch: "{dispatch}</small>
+                                                        <small>"Known provider outcomes: "{outcomes}</small>
+                                                        <small>{queue_state}</small>
+                                                        <small>{proof_freshness}</small>
+                                                        <small>"Status observed: "{observed_at}</small>
+                                                        <small>"Status revision: "{projection_revision}" · reasons: "{reasons}</small>
                                                         <small>"Policy revision "{revision}</small>
                                                         <small>"Inbound provider accepted: "{inbound_provider}</small>
                                                         <small>"Inbound provider IDs: "{inbound_provider_ids}</small>
@@ -576,7 +589,7 @@ fn RoutingHealthDashboard(
                                                         <small>"External reply verified: "{reply_verified}</small>
                                                         <small>"Next: "{next}</small>
                                                     </div>
-                                                    <time>{route.last_error_code.clone().unwrap_or_else(|| "No active error".to_string())}</time>
+                                                    <time>{route.last_error_code.clone().unwrap_or_else(|| "No error recorded".to_string())}</time>
                                                 </article>
                                             </li>
                                         }
@@ -595,32 +608,51 @@ fn proof_timestamp(value: Option<&str>) -> String {
     value.unwrap_or("Not recorded").to_string()
 }
 
+fn projected_route_class(route: &RouteHealthSummary) -> &str {
+    if route.projection_state != "current" {
+        return if route.projection_state == "stale" {
+            "stale"
+        } else {
+            "unknown"
+        };
+    }
+    route
+        .operational_status
+        .as_ref()
+        .map(|status| status.classification.as_str())
+        .unwrap_or("unknown")
+}
+
 fn route_needs_attention(route: &RouteHealthSummary) -> bool {
-    route.enabled
-        && (matches!(
-            route.inbound_status.as_str(),
-            "partial_delivery" | "recovery_required" | "failed"
-        ) || matches!(
-            route.reply_status.as_str(),
-            "partial_delivery" | "recovery_required" | "failed"
-        ))
+    matches!(
+        projected_route_class(route),
+        "needs_attention" | "unverified" | "unknown" | "stale"
+    )
 }
 
 fn next_route_action(route: &RouteHealthSummary) -> &'static str {
-    if !route.enabled {
-        "No processing; route is disabled in the active policy"
-    } else if route_needs_attention(route) {
-        "Reconcile the bounded failure before retrying"
-    } else if route.inbound_status == "intentionally_excluded" {
-        "No action; route is intentionally excluded"
-    } else if route.inbound_status == "declared" || route.inbound_status == "local_policy_valid" {
-        "Verify edge bindings and provider state"
-    } else if route.inbound_status != "inbox_verified" {
-        "Record a targeted inbox receipt"
-    } else if route.reply_status != "reply_verified" {
-        "Record a targeted external reply receipt"
-    } else {
-        "Maintain proof freshness"
+    if route.projection_state != "current" {
+        return "Refresh the body-free status projection";
+    }
+    let action = route
+        .operational_status
+        .as_ref()
+        .map(|status| status.next_action.as_str())
+        .unwrap_or("refresh_projection");
+    match action {
+        "none" => "No action required by this observation",
+        "review_enrollment" => "Review the recorded enrollment decision",
+        "review_processing_modes" => "Review the governed processing switches",
+        "reconcile_provider_outcome" => "Reconcile the existing provider attempt; do not resend",
+        "recover_dispatch_by_claim_id" => {
+            "Recover the known-unsent dispatch by its durable claim ID"
+        }
+        "observe_queue" => "Inspect the existing Queue delivery",
+        "review_quarantine" => "Review the route quarantine and its exact release lineage",
+        "review_route_activation" => "Review explicit ordinary route activation",
+        "record_inbox_receipt" => "Record a bounded independent inbox receipt",
+        "record_reply_receipt" => "Record a bounded independent external reply receipt",
+        _ => "Refresh the body-free status projection",
     }
 }
 
@@ -897,5 +929,63 @@ mod tests {
             user_facing_server_error("A direct message.".to_string()),
             "A direct message."
         );
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod routing_health_tests {
+    use super::*;
+    use leptos_router::location::RequestUrl;
+
+    fn fixture(state: &str, classification: &str) -> Result<RouteHealthSummary, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "route_address": format!("{state}@example.com"), "decision_kind": "role_alias", "enabled": true,
+            "desired_provider": "cloudflare_email_routing", "observed_provider": "cloudflare_email_routing",
+            "operator_count": 2, "reply_identity": "support@example.com", "policy_sha256": "a".repeat(64),
+            "inbound_status": "inbox_verified", "reply_status": "reply_verified", "last_inbound_at": null,
+            "last_reply_at": null, "last_inbound_provider_accepted_at": "2026-10-15T11:00:00Z",
+            "last_inbound_provider_message_ids": [], "last_inbox_verified_at": "2026-10-15T11:01:00Z",
+            "last_reply_provider_accepted_at": null, "last_reply_provider_message_id": null,
+            "last_reply_verified_at": null, "last_error_code": null, "projection_state": state,
+            "operational_status": {
+                "schema_version": 1, "projection_revision": "route-operational-v1", "observed_at": "2026-10-15T12:00:00Z",
+                "classification": classification, "reason_codes": ["dispatch_unconfirmed"], "next_action": "recover_dispatch_by_claim_id",
+                "inbound_processing": "enabled", "ordinary_authority_active": true, "ordinary_reply_enabled": true,
+                "inbound_outcome": "provider_accepted", "reply_outcome": "unobserved", "inbox_proof": "fresh", "reply_proof": "missing",
+                "pending_dispatch": 1, "pending_queue": 0, "unknown_provider_attempts": 0
+            }
+        }))
+    }
+
+    #[test]
+    fn routing_health_renders_unknown_stale_and_dispatch_without_inventing_readiness(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let current = fixture("current", "needs_attention")?;
+        let stale = fixture("stale", "current")?;
+        let mut missing = fixture("unknown", "current")?;
+        missing.operational_status = None;
+        assert_eq!(projected_route_class(&stale), "stale");
+        assert_eq!(projected_route_class(&missing), "unknown");
+        let html = Owner::new().with(|| {
+            provide_context(RequestUrl::new("http://example.com/desk"));
+            view! {
+                <Router>
+                    <RoutingHealthDashboard operator="authorized-operator".to_string() preview=true
+                        routes=vec![current, stale, missing] refresh=RwSignal::new(0)/>
+                </Router>
+            }
+            .to_html()
+        });
+        assert_eq!(html.matches("id=\"proof\"").count(), 1);
+        assert!(html.contains("dispatch_unconfirmed"));
+        assert!(html.contains("Recover the known-unsent dispatch by its durable claim ID"));
+        assert!(html.contains("projection_unavailable"));
+        assert!(html.contains("Current observations"));
+        assert!(!html.contains("<textarea"));
+        assert!(!html.contains("operator@example.com"));
+        if let Ok(path) = std::env::var("MAILDESK_TEST_RENDER_OUTPUT") {
+            std::fs::write(path, html)?;
+        }
+        Ok(())
     }
 }

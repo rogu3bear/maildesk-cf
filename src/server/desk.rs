@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use worker::D1Type;
 
 use crate::api::{
-    AuditSummary, DeskSnapshot, MessageSummary, ReplyReceipt, RouteHealthSummary, ThreadDetail,
-    ThreadSummary,
+    AuditSummary, DeskSnapshot, MessageSummary, ReplyReceipt, RouteHealthSummary,
+    RouteOperationalStatus, ThreadDetail, ThreadSummary,
 };
 
 use super::{AppError, AppResult, AppState};
@@ -85,6 +85,8 @@ struct RouteHealthRow {
     last_reply_provider_message_id: Option<String>,
     last_reply_verified_at: Option<String>,
     last_error_code: Option<String>,
+    projection_state: String,
+    projection_json: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,9 +293,19 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
                     last_inbound_provider_accepted_at, last_inbound_provider_message_ids_json,
                     last_inbox_verified_at, last_reply_provider_accepted_at,
                     last_reply_provider_message_id, last_reply_verified_at,
-                    last_error_code
+                    last_error_code, sp.projection_json,
+                    CASE WHEN sp.route_id IS NULL OR sp.schema_version <> 1
+                           OR sp.projection_revision <> 'route-operational-v1'
+                           OR sp.source_generation <> ar.status_generation
+                           OR sp.policy_sha256 IS NOT ar.policy_sha256
+                           OR sp.policy_sha256 IS NOT (SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1)
+                         THEN 'unknown'
+                         WHEN julianday(sp.observed_at) > julianday('now')
+                           OR julianday(sp.valid_until) <= julianday('now') THEN 'stale'
+                         ELSE 'current' END AS projection_state
              FROM route_health rh
              JOIN alias_routes ar ON ar.id = rh.route_id
+             LEFT JOIN route_status_projection sp ON sp.route_id = rh.route_id
              ORDER BY CASE
                WHEN inbound_status IN ('partial_delivery', 'recovery_required', 'failed')
                  OR reply_status IN ('partial_delivery', 'recovery_required', 'failed') THEN 0
@@ -335,6 +347,15 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
                 last_reply_provider_message_id: row.last_reply_provider_message_id,
                 last_reply_verified_at: row.last_reply_verified_at,
                 last_error_code: row.last_error_code,
+                projection_state: row.projection_state,
+                operational_status: row
+                    .projection_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<RouteOperationalStatus>(json).ok())
+                    .filter(|status| {
+                        status.schema_version == 1
+                            && status.projection_revision == "route-operational-v1"
+                    }),
             })
         })
         .collect()
@@ -494,6 +515,9 @@ fn route_decision_for_thread(thread: &ThreadSummary, operator: &str) -> AppResul
         operators: vec![operator.to_string()],
         default_reply_identity: thread.reply_identity.clone(),
         allowed_reply_identities: vec![thread.reply_identity.clone()],
+        // Stored legacy web-desk rows do not carry the policy-owned identity
+        // profile. Do not synthesize one from thread or subject data.
+        identity_profile: None,
         disposition: None,
     })
 }
@@ -793,6 +817,7 @@ mod tests {
         assert_eq!(decision.operators, ["operator@example.com"]);
         assert_eq!(decision.default_reply_identity, "founders@example.com");
         assert_eq!(decision.allowed_reply_identities, ["founders@example.com"]);
+        assert_eq!(decision.identity_profile, None);
     }
 
     #[test]

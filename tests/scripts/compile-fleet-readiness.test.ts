@@ -1,3 +1,4 @@
+import { projectRouteStatus, type RouteStatusInput } from "../../workers/shared/route-status";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -186,6 +187,7 @@ function input(): any {
         domain_sha256: DOMAIN,
         golden_thread_sha256: GOLDEN_A,
         planes: observedPlanes(ROUTE_A, GOLDEN_A, binding),
+        status_generation: 0, operational_status: operationalFixture(binding.policy_sha256),
       },
       {
         schema_version: 1,
@@ -193,6 +195,7 @@ function input(): any {
         domain_sha256: DOMAIN,
         golden_thread_sha256: GOLDEN_B,
         planes: observedPlanes(ROUTE_B, GOLDEN_B, binding),
+        status_generation: 0, operational_status: operationalFixture(binding.policy_sha256),
       },
     ],
   };
@@ -245,6 +248,7 @@ function rebindRouteSet(value: any): void {
 function makeSink(value: any): void {
   const route = value.route_inventory.routes.find((entry: any) => entry.route_sha256 === ROUTE_A)!;
   route.route_kind = "sink";
+  evidenceFor(value, ROUTE_A).operational_status = operationalFixture(value.binding.policy_sha256, { routeKind: "sink" });
   route.delivery_contract = "inbound_only_v1";
   const contractFields = {
     schema_version: 1,
@@ -258,7 +262,7 @@ function makeSink(value: any): void {
     contract_sha256: computeGraduationContractSha256(contractFields),
   };
   rebindRouteSet(value);
-  for (const plane of ["reply_authorized", "outbound_provider_accepted", "recipient_delivered", "privacy_proven"]) {
+  for (const plane of ["inbound_provider_accepted", "inbox_received", "reply_authorized", "outbound_provider_accepted", "recipient_delivered", "privacy_proven"]) {
     evidenceFor(value, ROUTE_A).planes[plane] = {
       state: "not_applicable",
       source: "graduation_contract",
@@ -541,7 +545,7 @@ describe("body-free fleet readiness compiler", () => {
     rebindRouteSet(forged);
     const forgedReport = compile(forged);
     expect(forgedReport.routes.find((entry) => entry.route_sha256 === ROUTE_A)?.first_blocker)
-      .toEqual({ plane: "reply_authorized", code: "graduation_contract_digest_mismatch" });
+      .toEqual({ plane: "inbound_provider_accepted", code: "graduation_contract_digest_mismatch" });
   });
 
   test("rejects impossible golden-thread chronology as a binding mismatch", () => {
@@ -596,4 +600,33 @@ describe("body-free fleet readiness compiler", () => {
     rejected.route_evidence[0].planes.configured.raw_provider_payload = { secret: "not admissible" };
     expect(() => compile(rejected)).toThrow("unexpected field");
   });
+});
+
+
+test("fresh receipt planes cannot hide missing operational projection", () => {
+  const value = input();
+  for (const row of value.route_evidence) { delete row.status_generation; delete row.operational_status; }
+  const result = compile(value);
+  expect(result.coverage.all_required_planes_proven_and_fresh).toBe(true);
+  expect(result.coverage.full_coverage_proven).toBe(false);
+  expect(result.first_blocker).toMatchObject({plane:"operational",code:"operational_projection_missing_or_incompatible"});
+});
+
+function operationalFixture(policySha256: string, overrides: Partial<RouteStatusInput> = {}) {
+  return projectRouteStatus({ policySha256: policySha256.replace(/^sha256:/,""), bindingCurrent: true,
+    enabled: true, routeKind: "role_alias", enrollment: "required", inboundProcessing: "enabled",
+    replyProcessing: "enabled", ordinaryProcessing: "enabled", activationId: "activation:fixture", quarantined: false,
+    inboundStatus: "provider_accepted", replyStatus: "provider_accepted", inboxObservedAt: NOW.toISOString(),
+    replyObservedAt: NOW.toISOString(), pendingDispatch: 0, pendingQueue: 0, unknownProviderAttempts: 0, ...overrides }, NOW.getTime());
+}
+
+test("intentional sinks require no provider delivery or operator inbox receipt", () => {
+  const value = input(); makeSink(value);
+  const record = evidenceFor(value, ROUTE_A);
+  for (const plane of ["inbound_provider_accepted", "inbox_received"]) record.planes[plane] = { ...record.planes.reply_authorized };
+  const report = compile(value);
+  const route = report.routes.find((entry) => entry.route_sha256 === ROUTE_A)!;
+  expect(route.status).toBe("ready");
+  expect(route.planes.inbox_received.state).toBe("not_applicable");
+  expect(route.planes.inbound_provider_accepted.state).toBe("not_applicable");
 });

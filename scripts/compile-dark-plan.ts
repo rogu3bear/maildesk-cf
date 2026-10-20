@@ -7,7 +7,7 @@ import { isRepositoryRelativePath } from "./wrangler-config";
 
 interface DesiredState {
   project: { name: string };
-  workers: Record<string, { script_name: string; config: string }>;
+  workers: Record<"relay_router" | "relay_outbound" | "routing_health", { script_name: string; config: string }>;
   access: DesiredAccess;
   storage: {
     d1_database: string;
@@ -37,6 +37,7 @@ interface DesiredAccess {
   };
 }
 
+async function main(): Promise<void> {
 const root = resolve(import.meta.dir, "..");
 const desiredPath = assertDesiredStatePath(arg("--desired-state") ?? "config/desired-state.example.json");
 const outputPath = arg("--out");
@@ -610,3 +611,7 @@ function git(...args: string[]): string {
 function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+}
+
+if (import.meta.main) await main();

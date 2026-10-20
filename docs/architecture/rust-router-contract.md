@@ -99,3 +99,11 @@ When adding features, update the router contract first if behavior changes.
 Then adapt Workers, UI, storage, and `cfctl` surfaces around the new typed
 decision shape. Do not bury policy in TypeScript glue because it is faster in
 the moment.
+
+## Canonical policy projection
+
+`project_policy` and `project_policy_json` validate the entire policy, then expose
+versioned canonical routes, normalized operator sets and identities, profiles,
+and ordered destination candidates. Role precedence also applies to inventory.
+Catch-all is projected directly, never by routing a synthetic address. Provider
+tooling joins topology and formats SQL; it must not reinterpret routing policy.

@@ -16,9 +16,13 @@ export interface CanaryEnv {
 }
 
 const HOUR = 3_600_000;
-export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind,
+export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind, ar.status_generation,
+  sp.projection_json AS operational_status,
   ar.domain_id, d.domain, ar.local_part, ar.kind AS storage_kind,
   ar.default_reply_identity_id AS reply_identity_id, i.address AS reply_identity,
+  (SELECT json_group_array(email) FROM
+    (SELECT o.email FROM alias_route_operators aro JOIN operators o ON o.id = aro.operator_id
+     WHERE aro.route_id = ar.id ORDER BY o.email)) AS operators_json,
   rh.policy_sha256 AS health_policy_sha256, rh.inbound_status, rh.reply_status,
   rh.last_inbox_verified_at, rh.last_reply_verified_at,
   (SELECT MAX(rp.verified_at) FROM route_proofs rp
@@ -29,6 +33,7 @@ export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind,
   JOIN identities i ON i.id = ar.default_reply_identity_id
   JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256
   LEFT JOIN route_health rh ON rh.route_id = ar.id AND rh.policy_sha256 = ar.policy_sha256
+  LEFT JOIN route_status_projection sp ON sp.route_id = ar.id
   WHERE ar.enabled = 1 AND ar.policy_sha256 = ?1 ORDER BY ar.id LIMIT 10001`;
 
 export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<CanaryReport | null> {
@@ -73,7 +78,7 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
       policy_sha256: "", expected_routes: 0, observed_routes: 0, excluded_routes: 0,
       current_routes: 0, configuration_routes: 0, inbox_proofs_fresh: 0, reply_proofs_fresh: 0,
       inbox_proofs_recorded: 0, reply_proofs_recorded: 0, probe_due: 0,
-      issues: { policy_or_route_inventory_unavailable: 1 },
+      issues: { policy_or_route_inventory_unavailable: 1 }, operational_status: [],
       provider_inventory_checked: false, live_probe_sent: false,
     };
   }
@@ -118,7 +123,7 @@ async function notify(env: CanaryEnv, from: string, to: string, report: CanaryRe
       env.DB.prepare("UPDATE mail_canary_state SET attempt_state = 'idle', last_report_sha256 = ?1, last_notified_at_ms = ?2 WHERE singleton = 1 AND attempt_id = ?3 AND attempt_state = 'sending'").bind(hash, now, attempt),
       env.DB.prepare("INSERT INTO audit_events (id, actor, action, detail_json) VALUES (?1, 'mail_canary', 'canary_notification_provider_accepted', ?2)").bind(attempt, JSON.stringify({ report, provider_message_id: sent.messageId })),
     ]);
-    if (saved.some((result) => !result.success) || saved[0]?.meta.changes !== 1) {
+    if (saved.some((result) => !result.success) || Number(saved[0]?.meta.changes ?? 0) === 0) {
       throw new Error("notification receipt persistence failed");
     }
   } catch {
@@ -168,7 +173,7 @@ export async function recordCoverage(env: CanaryEnv, policySha256: string, route
   ).bind(now));
   // One batch is one transaction: the heartbeat stamp moves only with the whole ledger.
   const saved = await env.DB.batch(statements);
-  if (saved.some((result) => !result.success) || saved.at(-1)?.meta.changes !== 1) {
+  if (saved.some((result) => !result.success) || Number(saved.at(-1)?.meta.changes ?? 0) === 0) {
     throw new Error("proof ledger persistence failed");
   }
 }
@@ -179,6 +184,7 @@ export function notificationText(report: CanaryReport): string {
     `Status: ${report.status}`,
     `Active routes: ${report.observed_routes}/${report.expected_routes}`,
     `Configuration reads: ${report.configuration_routes}`,
+    `Operational states: ${report.operational_status.map((row) => row.state === "current" ? row.status?.classification : row.state).join(", ") || "unknown"}`,
     `Independent inbox proofs inside the window: ${report.inbox_proofs_fresh}; recorded: ${report.inbox_proofs_recorded}`,
     `Independent reply proofs inside the window: ${report.reply_proofs_fresh}; recorded: ${report.reply_proofs_recorded}`,
     `Independent receipt pairs inside the window: ${report.current_routes}; intentionally excluded: ${report.excluded_routes}`,
