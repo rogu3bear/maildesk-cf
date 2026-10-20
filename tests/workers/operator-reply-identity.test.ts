@@ -3,6 +3,7 @@ import { activateFixture, relayRuntime, testPolicy } from "../helpers/relay-runt
 import { authorizeReplyWithPolicy, routeInbound, type RouterPolicy } from "../../workers/shared/router";
 import { publicIdentityProfileSha256, sha256Hex } from "../../workers/shared/inbox-relay";
 import { completeActivationCoverage } from "../../workers/shared/status-store";
+import { CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL } from "../../workers/mail-router/src/inbound-repository";
 
 function policy(): RouterPolicy {
   const result = structuredClone(testPolicy);
@@ -18,6 +19,54 @@ function policy(): RouterPolicy {
   }
   return result;
 }
+
+for (const mode of ["role_first", "personal_first"] as const) {
+  test(`${mode} exact inbound redelivery recovers only unsent recipients with their original public identities`, async () => {
+    const current = policy();
+    current.default_reply_mode = mode;
+    const f = await relayRuntime(99, current, "operator-a@example.net");
+    try {
+      const raw = new TextEncoder().encode("From: sender@example.net\r\nTo: support@example.com\r\nMessage-ID: <recover-identities@example.net>\r\nSubject: Recovery\r\nContent-Type: text/plain\r\n\r\nHello\r\n").buffer;
+      f.d1.before = (sql) => { if (sql === CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL) throw new Error("claim unavailable before send"); };
+      await f.ingress(raw, "support@example.com", "sender@example.net");
+      expect(f.sends).toHaveLength(0);
+      expect(f.db.query("SELECT status FROM inbound_recipient_deliveries").all()).toEqual([{ status: "pending" }, { status: "pending" }]);
+      f.d1.before = undefined;
+      await f.ingress(raw, "support@example.com", "sender@example.net");
+      expect(f.sends).toHaveLength(2);
+      for (const prefix of ["operator-a", "operator-b"]) {
+        const delivery = f.sends.find((entry) => entry.to === `${prefix}@example.net`)!;
+        const identity = mode === "personal_first" ? `${prefix}@example.com` : "support@example.com";
+        expect(delivery.from).toMatchObject({ email: identity });
+        expect(delivery.headers?.["X-Maildesk-Reply-Identity"]).toBe(identity);
+      }
+      expect(f.db.query("SELECT status FROM inbound_recipient_deliveries").all()).toEqual([{ status: "provider_accepted" }, { status: "provider_accepted" }]);
+      expect(f.db.query("SELECT DISTINCT reply_identity FROM reply_relays").all()).toEqual([{ reply_identity: "support@example.com" }]);
+      await f.ingress(raw, "support@example.com", "sender@example.net");
+      expect(f.sends).toHaveLength(2);
+    } finally { f.db.close(); }
+  });
+}
+
+test("personal-first recovery rejects a substituted identity in the immutable spool", async () => {
+  const f = await relayRuntime(99, policy(), "operator-a@example.net");
+  try {
+    const raw = new TextEncoder().encode("From: sender@example.net\r\nTo: support@example.com\r\nMessage-ID: <tampered-identities@example.net>\r\nContent-Type: text/plain\r\n\r\nHello\r\n").buffer;
+    f.d1.before = (sql) => { if (sql === CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL) throw new Error("claim unavailable before send"); };
+    await f.ingress(raw, "support@example.com", "sender@example.net");
+    f.d1.before = undefined;
+    const rows = f.db.query("SELECT delivery_payload_r2_key FROM inbound_recipient_deliveries").all() as Array<{ delivery_payload_r2_key: string }>;
+    for (const row of rows) {
+      const delivery = JSON.parse(new TextDecoder().decode(f.spools.get(row.delivery_payload_r2_key)!));
+      delivery.from.email = "substituted@example.com";
+      delivery.headers["X-Maildesk-Reply-Identity"] = "substituted@example.com";
+      f.spools.set(row.delivery_payload_r2_key, new TextEncoder().encode(JSON.stringify(delivery)).buffer);
+    }
+    await f.ingress(raw, "support@example.com", "sender@example.net");
+    expect(f.sends).toHaveLength(0);
+    expect(f.db.query("SELECT status FROM inbound_recipient_deliveries").all()).toEqual([{ status: "pending" }, { status: "pending" }]);
+  } finally { f.db.close(); }
+});
 
 test("shared inbound delivery gives each primary inbox its own public reply identity", async () => {
   const f = await relayRuntime(99, policy(), "operator-a@example.net");

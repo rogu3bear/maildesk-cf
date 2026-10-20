@@ -167,11 +167,13 @@ export async function loadOperatorDeliverySpool(
   const delivery = deserializeOperatorDelivery(serialized);
   const config = operatorDeliveryConfig(env);
   const token = config.replyDomain ? relayTokenFromRecipient(delivery.replyTo, config.replyDomain) : null;
+  // The verified payload digest freezes the Rust-selected identity for this
+  // recipient. Personal-first deliveries need not use the relay's role identity;
+  // neither recovery nor a later policy may replace the original payload.
   if (
     await sha256Hex(normalizeMailbox(delivery.to)) !== row.operator_ref ||
     delivery.headers["X-Maildesk-Delivery-ID"] !== row.delivery_message_id ||
-    normalizeMailbox(delivery.from.email) !== normalizeMailbox(inbound.reply_identity) ||
-    delivery.headers["X-Maildesk-Reply-Identity"] !== inbound.reply_identity ||
+    normalizeMailbox(delivery.from.email) !== delivery.headers["X-Maildesk-Reply-Identity"] ||
     !token ||
     await sha256Hex(token) !== inbound.token_sha256
   ) {

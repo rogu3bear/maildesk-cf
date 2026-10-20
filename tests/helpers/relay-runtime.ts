@@ -104,13 +104,14 @@ export async function relayRuntime(through = 99, policy = testPolicy, actor = "o
     POLICY_STORE: { get: async (key: string) => key === `config/policy/${policySha}.json`
       ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer } : null } as unknown as R2Bucket,
     RELAY_SPOOL: {
-      async put(key: string, value: ArrayBuffer) {
+      async put(key: string, value: ArrayBuffer | string) {
         if (faults.spoolWrite) throw new Error("spool write unavailable");
-        spools.set(key, value.slice(0));
+        spools.set(key, typeof value === "string" ? new TextEncoder().encode(value).buffer : value.slice(0));
       },
       async get(key: string) {
         const value = spools.get(key);
-        return value ? { size: value.byteLength, arrayBuffer: async () => value.slice(0) } : null;
+        return value ? { size: value.byteLength, arrayBuffer: async () => value.slice(0),
+          text: async () => new TextDecoder().decode(value) } : null;
       },
       async delete(key: string) { if (faults.cleanup) throw new Error("cleanup unavailable"); spools.delete(key); },
     } as unknown as R2Bucket,
