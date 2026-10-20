@@ -4,12 +4,98 @@ import { expect, test } from "bun:test";
 import { projectRouteStatus, proofFreshness, type RouteStatusInput } from "../../workers/shared/route-status";
 import { refreshRouteStatuses } from "../../workers/shared/status-store";
 import { activateFixture, relayRuntime } from "../helpers/relay-runtime";
+import { operationalReadinessBlocker, readRouteStatusProjection } from "../../workers/shared/route-status-reader";
+import { CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL } from "../../workers/mail-router/src/inbound-repository";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const input = (): RouteStatusInput => ({ policySha256: "a".repeat(64), bindingCurrent: true, enabled: true, routeKind: "role_alias", enrollment: "required",
   inboundProcessing: "enabled", replyProcessing: "enabled", ordinaryProcessing: "enabled", activationId: "activation:fixture", quarantined: false,
   inboundStatus: "provider_accepted", replyStatus: "provider_accepted", inboxObservedAt: "2026-10-15T11:00:00Z", replyObservedAt: "2026-10-15T11:00:00Z",
   pendingDispatch: 0, pendingQueue: 0, unknownProviderAttempts: 0 });
+
+const inbound = (id: string) => new TextEncoder().encode(`From: sender@example.net\r\nTo: support@example.com\r\nMessage-ID: <${id}@example.net>\r\nContent-Type: text/plain\r\n\r\nHello\r\n`).buffer;
+
+async function operationalStatus(f: Awaited<ReturnType<typeof relayRuntime>>) {
+  await refreshRouteStatuses(f.env);
+  const row = f.db.query("SELECT projection_json, source_generation FROM route_status_projection WHERE route_id='route:example.com:support'").get() as { projection_json: string; source_generation: number };
+  return readRouteStatusProjection(row.projection_json, { policySha256: f.policySha, sourceGeneration: row.source_generation });
+}
+
+test("a claimed inbound provider call blocks readiness even before the delivery rollup updates", async () => {
+  const f = await relayRuntime();
+  let release = () => {};
+  let delivery: Promise<string | undefined> | undefined;
+  try {
+    await activateFixture(f);
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered = () => {};
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    f.env.EMAIL = { async send() { entered(); await gate; return { messageId: "provider:inbound" }; } } as SendEmail;
+    delivery = f.ingress(inbound("in-flight"), "support@example.com", "sender@example.net");
+    await Promise.race([started, delivery.then(() => { throw new Error("inbound returned before the provider boundary"); })]);
+    const read = await operationalStatus(f);
+    expect(read.status).toMatchObject({ classification: "needs_attention", inbound_outcome: "unknown", unknown_provider_attempts: 1, next_action: "reconcile_provider_outcome" });
+    expect(operationalReadinessBlocker(read)).toBe("provider_outcome_requires_reconciliation");
+  } finally { release(); await delivery; f.db.close(); }
+});
+
+test("a later accepted inbound delivery cannot hide unresolved provider attempts", async () => {
+  const f = await relayRuntime();
+  try {
+    await activateFixture(f);
+    f.faults.providerAfter = true;
+    await f.ingress(inbound("uncertain"), "support@example.com", "sender@example.net");
+    f.faults.providerAfter = false;
+    await f.ingress(inbound("accepted"), "support@example.com", "sender@example.net");
+    const read = await operationalStatus(f);
+    expect(read.status).toMatchObject({ classification: "needs_attention", unknown_provider_attempts: 2, next_action: "reconcile_provider_outcome" });
+    expect(operationalReadinessBlocker(read)).toBe("provider_outcome_requires_reconciliation");
+  } finally { f.db.close(); }
+});
+
+test("a later accepted inbound delivery cannot hide recipients still awaiting a send claim", async () => {
+  const f = await relayRuntime();
+  try {
+    await activateFixture(f);
+    f.d1.before = (sql) => { if (sql === CLAIM_ACTIVE_INBOUND_RECIPIENT_SQL) throw new Error("claim unavailable before send"); };
+    await f.ingress(inbound("pending"), "support@example.com", "sender@example.net");
+    f.d1.before = undefined;
+    // Model interruption after the durable pending rows, before rollup projection.
+    f.db.run("UPDATE inbound_deliveries SET status='pending' WHERE id != 'inbound:one'");
+    await f.ingress(inbound("accepted-after-pending"), "support@example.com", "sender@example.net");
+    const read = await operationalStatus(f);
+    expect(read.status).toMatchObject({ classification: "needs_attention", inbound_outcome: "unknown", unknown_provider_attempts: 0, next_action: "reconcile_provider_outcome" });
+    expect(operationalReadinessBlocker(read)).toBe("provider_outcome_requires_reconciliation");
+  } finally { f.db.close(); }
+});
+
+test("inbound recipient changes invalidate cached status and fence a concurrent refresh", async () => {
+  const f = await relayRuntime();
+  try {
+    await activateFixture(f);
+    expect((await operationalStatus(f)).status?.classification).toBe("current");
+    const cached = () => f.db.query("SELECT count(*) AS n FROM route_status_projection").get();
+    f.db.run(`INSERT INTO inbound_recipient_deliveries
+      (delivery_id,operator_ref,delivery_message_id,delivery_payload_r2_key,delivery_payload_sha256,status)
+      VALUES ('inbound:one',?,'<pending@example.net>','spool:pending',?,'pending')`, ["a".repeat(64), "b".repeat(64)]);
+    expect(cached()).toEqual({ n: 0 });
+    expect((await operationalStatus(f)).status?.classification).toBe("needs_attention");
+    f.d1.before = (sql) => {
+      if (!sql.startsWith("INSERT INTO route_status_projection")) return;
+      f.d1.before = undefined;
+      f.db.run("UPDATE inbound_recipient_deliveries SET status='sending'");
+    };
+    await refreshRouteStatuses(f.env);
+    expect(cached()).toEqual({ n: 0 });
+    expect((await operationalStatus(f)).status).toMatchObject({ classification: "needs_attention", unknown_provider_attempts: 1 });
+    f.db.run("DELETE FROM inbound_recipient_deliveries");
+    expect(cached()).toEqual({ n: 0 });
+    expect((await operationalStatus(f)).status?.classification).toBe("current");
+    f.db.run("UPDATE inbound_deliveries SET status='sending'");
+    expect(cached()).toEqual({ n: 0 });
+    expect((await operationalStatus(f)).status?.classification).toBe("needs_attention");
+  } finally { f.db.close(); }
+});
 
 test("operational projection keeps authority, outcomes, freshness, sink and enrollment separate", () => {
   expect(projectRouteStatus(input(), now)).toMatchObject({ classification: "current", ordinary_authority_active: true, inbox_proof: "fresh", reply_outcome: "provider_accepted" });

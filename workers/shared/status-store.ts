@@ -18,8 +18,13 @@ interface StatusRow {
 
 export const ROUTE_STATUS_INPUT_SQL = `SELECT ar.id AS route_id, ar.status_generation AS source_generation,
   ar.enabled, ar.policy_sha256, rh.desired_provider,
-  COALESCE((SELECT d.status FROM inbound_deliveries d WHERE d.route_id = ar.id AND d.policy_sha256 = ar.policy_sha256
-    AND d.status IN ('provider_accepted','partial_delivery','failed','recovery_required') ORDER BY julianday(d.received_at) DESC LIMIT 1), rh.inbound_status) AS inbound_status,
+  COALESCE((SELECT CASE WHEN rd.status = 'pending' THEN 'pending' ELSE 'recovery_required' END
+    FROM inbound_recipient_deliveries rd JOIN inbound_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND d.policy_sha256 = ar.policy_sha256
+      AND rd.status IN ('pending','sending','recovery_required')
+    ORDER BY (rd.status != 'pending') DESC, julianday(d.received_at) DESC LIMIT 1),
+    (SELECT d.status FROM inbound_deliveries d WHERE d.route_id = ar.id AND d.policy_sha256 = ar.policy_sha256
+    ORDER BY julianday(d.received_at) DESC LIMIT 1), rh.inbound_status) AS inbound_status,
   COALESCE((SELECT rad.status FROM reply_admissions_all rad WHERE rad.route_id = ar.id AND rad.policy_sha256 = ar.policy_sha256
     AND rad.status IN ('sending','provider_accepted','failed','recovery_required') ORDER BY julianday(rad.admitted_at) DESC LIMIT 1), rh.reply_status) AS reply_status,
   COALESCE((SELECT p.verified_at FROM route_proofs p WHERE p.route_id = ar.id AND p.policy_sha256 = ar.policy_sha256
@@ -42,9 +47,11 @@ export const ROUTE_STATUS_INPUT_SQL = `SELECT ar.id AS route_id, ar.status_gener
   (SELECT count(*) FROM relay_attempts rat JOIN reply_relays rr ON rr.id = rat.relay_id
     JOIN reply_admissions_all rad ON rad.claimed_attempt_id = rat.id
     WHERE rr.route_id = ar.id AND rat.status IN ('queued','authorized') AND rad.status = 'claimed') AS pending_queue,
-  (SELECT count(*) FROM relay_attempts rat JOIN reply_relays rr ON rr.id = rat.relay_id
+  ((SELECT count(*) FROM relay_attempts rat JOIN reply_relays rr ON rr.id = rat.relay_id
     LEFT JOIN reply_admissions_all rad ON rad.claimed_attempt_id = rat.id
-    WHERE rr.route_id = ar.id AND (rad.status = 'sending' OR rat.status = 'recovery_required')) AS unknown_provider_attempts
+    WHERE rr.route_id = ar.id AND (rad.status = 'sending' OR rat.status = 'recovery_required')) +
+    (SELECT count(*) FROM inbound_recipient_deliveries rd JOIN inbound_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status IN ('sending','recovery_required'))) AS unknown_provider_attempts
   FROM alias_routes ar JOIN route_health rh ON rh.route_id = ar.id
   LEFT JOIN current_route_reply_authorizations a ON a.id =
     (SELECT min(representative.id) FROM current_route_reply_authorizations representative WHERE representative.route_id = ar.id)

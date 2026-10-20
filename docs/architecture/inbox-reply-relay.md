@@ -2,7 +2,8 @@
 
 This is the current reply authorization and recovery contract. Existing provider migrations 0001–0011 remain unchanged. Migration 0012
 adds the reusable canary-admission prerequisite; 0013–0015 add dispatch, ordinary
-authority and status. Historical records retain their original meaning. The October 2026 rectification changes ordinary authorization, work
+authority and status; 0017 invalidates status on inbound journal changes.
+Historical records retain their original meaning. The October 2026 rectification changes ordinary authorization, work
 queue eligibility, signature-free content, and duplicate recovery ordering.
 
 `inbox_relay` uses an existing operator inbox for reading and composing. Maildesk
@@ -57,6 +58,12 @@ Maildesk delivery reference. Only an exact, current-policy `pending` recipient
 may atomically become `sending`. A `sending`, accepted or uncertain recipient
 is never resent automatically. Cloudflare's non-idempotent send boundary cannot
 provide an exactly-once delivery guarantee.
+
+Recovery verifies the exact per-recipient spool digest, recipient reference,
+delivery reference and relay token before claiming a pending send. That digest
+also binds the original Rust-selected public identity and its matching banner
+header. Personal-first recipients retain their individual public identities;
+the historical relay's role identity is not substituted during recovery.
 
 Inbound result jobs must match the durable delivery, relay, route, policy,
 complete recipient set, spool generations and provider results before projection
@@ -202,6 +209,13 @@ policy, generation and expiry checks. Missing or incompatible fields remain
 unknown; stale projections retain historical authority facts without establishing
 current readiness. Unknown outcomes require reconciliation. Proof expiry is
 inclusive at the expiry instant.
+Unresolved inbound recipient claims participate in the same reconciliation
+projection as reply attempts. Pending recipients remain unknown work, and
+`sending` or `recovery_required` recipients count as unknown provider attempts.
+A later accepted delivery cannot hide those outstanding recipients or turn the
+route current. This derived status grants no replay authority.
+Migration 0017 invalidates cached projections on inbound delivery and recipient
+changes and advances the source generation to fence concurrent refreshes.
 For personal-first groups, status requires matching activation coverage for
 every distinct Rust-selected public profile. Its representative activation ID
 is an actual member of that complete set, and proof freshness uses the oldest
