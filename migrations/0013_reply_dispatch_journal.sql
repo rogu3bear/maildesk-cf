@@ -1,5 +1,39 @@
 -- Add a body-free authorization/dispatch journal without changing historical IDs.
 -- Existing unbound attempts remain reconciliation records, never fresh authority.
+-- Per-operator send identities are a policy projection, never an activation.
+CREATE TABLE alias_route_reply_identities (
+  route_id TEXT NOT NULL,
+  operator_id TEXT NOT NULL,
+  public_identity_id TEXT NOT NULL REFERENCES identities(id) ON DELETE RESTRICT,
+  policy_sha256 TEXT NOT NULL REFERENCES policy_revisions(policy_sha256) ON DELETE RESTRICT,
+  reply_mode TEXT NOT NULL CHECK (reply_mode IN ('role_first', 'personal_first')),
+  PRIMARY KEY (route_id, operator_id),
+  FOREIGN KEY (route_id, operator_id) REFERENCES alias_route_operators(route_id, operator_id) ON DELETE CASCADE
+);
+CREATE TRIGGER alias_route_reply_identity_guard BEFORE INSERT ON alias_route_reply_identities
+WHEN NOT EXISTS (
+  SELECT 1 FROM alias_routes ar JOIN identities i ON i.id = NEW.public_identity_id
+    JOIN operators o ON o.id = NEW.operator_id
+  WHERE ar.id = NEW.route_id AND ar.enabled = 1 AND ar.policy_sha256 = NEW.policy_sha256
+    AND i.domain_id = ar.domain_id
+    AND ((NEW.reply_mode = 'role_first' AND i.id = ar.default_reply_identity_id)
+      OR (NEW.reply_mode = 'personal_first' AND i.kind = 'personal'
+        AND substr(i.address, 1, instr(i.address, '@') - 1) = substr(o.email, 1, instr(o.email, '@') - 1)
+        AND EXISTS (SELECT 1 FROM alias_routes personal JOIN alias_route_operators member ON member.route_id = personal.id
+          WHERE personal.domain_id = ar.domain_id AND personal.default_reply_identity_id = i.id
+            AND personal.kind = 'personal' AND personal.enabled = 1 AND personal.policy_sha256 = NEW.policy_sha256
+            AND member.operator_id = NEW.operator_id)))
+)
+BEGIN SELECT RAISE(ABORT, 'operator public reply identity is not in policy'); END;
+CREATE TRIGGER alias_route_reply_identity_no_update BEFORE UPDATE ON alias_route_reply_identities
+BEGIN SELECT RAISE(ABORT, 'replace operator identity bindings with the reviewed projection'); END;
+-- The old policy selected each route's default identity. Preserve that mapping
+-- without granting any ordinary activation or modifying historical claims.
+INSERT INTO alias_route_reply_identities (route_id, operator_id, public_identity_id, policy_sha256, reply_mode)
+SELECT ar.id, member.operator_id, ar.default_reply_identity_id, ar.policy_sha256, 'role_first'
+FROM alias_routes ar JOIN alias_route_operators member ON member.route_id = ar.id
+WHERE ar.enabled = 1 AND ar.policy_sha256 IS NOT NULL;
+
 ALTER TABLE relay_attempts ADD COLUMN payload_version INTEGER NOT NULL DEFAULT 1 CHECK (payload_version IN (1, 2));
 ALTER TABLE relay_attempts ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 1 CHECK (identity_version IN (1, 2));
 ALTER TABLE relay_attempts ADD COLUMN admission_kind TEXT CHECK (admission_kind IN ('canary', 'ordinary'));
@@ -64,7 +98,10 @@ BEGIN
     AND EXISTS (SELECT 1 FROM reply_relays rr JOIN alias_routes ar ON ar.id = rr.route_id
       JOIN alias_route_operators aro ON aro.route_id = ar.id JOIN operators o ON o.id = aro.operator_id
       WHERE rr.id = NEW.relay_id AND rr.route_id = reply_admissions.route_id
-        AND rr.thread_id = reply_admissions.thread_id AND rr.reply_identity = reply_admissions.public_identity
+        AND rr.thread_id = reply_admissions.thread_id
+        AND EXISTS (SELECT 1 FROM alias_route_reply_identities binding JOIN identities public ON public.id = binding.public_identity_id
+          WHERE binding.route_id = rr.route_id AND binding.operator_id = o.id
+            AND binding.policy_sha256 = NEW.policy_sha256 AND public.address = reply_admissions.public_identity)
         AND o.email = NEW.operator AND ar.enabled = 1 AND ar.policy_sha256 = NEW.policy_sha256
         AND rr.revoked_at IS NULL AND rr.superseded_by_relay_id IS NULL
         AND julianday(rr.expires_at) > julianday('now'))

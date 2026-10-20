@@ -19,6 +19,7 @@ import {
 import {
   outboundReplyPayload,
   parseRelayEmail,
+  publicIdentityProfileSha256,
 } from "../../workers/shared/inbox-relay";
 import { authorizeReplyWithPolicy } from "../../workers/shared/router";
 
@@ -2819,6 +2820,7 @@ async function admittedInboxReply(input: {
       messageId,
       await outboundPayloadSha256({ ...payload, headers }),
     ),
+    identityProfileSha256: await publicIdentityProfileSha256(authorization.value.identityProfile),
     relayId: input.relayId,
     operator: "operator@tenant.example.com",
     operatorMessageId: input.operatorMessageId,

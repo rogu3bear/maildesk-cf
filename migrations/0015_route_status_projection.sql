@@ -33,6 +33,14 @@ CREATE TRIGGER route_status_operator_removed AFTER DELETE ON alias_route_operato
   UPDATE alias_routes SET status_generation = status_generation + 1 WHERE id = OLD.route_id;
   DELETE FROM route_status_projection WHERE route_id = OLD.route_id;
 END;
+CREATE TRIGGER route_status_reply_identity_added AFTER INSERT ON alias_route_reply_identities BEGIN
+  UPDATE alias_routes SET status_generation = status_generation + 1 WHERE id = NEW.route_id;
+  DELETE FROM route_status_projection WHERE route_id = NEW.route_id;
+END;
+CREATE TRIGGER route_status_reply_identity_removed AFTER DELETE ON alias_route_reply_identities BEGIN
+  UPDATE alias_routes SET status_generation = status_generation + 1 WHERE id = OLD.route_id;
+  DELETE FROM route_status_projection WHERE route_id = OLD.route_id;
+END;
 CREATE TRIGGER route_status_operator_changed AFTER UPDATE OF email ON operators BEGIN
   UPDATE alias_routes SET status_generation = status_generation + 1 WHERE id IN (SELECT route_id FROM alias_route_operators WHERE operator_id = NEW.id);
   DELETE FROM route_status_projection WHERE route_id IN (SELECT route_id FROM alias_route_operators WHERE operator_id = NEW.id);
@@ -132,8 +140,10 @@ END;
 -- Every stored route/profile row participating in Rust inventory parity changes
 -- the generation. A cache cannot outlive an equal-count substitution.
 CREATE TRIGGER route_status_identity_changed AFTER UPDATE OF address, kind ON identities BEGIN
-  UPDATE alias_routes SET status_generation = status_generation + 1 WHERE default_reply_identity_id = NEW.id;
-  DELETE FROM route_status_projection WHERE route_id IN (SELECT id FROM alias_routes WHERE default_reply_identity_id = NEW.id);
+  UPDATE alias_routes SET status_generation = status_generation + 1 WHERE default_reply_identity_id = NEW.id
+    OR id IN (SELECT route_id FROM alias_route_reply_identities WHERE public_identity_id = NEW.id);
+  DELETE FROM route_status_projection WHERE route_id IN (SELECT id FROM alias_routes WHERE default_reply_identity_id = NEW.id
+    OR id IN (SELECT route_id FROM alias_route_reply_identities WHERE public_identity_id = NEW.id));
 END;
 CREATE TRIGGER route_status_domain_changed AFTER UPDATE OF domain ON domains BEGIN
   UPDATE alias_routes SET status_generation = status_generation + 1 WHERE domain_id = NEW.id;

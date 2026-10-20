@@ -246,25 +246,27 @@ export async function acceptInboxRelay(
   const routeId = stableId("route", route.domain, route.localPart);
   const quarantined = await env.DB.prepare("SELECT id FROM active_route_reply_quarantines WHERE route_id = ?1 LIMIT 1")
     .bind(routeId).first<{ id: string }>();
-  const activation = route.identityProfile && await loadOrdinaryRouteAuthorization({
-    routeId, policySha256, identityProfileSha256: await publicIdentityProfileSha256(route.identityProfile),
-    operatorSetSha256: await sha256Hex(JSON.stringify(route.operators)),
-  }, env);
-  const replyAvailability = quarantined ? "quarantined" : activation ? "ordinary_activated" : "canary_only";
-  const deliveries = route.operators.map((operator, index) =>
-    buildOperatorDelivery(parsed, {
+  const operatorSetSha256 = await sha256Hex(JSON.stringify(route.operators));
+  const deliveries = await Promise.all(route.operators.map(async (operator, index) => {
+    const binding = route.operatorReplyIdentities?.[operator];
+    const profile = binding ? binding.identityProfile : route.identityProfile;
+    const activation = profile && await loadOrdinaryRouteAuthorization({
+      routeId, policySha256, identityProfileSha256: await publicIdentityProfileSha256(profile), operatorSetSha256,
+    }, env);
+    const replyAvailability = quarantined ? "quarantined" : activation ? "ordinary_activated" : "canary_only";
+    return buildOperatorDelivery(parsed, {
       operator,
       receivedAddress: normalizeMailbox(message.to),
-      replyIdentity: route.defaultReplyIdentity,
-      identityProfile: route.identityProfile,
+      replyIdentity: binding ? binding.publicAddress : route.defaultReplyIdentity,
+      identityProfile: profile,
       replyProcessingMode: config.replyProcessingMode,
       replyAvailability,
       routeKind: route.routeKind,
       operatorCount: route.operators.length,
       relayAddress: replyTo,
       deliveryMessageId: deliveryMessageIds[index]!,
-    }),
-  );
+    });
+  }));
   try {
     for (const delivery of deliveries) assertWithinRelayLimit(delivery, config);
   } catch {

@@ -9,13 +9,13 @@ export async function signingFixture() {
       type: 16, TTL: 0, data: `"v=DKIM1; k=rsa; p=${publicKey}"`,
     }] })) as typeof fetch,
     async sign(input: {
-      headers: string[]; body: string; signed?: string[]; selector?: string; extraTags?: string;
+      headers: string[]; body: string; signed?: string[]; selector?: string; extraTags?: string; domain?: string;
     }): Promise<ArrayBuffer> {
       const signed = input.signed ?? input.headers.map((line) => line.slice(0, line.indexOf(":" )).toLowerCase());
       const body = input.body.replace(/\r?\n/g, "\r\n").split("\r\n")
         .map((line) => line.replace(/[ \t]+/g, " ").replace(/[ \t]+$/g, "")).join("\r\n").replace(/(?:\r\n)*$/, "\r\n");
       const bodyHash = base64(await crypto.subtle.digest("SHA-256", bytes(body)));
-      const value = `v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=${input.selector ?? "fixture"}; h=${signed.join(":")}; ${input.extraTags ?? ""}bh=${bodyHash}; b=`;
+      const value = `v=1; a=rsa-sha256; c=relaxed/relaxed; d=${input.domain ?? "example.com"}; s=${input.selector ?? "fixture"}; h=${signed.join(":")}; ${input.extraTags ?? ""}bh=${bodyHash}; b=`;
       const used = new Map<string, number>();
       const canonical = signed.map((name) => {
         const matching = input.headers.filter((line) => line.slice(0, line.indexOf(":" )).toLowerCase() === name);

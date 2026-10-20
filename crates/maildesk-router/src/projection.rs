@@ -35,6 +35,7 @@ pub fn project_policy(policy: &RouterPolicy) -> Result<PolicyProjection, PolicyE
         }
         if let Some(catch_all) = &config.catch_all {
             let decision = catch_all_decision(policy, domain.clone(), "*".into(), catch_all)
+                .and_then(|decision| reply_identity::bind_operator_identities(policy, decision))
                 .and_then(project_decision)
                 .map_err(|error| PolicyError::InvalidRoute("*".into(), domain.clone(), error))?;
             routes.push(decision);

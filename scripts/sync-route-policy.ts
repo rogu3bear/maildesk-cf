@@ -29,6 +29,7 @@ export interface ProjectedRoute {
   desiredProvider: InboundProvider;
   operators: string[];
   replyIdentity: string;
+  operatorReplyIdentities?: Record<string, string>;
   initialStatus: "local_policy_valid" | "declared" | "intentionally_excluded";
 }
 
@@ -61,11 +62,16 @@ export function projectRoutes(
   for (const route of projection.value.routes) {
     const desiredDomain = desiredByDomain.get(route.domain);
     if (!desiredDomain) fail(`policy domain is missing from desired state: ${route.domain}`);
-    routes.push(projectedRoute(
+    const projected = projectedRoute(
       route.domain, route.localPart, route.routeKind,
       route.routeKind === "personal_alias" ? "personal" : "role",
       desiredDomain.inbound_mx_provider, route.operators, route.defaultReplyIdentity,
-    ));
+    );
+    if (route.operatorReplyIdentities) {
+      projected.operatorReplyIdentities = Object.fromEntries(Object.entries(route.operatorReplyIdentities)
+        .map(([operator, binding]) => [operator, binding.publicAddress]));
+    }
+    routes.push(projected);
   }
 
   for (const desiredDomain of desired.domains) {
@@ -106,6 +112,7 @@ export function projectionSql(
   desiredStateSha256: string,
 ): { sql: string; projectionSha256: string } {
   const domainCount = new Set(routes.map((route) => route.domain)).size;
+  const personalIdentities = new Set(routes.filter((route) => route.storageKind === "personal").map((route) => route.replyIdentity));
   const statements: string[] = [
     `INSERT INTO policy_revisions (policy_sha256, r2_object_key, expected_domain_count, expected_route_count) VALUES (${sql(policySha256)}, ${sql(policyR2Key)}, ${domainCount}, ${routes.length}) ON CONFLICT(policy_sha256) DO UPDATE SET r2_object_key = excluded.r2_object_key, expected_domain_count = excluded.expected_domain_count, expected_route_count = excluded.expected_route_count;`,
     "UPDATE alias_routes SET enabled = 0;",
@@ -113,11 +120,12 @@ export function projectionSql(
   for (const route of routes) {
     const domainId = stableId("domain", route.domain);
     const identityId = stableId("identity", route.replyIdentity);
+    const identityKind = personalIdentities.has(route.replyIdentity) ? "personal" : "role";
     const routeId = stableId("route", route.domain, route.localPart);
     const proofAuthorityChanged = "route_health.policy_sha256 IS NOT excluded.policy_sha256 OR route_health.desired_provider <> excluded.desired_provider OR excluded.inbound_status = 'intentionally_excluded'";
     const routeStatements = [
       `INSERT OR IGNORE INTO domains (id, domain) VALUES (${sql(domainId)}, ${sql(route.domain)});`,
-      `INSERT INTO identities (id, domain_id, address, kind) VALUES (${sql(identityId)}, ${sql(domainId)}, ${sql(route.replyIdentity)}, ${sql(route.storageKind)}) ON CONFLICT(id) DO UPDATE SET address = excluded.address, kind = excluded.kind;`,
+      `INSERT INTO identities (id, domain_id, address, kind) VALUES (${sql(identityId)}, ${sql(domainId)}, ${sql(route.replyIdentity)}, ${sql(identityKind)}) ON CONFLICT(id) DO UPDATE SET address = excluded.address, kind = excluded.kind;`,
       `INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, decision_kind, enabled, policy_sha256) VALUES (${sql(routeId)}, ${sql(domainId)}, ${sql(route.localPart)}, ${sql(route.storageKind)}, ${sql(identityId)}, ${sql(route.decisionKind)}, 1, ${sql(policySha256)}) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, default_reply_identity_id = excluded.default_reply_identity_id, decision_kind = excluded.decision_kind, enabled = 1, policy_sha256 = excluded.policy_sha256;`,
       `DELETE FROM alias_route_operators WHERE route_id = ${sql(routeId)};`,
     ];
@@ -132,6 +140,18 @@ export function projectionSql(
       `INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, operator_count, reply_identity, inbound_status, reply_status, policy_sha256, updated_at) VALUES (${sql(routeId)}, ${sql(`${route.localPart}@${route.domain}`)}, ${sql(route.decisionKind)}, ${sql(route.desiredProvider)}, ${route.operators.length}, ${sql(route.replyIdentity)}, ${sql(route.initialStatus)}, ${sql(route.initialStatus)}, ${sql(policySha256)}, CURRENT_TIMESTAMP) ON CONFLICT(route_id) DO UPDATE SET route_address = excluded.route_address, decision_kind = excluded.decision_kind, desired_provider = excluded.desired_provider, operator_count = excluded.operator_count, reply_identity = excluded.reply_identity, inbound_status = CASE WHEN ${proofAuthorityChanged} THEN excluded.inbound_status ELSE route_health.inbound_status END, reply_status = CASE WHEN ${proofAuthorityChanged} THEN excluded.reply_status ELSE route_health.reply_status END, last_inbound_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_inbound_at END, last_reply_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_reply_at END, last_inbound_provider_accepted_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_inbound_provider_accepted_at END, last_inbound_provider_message_ids_json = CASE WHEN ${proofAuthorityChanged} THEN '[]' ELSE route_health.last_inbound_provider_message_ids_json END, last_inbox_verified_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_inbox_verified_at END, last_reply_provider_accepted_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_reply_provider_accepted_at END, last_reply_provider_message_id = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_reply_provider_message_id END, last_reply_verified_at = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_reply_verified_at END, last_error_code = CASE WHEN ${proofAuthorityChanged} THEN NULL ELSE route_health.last_error_code END, policy_sha256 = excluded.policy_sha256, updated_at = CURRENT_TIMESTAMP;`,
     );
     statements.push(...routeStatements);
+  }
+  // Personal aliases and memberships must all exist before cross-route reply
+  // bindings are inserted. Ordering aliases alphabetically cannot provide that.
+  for (const route of routes) {
+    if (route.operatorReplyIdentities && JSON.stringify(Object.keys(route.operatorReplyIdentities).sort()) !== JSON.stringify([...route.operators].sort())) {
+      fail("operator reply identity membership differs from Rust projection");
+    }
+    const routeId = stableId("route", route.domain, route.localPart);
+    for (const operator of route.operators) {
+      const identity = route.operatorReplyIdentities?.[operator] ?? route.replyIdentity;
+      statements.push(`INSERT INTO alias_route_reply_identities (route_id, operator_id, public_identity_id, policy_sha256, reply_mode) VALUES (${sql(routeId)}, ${sql(stableId("operator", operator))}, ${sql(stableId("identity", identity))}, ${sql(policySha256)}, ${sql(route.operatorReplyIdentities ? "personal_first" : "role_first")});`);
+    }
   }
   const projectionSha256 = sha256(d1ImportSql(statements));
   statements.push(

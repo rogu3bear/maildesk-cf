@@ -227,6 +227,7 @@ test("Rust-derived inventory preserves personal, sink and catch-all decisions", 
     ...goodSnapshot().routes[0]!, route_id: `route:example.com:${encodeURIComponent(alias)}`,
     domain_id: "domain:example.com", domain: "example.com", local_part: alias, decision_kind: kind,
     operators_json: JSON.stringify(kind === "sink" ? [] : ["operator@example.com"]),
+    reply_identity_bindings_json: JSON.stringify(kind === "sink" ? [] : [["operator@example.com", identity, "role_first"]]),
     storage_kind: storage, reply_identity_id: `identity:${encodeURIComponent(identity)}`, reply_identity: identity,
   });
   const rows = [row("postmaster", "role_alias", "postmaster@example.com"),
@@ -273,6 +274,7 @@ async function fixture() {
   db.run("INSERT INTO alias_routes (id, domain_id, local_part, kind, default_reply_identity_id, policy_sha256) VALUES ('route:example.com:postmaster', 'domain:example.com', 'postmaster', 'role', 'identity:postmaster%40example.com', ?)", [hash]);
   db.run("INSERT INTO operators (id, email) VALUES ('operator:fixture', 'operator@example.com')");
   db.run("INSERT INTO alias_route_operators (route_id, operator_id) VALUES ('route:example.com:postmaster', 'operator:fixture')");
+  db.run("INSERT INTO alias_route_reply_identities (route_id, operator_id, public_identity_id, policy_sha256, reply_mode) VALUES ('route:example.com:postmaster', 'operator:fixture', 'identity:postmaster%40example.com', ?, 'role_first')", [hash]);
   db.run("INSERT INTO route_health (route_id, route_address, decision_kind, desired_provider, reply_identity, policy_sha256, inbound_status, reply_status, last_inbox_verified_at, last_reply_verified_at) VALUES ('route:example.com:postmaster', 'postmaster@example.com', 'role_alias', 'cloudflare_email_routing', 'postmaster@example.com', ?, 'inbox_verified', 'reply_verified', ?, ?)", [hash, recent, recent]);
   db.run("INSERT INTO route_proofs (id, route_id, policy_sha256, proof_kind, evidence_sha256, verified_at) VALUES ('p', 'route:example.com:postmaster', ?, 'edge_verified', ?, ?)", [hash, "a".repeat(64), recent]);
   const sent: Array<{ to: string[]; subject: string; text: string }> = [];

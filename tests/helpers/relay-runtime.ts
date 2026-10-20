@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { projectRoutes, projectionSql } from "../../scripts/sync-route-policy";
 import { publicIdentityProfileSha256, sha256Hex } from "../../workers/shared/inbox-relay";
-import { authorizeReplyWithPolicy, type RouterPolicy } from "../../workers/shared/router";
+import { authorizeReplyWithPolicy, routeInbound, type RouterPolicy } from "../../workers/shared/router";
 import type { MaildeskEnv, MailJob } from "../../workers/shared/contracts";
 import mailRouter from "../../workers/mail-router/src/index";
 import { processQueueBatch } from "../../workers/shared/outbound/queue";
@@ -59,18 +59,25 @@ export function migrate(db: Database, after = 0, through = 99): void {
   }
 }
 
-export async function relayRuntime(through = 99) {
+export async function relayRuntime(through = 99, policy = testPolicy, actor = "operator@example.com") {
   const db = new Database(":memory:", { strict: true });
   db.exec("PRAGMA foreign_keys = ON");
   migrate(db, 0, through);
   const d1 = new LocalD1(db);
-  const policyJson = JSON.stringify(testPolicy);
+  const policyJson = JSON.stringify(policy);
   const policySha = await sha256Hex(policyJson);
   const desiredSha = "b".repeat(64);
-  const routes = projectRoutes(testPolicy, { storage: { d1_database: "fixture" }, domains: [{
-    name: "example.com", inbound_mx_provider: "cloudflare_email_routing", role_aliases: ["support"], personal_aliases: [],
+  const routes = projectRoutes(policy, { storage: { d1_database: "fixture" }, domains: [{
+    name: "example.com", inbound_mx_provider: "cloudflare_email_routing", role_aliases: Object.keys(policy.domains["example.com"]!.role_aliases),
+    personal_aliases: Object.keys(policy.domains["example.com"]!.personal_aliases),
   }] });
-  db.exec(projectionSql(routes, policySha, `config/policy/${policySha}.json`, desiredSha).sql);
+  const projection = projectionSql(routes, policySha, `config/policy/${policySha}.json`, desiredSha).sql;
+  // Populated pre-0013 fixtures must use the historical role-first projection
+  // shape. Do not create the new table early: the upgrade must backfill it.
+  const initialProjection = through < 13
+    ? projection.split("\n").filter((line) => !line.startsWith("INSERT INTO alias_route_reply_identities ")).join("\n")
+    : projection;
+  db.exec(initialProjection);
   db.run("INSERT INTO threads (id, domain_id, route_id, external_sender) VALUES ('thread:one', 'domain:example.com', 'route:example.com:support', 'sender@example.net')");
   const token = "a".repeat(62);
   const tokenHash = await sha256Hex(token);
@@ -82,10 +89,12 @@ export async function relayRuntime(through = 99) {
   db.run(`INSERT INTO inbound_deliveries (id, fingerprint_sha256, relay_id, thread_id, route_id,
     policy_sha256, received_at, status) VALUES ('inbound:one', ?, 'relay:one', 'thread:one',
     'route:example.com:support', ?, ?, 'provider_accepted')`, ["c".repeat(64), policySha, new Date().toISOString()]);
-  const profile = authorizeReplyWithPolicy(testPolicy, { envelopeTo: "support@example.com", operator: "operator@example.com" });
+  const profile = authorizeReplyWithPolicy(policy, { envelopeTo: "support@example.com", operator: actor });
   if (!profile.ok || !profile.value.identityProfile) throw new Error("fixture profile missing");
   const profileSha = await publicIdentityProfileSha256(profile.value.identityProfile);
-  const operatorSetSha = await sha256Hex(JSON.stringify(["operator@example.com", "second@example.com"]));
+  const routed = routeInbound(policy, { envelopeTo: "support@example.com", headerFrom: "sender@example.net" });
+  if (!routed.ok) throw new Error("fixture route missing");
+  const operatorSetSha = await sha256Hex(JSON.stringify(routed.value.operators));
   const spools = new Map<string, ArrayBuffer>();
   const jobs: MailJob[] = [];
   const sends: EmailMessageBuilder[] = [];
@@ -121,6 +130,7 @@ export async function relayRuntime(through = 99) {
   };
   return {
     db, d1, env, spools, jobs, sends, faults, policySha, desiredSha, profileSha, operatorSetSha, relayRecipient,
+    publicIdentity: profile.value.fromIdentity, profile: profile.value.identityProfile!, operators: routed.value.operators,
     async admitCanary(id = "admission:one") {
       const digest = "d".repeat(64);
       const values: Record<string, SQLQueryBindings> = {
@@ -128,10 +138,10 @@ export async function relayRuntime(through = 99) {
         candidate_sha256: digest, scope_manifest_sha256: digest, inbound_delivery_id: "inbound:one",
         relay_id: "relay:one", thread_id: "thread:one", route_id: "route:example.com:support",
         policy_sha256: policySha, desired_state_sha256: desiredSha, operator_set_sha256: operatorSetSha,
-        admitted_operator_ref: await sha256Hex("operator@example.com"), public_identity: "support@example.com",
-        sender_domain: "example.com", identity_profile_ref: "support@example.com", identity_profile_sha256: profileSha,
-        display_name: "Example Support", signature_profile_ref: "signature:support:v1",
-        signature_sha256: await sha256Hex("Example Support\nexample.com"), sender_adapter: "cloudflare_email_service",
+        admitted_operator_ref: await sha256Hex(actor), public_identity: profile.value.fromIdentity,
+        sender_domain: "example.com", identity_profile_ref: profile.value.identityProfile!.profileRef, identity_profile_sha256: profileSha,
+        display_name: profile.value.identityProfile!.displayName, signature_profile_ref: profile.value.identityProfile!.signatureProfileRef,
+        signature_sha256: await sha256Hex(profile.value.identityProfile!.signatureText), sender_adapter: "cloudflare_email_service",
         configured_policy_receipt_sha256: digest, edge_activation_receipt_sha256: digest,
         sender_domain_receipt_sha256: digest, inbound_acceptance_receipt_sha256: digest,
         apple_mail_inbox_receipt_sha256: digest, operator_authorization_receipt_sha256: digest,
@@ -141,15 +151,15 @@ export async function relayRuntime(through = 99) {
       };
       db.run(`INSERT INTO reply_admissions (${Object.keys(values).join(",")}) VALUES (${Object.keys(values).map(() => "?").join(",")})`, Object.values(values));
     },
-    async signedReply(messageId = "<reply-1@example.com>", body = "A plain reply.\r\n", operator = "operator@example.com") {
+    async signedReply(messageId = "<reply-1@example.com>", body = "A plain reply.\r\n", operator = actor) {
       const signer = await signerPromise;
       return signer.sign({ headers: [
         `From: ${operator}`, `To: ${relayRecipient}`, `Message-ID: ${messageId}`,
         "Subject: Re: report", "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8",
         "Content-Transfer-Encoding: 8bit",
-      ], body });
+      ], body, domain: operator.split("@")[1] });
     },
-    async ingress(raw: ArrayBuffer, to = relayRecipient, from = "operator@example.com") {
+    async ingress(raw: ArrayBuffer, to = relayRecipient, from = actor) {
       let rejected: string | undefined;
       const message = { from, to, rawSize: raw.byteLength, raw: new Response(raw.slice(0)).body!,
         headers: new Headers(), setReject(reason: string) { rejected = reason; } };
@@ -190,9 +200,9 @@ export async function activateFixture(f: Awaited<ReturnType<typeof relayRuntime>
   const record: Record<string, SQLQueryBindings> = {
     id: "activation:fixture", schema_version: 1, route_id: "route:example.com:support",
     policy_sha256: f.policySha, desired_state_sha256: f.desiredSha,
-    public_identity: "support@example.com", identity_profile_ref: "support@example.com",
+    public_identity: f.publicIdentity, identity_profile_ref: f.profile.profileRef,
     identity_profile_sha256: f.profileSha, operator_set_sha256: f.operatorSetSha,
-    operator_set_json: JSON.stringify(["operator@example.com", "second@example.com"]),
+    operator_set_json: JSON.stringify(f.operators),
     sender_adapter: "cloudflare_email_service", sender_domain: "example.com",
     runtime_artifacts_sha256: f.env.MAILDESK_RUNTIME_ARTIFACTS_SHA256, topology_sha256: f.env.MAILDESK_TOPOLOGY_SHA256,
     qualification_kind: "golden_thread", canary_admission_id: "admission:one",

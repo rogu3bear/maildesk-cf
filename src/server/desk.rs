@@ -515,9 +515,10 @@ fn route_decision_for_thread(thread: &ThreadSummary, operator: &str) -> AppResul
         operators: vec![operator.to_string()],
         default_reply_identity: thread.reply_identity.clone(),
         allowed_reply_identities: vec![thread.reply_identity.clone()],
-        // Stored legacy web-desk rows do not carry the policy-owned identity
-        // profile. Do not synthesize one from thread or subject data.
+        // Stored legacy web-desk rows do not carry policy-owned profiles or
+        // operator identity mappings. Do not synthesize either from the thread.
         identity_profile: None,
+        operator_reply_identities: Default::default(),
         disposition: None,
     })
 }

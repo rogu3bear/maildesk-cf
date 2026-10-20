@@ -10,6 +10,7 @@ export interface RouteInventoryRow extends RouteSnapshot {
   reply_identity_id: string;
   reply_identity: string;
   operators_json: string;
+  reply_identity_bindings_json: string;
 }
 
 /** Full membership and operator parity are checked against Rust, never counts. */

@@ -127,7 +127,15 @@ test("route and identity substitutions invalidate the canonical operational cach
     try {
       await activateFixture(f); await refreshRouteStatuses(f.env);
       expect(f.db.query("SELECT count(*) AS n FROM route_status_projection").get()).toEqual({n:1});
-      f.db.exec(sql);
+      try {
+        f.db.transaction(() => {
+          for (const statement of sql.split(";").filter((value) => value.trim())) f.db.exec(statement);
+        })();
+      } catch (error) {
+        expect(String(error)).toContain("FOREIGN KEY constraint failed");
+        expect(f.db.query("SELECT count(*) AS n FROM route_status_projection").get()).toEqual({n:1});
+        continue;
+      }
       expect(f.db.query("SELECT count(*) AS n FROM route_status_projection").get()).toEqual({n:0});
       await refreshRouteStatuses(f.env);
       expect(f.db.query("SELECT count(*) AS n FROM route_status_projection").get()).toEqual({n:0});

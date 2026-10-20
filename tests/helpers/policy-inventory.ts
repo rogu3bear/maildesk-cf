@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { projectPolicy, type RouterPolicy } from "../../workers/shared/router";
-import { policyStorageId, type PolicyInventoryRow } from "../../workers/shared/policy-inventory";
+import { policyStorageId, routeReplyIdentityBindings, type PolicyInventoryRow } from "../../workers/shared/policy-inventory";
 
 /** Database setup for mocks; corruption tests alter these rows independently. */
 export function inventoryFixture(policyJson: string): PolicyInventoryRow[] {
@@ -15,6 +15,7 @@ export function inventoryFixture(policyJson: string): PolicyInventoryRow[] {
     reply_identity_id: policyStorageId("identity", route.defaultReplyIdentity),
     reply_identity: route.defaultReplyIdentity,
     operators_json: JSON.stringify(route.operators),
+    reply_identity_bindings_json: JSON.stringify(routeReplyIdentityBindings(route)),
     policy_sha256: createHash("sha256").update(policyJson).digest("hex"),
   }));
 }

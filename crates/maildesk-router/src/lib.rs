@@ -1,4 +1,5 @@
 mod projection;
+mod reply_identity;
 pub use projection::{project_policy, project_policy_json, PolicyProjection, ProjectedRoute};
 
 use serde::{Deserialize, Serialize};
@@ -142,8 +143,17 @@ pub struct RouteDecision {
     pub allowed_reply_identities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_profile: Option<ResolvedIdentityProfile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operator_reply_identities: BTreeMap<String, OperatorReplyIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disposition: Option<RouteDisposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorReplyIdentity {
+    pub public_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_profile: Option<ResolvedIdentityProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +213,8 @@ pub enum RouteError {
     UnauthorizedReplyIdentity(String),
     #[error("multiple active identity profiles match: {0}")]
     AmbiguousIdentityProfile(String),
+    #[error("operator has no matching configured public identity: {0}")]
+    MissingOperatorReplyIdentity(String),
     #[error("reply target is missing")]
     MissingReplyTarget,
     #[error("multiple external reply targets are plausible")]
@@ -293,15 +305,18 @@ pub fn route_message(
         .ok_or_else(|| RouteError::UnknownDomain(domain.clone()))?;
 
     if let Some(role_policy) = domain_policy.role_aliases.get(&local_part) {
-        return role_decision(policy, domain, local_part, role_policy);
+        return role_decision(policy, domain, local_part, role_policy)
+            .and_then(|decision| reply_identity::bind_operator_identities(policy, decision));
     }
 
     if let Some(personal_policy) = domain_policy.personal_aliases.get(&local_part) {
-        return personal_decision(policy, domain, local_part, personal_policy);
+        return personal_decision(policy, domain, local_part, personal_policy)
+            .and_then(|decision| reply_identity::bind_operator_identities(policy, decision));
     }
 
     if let Some(catch_all_policy) = &domain_policy.catch_all {
-        return catch_all_decision(policy, domain, "*".to_string(), catch_all_policy);
+        return catch_all_decision(policy, domain, "*".to_string(), catch_all_policy)
+            .and_then(|decision| reply_identity::bind_operator_identities(policy, decision));
     }
 
     Err(RouteError::UnknownAlias(local_part, domain))
@@ -321,10 +336,20 @@ pub fn authorize_reply(
         return Err(RouteError::UnauthorizedOperator(operator));
     }
 
+    let personal = decision.operator_reply_identities.get(&operator);
     let identity = requested_identity
         .map(normalize_mailbox)
         .transpose()?
-        .unwrap_or_else(|| decision.default_reply_identity.clone());
+        .unwrap_or_else(|| {
+            personal.map_or_else(
+                || decision.default_reply_identity.clone(),
+                |binding| binding.public_address.clone(),
+            )
+        });
+
+    if personal.is_some_and(|binding| binding.public_address != identity) {
+        return Err(RouteError::UnauthorizedReplyIdentity(identity));
+    }
 
     if !decision
         .allowed_reply_identities
@@ -337,7 +362,9 @@ pub fn authorize_reply(
     Ok(ReplyAuthorization {
         from_identity: identity.clone(),
         envelope_sender: identity.clone(),
-        identity_profile: if decision.default_reply_identity == identity {
+        identity_profile: if let Some(binding) = personal {
+            binding.identity_profile.clone()
+        } else if decision.default_reply_identity == identity {
             decision.identity_profile.clone()
         } else {
             None
@@ -432,6 +459,7 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
         if let Some(catch_all_policy) = &domain_policy.catch_all {
             let decision =
                 catch_all_decision(policy, domain.clone(), "*".to_string(), catch_all_policy)
+                    .and_then(|decision| reply_identity::bind_operator_identities(policy, decision))
                     .map_err(|error| {
                         PolicyError::InvalidRoute("*".to_string(), domain.clone(), error)
                     })?;
@@ -536,6 +564,7 @@ impl AdapterError {
             RouteError::UnauthorizedOperator(_) => "unauthorized_operator",
             RouteError::UnauthorizedReplyIdentity(_) => "unauthorized_reply_identity",
             RouteError::AmbiguousIdentityProfile(_) => "ambiguous_identity_profile",
+            RouteError::MissingOperatorReplyIdentity(_) => "missing_operator_reply_identity",
             RouteError::MissingReplyTarget => "reply_target_missing",
             RouteError::AmbiguousReplyTarget => "recipient_ambiguous",
         };
@@ -598,6 +627,7 @@ fn role_decision(
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
             identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
+            operator_reply_identities: BTreeMap::new(),
             disposition: None,
         });
     }
@@ -623,6 +653,7 @@ fn role_decision(
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
             identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
+            operator_reply_identities: BTreeMap::new(),
         });
     }
 
@@ -638,6 +669,7 @@ fn role_decision(
         default_reply_identity: role_policy.reply_identity.clone(),
         allowed_reply_identities,
         identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
+        operator_reply_identities: BTreeMap::new(),
         disposition: None,
     })
 }
@@ -662,6 +694,7 @@ fn catch_all_decision(
             default_reply_identity: catch_all_policy.reply_identity.clone(),
             allowed_reply_identities,
             identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
+            operator_reply_identities: BTreeMap::new(),
             disposition: None,
         });
     }
@@ -678,6 +711,7 @@ fn catch_all_decision(
         default_reply_identity: catch_all_policy.reply_identity.clone(),
         allowed_reply_identities,
         identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
+        operator_reply_identities: BTreeMap::new(),
         disposition: None,
     })
 }
@@ -700,6 +734,7 @@ fn personal_decision(
         default_reply_identity: personal_policy.reply_identity.clone(),
         allowed_reply_identities: vec![personal_policy.reply_identity.clone()],
         identity_profile: resolved_identity_profile(policy, &personal_policy.reply_identity)?,
+        operator_reply_identities: BTreeMap::new(),
         disposition: None,
     })
 }

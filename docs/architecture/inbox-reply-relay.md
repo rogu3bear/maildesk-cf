@@ -21,6 +21,12 @@ formats persistence; it does not reconstruct policy semantics. The active R2
 policy's original bytes keep their existing SHA-256. D1 route IDs, identities,
 operators and enabled inventory must match that canonical projection exactly;
 equal counts cannot validate substituted routes or operator membership.
+Personal-first policy additionally projects each operator's explicit personal
+alias at the receiving domain. `alias_route_reply_identities` mirrors those
+operator/public-identity/mode bindings. Inventory parity and each consuming
+authority statement compare the complete map; equal membership counts cannot
+authorize a substituted identity. The new table's initial role-first projection
+preserves the existing policy meaning and creates no ordinary activation.
 
 A policy `work_queue` destination is eligible only when its exact `queue_ref`
 has a supported adapter with a durable handoff contract. `MAIL_JOBS` is the
@@ -74,6 +80,19 @@ owner authorization and a governed activation receipt. Ingress and the UI have
 no activation path. No enabled flag or historical proof timestamp is backfilled
 into route authority. Source examples remain disabled. Unknown authorization
 variants fail closed.
+
+Personal-first authority is specific to a route and public identity. Multiple
+operators' identities need separate activations; one operator's grant cannot
+authorize another prefix. The non-performing activation compiler uses input
+schema 2 with an explicit `reply_operator`, its actual-client compatibility
+hashes, and owner authorization naming the selected public identity. Rust
+selects the profile. Schema-1 input cannot implicitly choose an operator.
+
+The stored relay's historical `reply_identity` remains the intake route's
+identity. It is not rewritten when a personal-first operator responds. The
+authenticated Rust decision and matching canonical operator binding determine
+the public identity for the new immutable admission and dispatch. Queued old
+claims retain their original hashes and reconciliation rules.
 
 After activation, each independently authored ordinary message receives a
 schema-2 `ordinary_reply_admissions` row and its dispatch attempt in one SQLite
@@ -139,8 +158,8 @@ raw provider client for that purpose.
 
 Canary admission, ordinary admission and the common provider transition each
 compare the exact Rust-projected route row inside their consuming statement:
-domain and local part, route/storage kind, default public identity and complete
-operator set. A mutation between an earlier read and the claim produces zero
+domain and local part, route/storage kind, default public identity, complete
+operator set and exact operator/public-identity bindings. A mutation between an earlier read and the claim produces zero
 rows; it cannot consume authority, leave an orphaned dispatch or call a provider.
 The current policy/desired-state and quarantine checks remain independent.
 
@@ -183,6 +202,11 @@ policy, generation and expiry checks. Missing or incompatible fields remain
 unknown; stale projections retain historical authority facts without establishing
 current readiness. Unknown outcomes require reconciliation. Proof expiry is
 inclusive at the expiry instant.
+For personal-first groups, status requires matching activation coverage for
+every distinct Rust-selected public profile. Its representative activation ID
+is an actual member of that complete set, and proof freshness uses the oldest
+member's qualification evidence. A single successful operator cannot qualify
+the group.
 
 Fresh receipt planes can qualify a canary while an operational blocker remains.
 The verifier exposes `canary_receipts_verified` separately from

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { compileRouteActivation, compileDispatchRecovery, compileRouteContainment, admitRouteActivationReadback } from "../../scripts/route-reply-control-contract";
 import { candidateSha256 } from "../../scripts/git-candidate";
 import { digestCanonical } from "../../scripts/operation-context";
-import { projectPolicy } from "../../workers/shared/router";
+import { authorizeReplyWithPolicy, projectPolicy, type RouterPolicy } from "../../workers/shared/router";
 import { publicIdentityProfileSha256 } from "../../workers/shared/inbox-relay";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
@@ -41,6 +41,36 @@ test("offline activation compilation binds Rust policy and qualified evidence bu
   expect(admitRouteActivationReadback(readback, proposal, now + 1000)).toMatchObject({ state: "active", activation_id: proposal.record.id });
   expect(() => admitRouteActivationReadback({ ...readback, match_count: 2 }, proposal, now + 1000)).toThrow("binding");
   expect(() => admitRouteActivationReadback({ ...readback, status: "revoked" }, proposal, now + 1000)).toThrow("binding");
+});
+
+test("operator-specific activation requires its selected Rust identity, exact owner scope and actual-client binding", async () => {
+  const input = await fixture();
+  const policy = JSON.parse(input.policy_source_json) as RouterPolicy;
+  policy.default_reply_mode = "personal_first";
+  const domain = policy.domains["example.com"]!;
+  domain.role_aliases.support!.operators = ["operator-a@example.net", "operator-b@example.net"];
+  for (const prefix of ["operator-a", "operator-b"]) {
+    domain.personal_aliases[prefix] = { operator: `${prefix}@example.net`, reply_identity: `${prefix}@example.com` };
+    policy.identity_profiles![`${prefix}@example.com`] = { ...policy.identity_profiles!["support@example.com"]! };
+  }
+  input.policy_source_json = JSON.stringify(policy);
+  input.context.policy_sha256 = digest(input.policy_source_json);
+  input.qualification.context_sha256 = digestCanonical(input.context);
+  input.owner_authorization.context_sha256 = digestCanonical(input.context);
+  input.compatibility.policy_sha256 = input.context.policy_sha256;
+  input.qualification.operator_set_sha256 = digest(JSON.stringify(domain.role_aliases.support!.operators));
+  const actor = "operator-a@example.net", address = "operator-a@example.com";
+  const selected = authorizeReplyWithPolicy(policy, { envelopeTo: "support@example.com", operator: actor });
+  if (!selected.ok || !selected.value.identityProfile) throw Error("fixture identity unavailable");
+  input.qualification.identity_profile_sha256 = `sha256:${await publicIdentityProfileSha256(selected.value.identityProfile)}`;
+  expect(() => compileRouteActivation(input, now)).toThrow("schema 2");
+  const exact = { ...input, schema_version: 2, reply_operator: actor,
+    owner_authorization: { ...input.owner_authorization, public_identity: address },
+    compatibility: { ...input.compatibility, schema_version: 2, reply_operator_sha256: digest(actor), public_identity_sha256: digest(address) } };
+  expect(compileRouteActivation(exact, now).record).toMatchObject({ route_id: "route:example.com:support", public_identity: address, identity_profile_ref: address });
+  expect(() => compileRouteActivation({ ...exact, reply_operator: "operator-b@example.net" }, now)).toThrow("binding");
+  expect(() => compileRouteActivation({ ...exact, owner_authorization: { ...exact.owner_authorization, public_identity: "operator-b@example.com" } }, now)).toThrow("owner authorization");
+  expect(() => compileRouteActivation({ ...exact, compatibility: { ...exact.compatibility, reply_operator_sha256: digest("other") } }, now)).toThrow("selected operator identity");
 });
 
 test("activation rejects unsupported fields, dirty source, freshness, profile drift and missing real-client compatibility", async () => {

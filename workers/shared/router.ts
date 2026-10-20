@@ -74,6 +74,10 @@ export interface RouteDecision {
   defaultReplyIdentity: string;
   allowedReplyIdentities: string[];
   identityProfile?: ResolvedIdentityProfile;
+  operatorReplyIdentities?: Record<string, {
+    publicAddress: string;
+    identityProfile?: ResolvedIdentityProfile;
+  }>;
   disposition?: RouteDisposition;
 }
 
@@ -254,6 +258,17 @@ function mapRouteDecision(value: Record<string, unknown>): RouteDecision {
   };
   if (value.identity_profile !== undefined) {
     decision.identityProfile = mapIdentityProfile(value.identity_profile);
+  }
+  if (value.operator_reply_identities !== undefined) {
+    if (!isRecord(value.operator_reply_identities)) throw new Error("invalid Rust operator identities");
+    decision.operatorReplyIdentities = Object.fromEntries(Object.entries(value.operator_reply_identities).map(([operator, binding]) => {
+      if (!decision.operators.includes(operator) || !isRecord(binding) ||
+          Object.keys(binding).some((key) => !["public_address", "identity_profile"].includes(key))) {
+        throw new Error("invalid Rust operator identity binding");
+      }
+      return [operator, { publicAddress: requireString(binding, "public_address"),
+        ...(binding.identity_profile === undefined ? {} : { identityProfile: mapIdentityProfile(binding.identity_profile) }) }];
+    }));
   }
   if (value.disposition !== undefined) {
     decision.disposition = mapRouteDisposition(value.disposition);

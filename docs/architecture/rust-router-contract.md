@@ -85,9 +85,16 @@ identities must fail closed.
 
 Inbound routing and outbound identity are related, but separate.
 
-For role aliases, default replies should come from the role identity, such as
-`founders@example.com`, while policy may allow specific operators to reply from
-approved personal identities.
+`role_first` retains the configured role identity, such as
+`founders@example.com`, as the default.
+
+`personal_first` selects the authenticated operator's local part at the
+original receiving domain. It requires a matching, unshadowed personal alias
+explicitly assigned to that operator. For example, an operator authenticated as
+`operator-a@example.net` answering mail to `support@example.com` selects
+`operator-a@example.com`. Missing mappings reject the policy; no header or
+unconfigured address creates send-as permission. An operator cannot request
+another operator's prefix, the role identity or a different domain in this mode.
 
 For personal aliases, replies should come from the same personal alias. This
 preserves thread continuity and keeps domain identity consistent without making
@@ -104,6 +111,7 @@ the moment.
 
 `project_policy` and `project_policy_json` validate the entire policy, then expose
 versioned canonical routes, normalized operator sets and identities, profiles,
-and ordered destination candidates. Role precedence also applies to inventory.
+and ordered destination candidates. Personal-first routes additionally expose
+the exact operator-to-public-identity/profile map. Role precedence also applies to inventory.
 Catch-all is projected directly, never by routing a synthetic address. Provider
 tooling joins topology and formats SQL; it must not reinterpret routing policy.

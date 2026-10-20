@@ -106,7 +106,7 @@ export async function acceptOperatorReply(
     message.setReject("maildesk reply route is quarantined or terminal");
     return;
   }
-  const relay = await loadActiveRelay(tokenHash, env);
+  let relay = await loadActiveRelay(tokenHash, env);
   if (!relay) {
     message.setReject("maildesk reply route is unknown, expired, or revoked");
     return;
@@ -132,7 +132,6 @@ export async function acceptOperatorReply(
   const authorization = authorizeReplyWithPolicy(activePolicy.policy, {
     envelopeTo: relay.route_address,
     operator,
-    requestedIdentity: relay.reply_identity,
   });
   if (!authorization.ok) {
     structuredError("reply_policy_rejected", { errorCode: authorization.error.kind });
@@ -143,7 +142,9 @@ export async function acceptOperatorReply(
     );
     return;
   }
-  if (authorization.value.fromIdentity !== relay.reply_identity) {
+  const currentOperatorIdentity = activePolicy.projection.routes.find((route) =>
+    `${route.localPart}@${route.domain}` === relay!.route_address)?.operatorReplyIdentities?.[operator]?.publicAddress;
+  if (authorization.value.fromIdentity !== relay.reply_identity && authorization.value.fromIdentity !== currentOperatorIdentity) {
     message.setReject("maildesk operator is not authorized for this reply identity");
     return;
   }
@@ -151,6 +152,9 @@ export async function acceptOperatorReply(
     message.setReject("maildesk public reply identity profile is unavailable");
     return;
   }
+  // Stored relay history remains unchanged. The current Rust decision selects
+  // this authenticated operator's identity for the new immutable claim.
+  relay = { ...relay, reply_identity: authorization.value.fromIdentity };
   const routed = routeInbound(activePolicy.policy, {
     envelopeTo: relay.route_address,
     headerFrom: operator,

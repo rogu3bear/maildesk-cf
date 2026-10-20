@@ -73,7 +73,7 @@ async function processInboxReply(
     await recoverRelayAttempt(job, env, "relay_storage_unavailable");
     return ACK;
   }
-  const relay = await env.DB.prepare(
+  let relay = await env.DB.prepare(
     "SELECT rr.id, rr.thread_id, rr.route_id, rr.external_recipient, lower(t.external_sender) AS thread_external_sender, rr.reply_identity, rr.original_message_id, rr.references_json, rr.expires_at, rr.revoked_at, lower(ar.local_part || '@' || d.domain) AS route_address FROM reply_relays rr JOIN threads t ON t.id = rr.thread_id AND t.route_id = rr.route_id JOIN alias_routes ar ON ar.id = rr.route_id JOIN domains d ON d.id = ar.domain_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 WHERE rr.id = ?1 AND ar.enabled = 1 LIMIT 1",
   )
     .bind(job.relayId)
@@ -103,15 +103,21 @@ async function processInboxReply(
   const authorization = authorizeReplyWithPolicy(activePolicy.policy, {
     envelopeTo: relay.route_address,
     operator: job.operator,
-    requestedIdentity: relay.reply_identity,
   });
-  if (!authorization.ok || authorization.value.fromIdentity !== relay.reply_identity) {
+  const currentOperatorIdentity = activePolicy.projection.routes.find((route) =>
+    `${route.localPart}@${route.domain}` === relay!.route_address)?.operatorReplyIdentities?.[job.operator]?.publicAddress;
+  if (!authorization.ok || (authorization.value.fromIdentity !== relay.reply_identity && authorization.value.fromIdentity !== currentOperatorIdentity)) {
     await failRelayAttempt(job, env, "operator_no_longer_authorized");
     return ACK;
   }
   const identityProfile = authorization.value.identityProfile;
   if (!identityProfile) {
     await failRelayAttempt(job, env, "identity_profile_unavailable");
+    return ACK;
+  }
+  relay = { ...relay, reply_identity: authorization.value.fromIdentity };
+  if (await publicIdentityProfileSha256(identityProfile) !== job.identityProfileSha256) {
+    await failRelayAttempt(job, env, "identity_profile_binding_changed");
     return ACK;
   }
 

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { projectPolicy, type RouterPolicy } from "../workers/shared/router";
+import { authorizeReplyWithPolicy, projectPolicy, type RouterPolicy } from "../workers/shared/router";
 import { identityProfileDigestInputV1 } from "../workers/shared/identity-profile-contract";
 import { routeReference } from "./sync-route-policy";
-import { admitOperationContext, canonicalJsonV1, closedObject, digest, digestCanonical, instant, reference, type OperationContext } from "./operation-context";
+import { admitOperationContext, canonicalJsonV1, closedObject, digest, digestCanonical, instant, object, reference, type OperationContext } from "./operation-context";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const bare = (value: string) => value.slice("sha256:".length);
@@ -36,16 +36,27 @@ export interface RouteActivationProposal {
  * can be performed here. Provider installation/qualification is a separate gate.
  */
 export function compileRouteActivation(input: unknown, now = Date.now()): RouteActivationProposal {
-  const value = closedObject(input, ["schema_version", "context", "policy_source_json", "route_id", "qualification", "owner_authorization", "compatibility", "requested_at", "expires_at"], "route activation input");
-  if (value.schema_version !== 1 || typeof value.policy_source_json !== "string") throw new Error("route activation input version or policy is invalid");
+  const raw = object(input, "route activation input");
+  const operatorSelected = raw.schema_version === 2;
+  const value = closedObject(input, ["schema_version", "context", "policy_source_json", "route_id", "qualification", "owner_authorization", "compatibility", "requested_at", "expires_at", ...(operatorSelected ? ["reply_operator"] : [])], "route activation input");
+  if ((value.schema_version !== 1 && value.schema_version !== 2) || typeof value.policy_source_json !== "string") throw new Error("route activation input version or policy is invalid");
   const context = admitOperationContext(value.context);
   if (sha(value.policy_source_json) !== bare(context.policy_sha256)) throw new Error("immutable policy bytes differ");
-  const projection = projectPolicy(JSON.parse(value.policy_source_json) as RouterPolicy);
+  const policy = JSON.parse(value.policy_source_json) as RouterPolicy;
+  const projection = projectPolicy(policy);
   if (!projection.ok) throw new Error(`Rust policy projection rejected: ${projection.error.kind}`);
   const routeId = reference(value.route_id, "route ID");
   const routes = projection.value.routes.filter((route) => routeReference(route) === routeId);
-  if (routes.length !== 1 || routes[0]!.routeKind === "sink" || !routes[0]!.identityProfile) throw new Error("ordinary route requires one deliverable profiled route");
-  const route = routes[0]!; const profile = route.identityProfile!;
+  if (routes.length !== 1 || routes[0]!.routeKind === "sink") throw new Error("ordinary route requires one deliverable profiled route");
+  const route = routes[0]!;
+  if (!operatorSelected && route.operatorReplyIdentities) throw new Error("operator-specific activation requires schema 2 and a selected operator");
+  if (operatorSelected && (typeof value.reply_operator !== "string" || value.reply_operator !== value.reply_operator.trim().toLowerCase())) throw new Error("selected operator must be a normalized mailbox");
+  const selected = operatorSelected ? authorizeReplyWithPolicy(policy, {
+    envelopeTo: `${route.localPart}@${route.domain}`, operator: value.reply_operator as string,
+  }) : null;
+  if (selected && !selected.ok) throw new Error("selected operator is not authorized for this route");
+  const profile = selected?.ok ? selected.value.identityProfile : route.identityProfile;
+  if (!profile) throw new Error("ordinary route requires one deliverable profiled route");
   const profileSha = sha(JSON.stringify(identityProfileDigestInputV1(profile, sha(profile.signatureText))));
   const operatorsJson = JSON.stringify(route.operators);
   const requested = instant(value.requested_at, "requested activation time");
@@ -61,14 +72,15 @@ export function compileRouteActivation(input: unknown, now = Date.now()): RouteA
   const observed = instant(q.observed_at, "qualification read time");
   if (!(inbox <= accepted && accepted <= reply && reply <= observed && observed <= requested) || now - inbox > MAX_QUALIFICATION_AGE) throw new Error("qualification chronology or freshness is invalid");
   digest(q.canary_transaction_sha256, "canary transaction");
-  const compatibility = closedObject(value.compatibility, ["schema_version", "kind", "runtime_artifacts_sha256", "policy_sha256", "apple_mail_workspace_verified", "signed_recipient_and_message_id", "receipt_sha256"], "message compatibility");
-  if (compatibility.schema_version !== 1 || compatibility.kind !== "maildesk_actual_message_compatibility" ||
+  const compatibility = closedObject(value.compatibility, ["schema_version", "kind", "runtime_artifacts_sha256", "policy_sha256", "apple_mail_workspace_verified", "signed_recipient_and_message_id", "receipt_sha256", ...(operatorSelected ? ["reply_operator_sha256", "public_identity_sha256"] : [])], "message compatibility");
+  if (compatibility.schema_version !== (operatorSelected ? 2 : 1) || compatibility.kind !== "maildesk_actual_message_compatibility" ||
       compatibility.runtime_artifacts_sha256 !== context.runtime_artifacts_sha256 || compatibility.policy_sha256 !== context.policy_sha256 ||
       compatibility.apple_mail_workspace_verified !== true || compatibility.signed_recipient_and_message_id !== true) throw new Error("actual Apple Mail/Workspace signing compatibility is unqualified");
-  const owner = admitOwner(value.owner_authorization, context, routeId, "activate_ordinary_route", now);
+  if (operatorSelected && (compatibility.reply_operator_sha256 !== `sha256:${sha(value.reply_operator as string)}` || compatibility.public_identity_sha256 !== `sha256:${sha(profile.publicAddress)}`)) throw new Error("actual-client compatibility differs from the selected operator identity");
+  const owner = admitOwner(value.owner_authorization, context, routeId, "activate_ordinary_route", now, operatorSelected ? profile.publicAddress : undefined);
   const record = {
     schema_version: 1 as const, route_id: routeId, policy_sha256: bare(context.policy_sha256), desired_state_sha256: bare(context.desired_state_sha256),
-    public_identity: route.defaultReplyIdentity, identity_profile_ref: profile.profileRef, identity_profile_sha256: profileSha,
+    public_identity: profile.publicAddress, identity_profile_ref: profile.profileRef, identity_profile_sha256: profileSha,
     operator_set_sha256: sha(operatorsJson), operator_set_json: operatorsJson, sender_adapter: profile.senderAdapter, sender_domain: route.domain,
     runtime_artifacts_sha256: bare(context.runtime_artifacts_sha256), topology_sha256: bare(context.topology_sha256), qualification_kind: "golden_thread" as const,
     canary_admission_id: reference(q.canary_admission_id, "canary admission"), inbox_proof_id: reference(q.inbox_proof_id, "inbox proof"), reply_proof_id: reference(q.reply_proof_id, "reply proof"),
@@ -84,9 +96,10 @@ export function compileRouteActivation(input: unknown, now = Date.now()): RouteA
     compatibility_receipt_sha256: compatibility.receipt_sha256 as string, record_insertable: false };
 }
 
-function admitOwner(value: unknown, context: OperationContext, routeId: string, effect: string, now: number): { receipt: string; actor: string } {
-  const owner = closedObject(value, ["effect", "route_id", "context_sha256", "authorized_at", "expires_at", "actor_sha256", "receipt_sha256"], "owner authorization");
+function admitOwner(value: unknown, context: OperationContext, routeId: string, effect: string, now: number, publicIdentity?: string): { receipt: string; actor: string } {
+  const owner = closedObject(value, ["effect", "route_id", "context_sha256", "authorized_at", "expires_at", "actor_sha256", "receipt_sha256", ...(publicIdentity ? ["public_identity"] : [])], "owner authorization");
   if (owner.effect !== effect || owner.route_id !== routeId || owner.context_sha256 !== digestCanonical(context) ||
+      (publicIdentity !== undefined && owner.public_identity !== publicIdentity) ||
       instant(owner.authorized_at, "owner authorization time") > now || instant(owner.expires_at, "owner authorization expiry") <= now) throw new Error("owner authorization does not cover this effect and target");
   return { receipt: digest(owner.receipt_sha256, "owner receipt"), actor: digest(owner.actor_sha256, "owner actor") };
 }

@@ -1,4 +1,5 @@
 import { loadActivePolicy } from "../../shared/policy-store";
+import { replyIdentityBindingsSql } from "../../shared/policy-inventory";
 import { proofMillis, reportRoutes, selectProbeRotation, type CanaryReport } from "./report";
 import { assertPolicyRoutes, type RouteInventoryRow } from "./policy-routes";
 
@@ -23,6 +24,7 @@ export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind, ar.status
   (SELECT json_group_array(email) FROM
     (SELECT o.email FROM alias_route_operators aro JOIN operators o ON o.id = aro.operator_id
      WHERE aro.route_id = ar.id ORDER BY o.email)) AS operators_json,
+  ${replyIdentityBindingsSql("ar.id", "ar.policy_sha256")} AS reply_identity_bindings_json,
   rh.policy_sha256 AS health_policy_sha256, rh.inbound_status, rh.reply_status,
   rh.last_inbox_verified_at, rh.last_reply_verified_at,
   (SELECT MAX(rp.verified_at) FROM route_proofs rp

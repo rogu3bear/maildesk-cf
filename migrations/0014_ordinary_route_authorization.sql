@@ -34,7 +34,7 @@ CREATE TABLE route_reply_authorizations (
   CHECK ((status = 'active' AND revoked_at IS NULL AND revocation_receipt_sha256 IS NULL)
     OR (status = 'revoked' AND julianday(revoked_at) IS NOT NULL AND revocation_receipt_sha256 IS NOT NULL))
 );
-CREATE UNIQUE INDEX route_reply_authorizations_one_active_idx ON route_reply_authorizations(route_id) WHERE status = 'active';
+CREATE UNIQUE INDEX route_reply_authorizations_one_active_idx ON route_reply_authorizations(route_id, public_identity) WHERE status = 'active';
 
 -- Quarantine does not need an arbitrary relay or canary admission. Both ledgers
 -- remain append-only. A release names exactly the quarantine it releases.
@@ -79,8 +79,10 @@ JOIN policy_projection_state ds ON ds.key = 'active_desired_state_sha256' AND ds
 JOIN policy_projection_state art ON art.key = 'active_runtime_artifacts_sha256' AND art.value = a.runtime_artifacts_sha256
 JOIN policy_projection_state top ON top.key = 'active_topology_sha256' AND top.value = a.topology_sha256
 JOIN alias_routes ar ON ar.id = a.route_id AND ar.enabled = 1 AND ar.policy_sha256 = a.policy_sha256 AND ar.decision_kind != 'sink'
-JOIN identities i ON i.id = ar.default_reply_identity_id AND i.address = a.public_identity
-WHERE a.operator_set_json = (SELECT json_group_array(email) FROM (SELECT o.email FROM alias_route_operators aro JOIN operators o ON o.id = aro.operator_id WHERE aro.route_id = a.route_id ORDER BY o.email))
+JOIN identities i ON i.address = a.public_identity
+WHERE EXISTS (SELECT 1 FROM alias_route_reply_identities binding WHERE binding.route_id = ar.id
+  AND binding.public_identity_id = i.id AND binding.policy_sha256 = a.policy_sha256)
+  AND a.operator_set_json = (SELECT json_group_array(email) FROM (SELECT o.email FROM alias_route_operators aro JOIN operators o ON o.id = aro.operator_id WHERE aro.route_id = a.route_id ORDER BY o.email))
   AND a.status = 'active' AND julianday(a.activated_at) <= julianday('now')
   AND (a.expires_at IS NULL OR julianday(a.expires_at) > julianday('now'))
   AND NOT EXISTS (SELECT 1 FROM active_route_reply_quarantines q WHERE q.route_id = a.route_id);
@@ -180,7 +182,10 @@ BEGIN
       JOIN alias_route_operators aro ON aro.route_id = a.route_id AND aro.operator_id = NEW.operator_id
       WHERE a.id = NEW.activation_id AND a.policy_sha256 = NEW.policy_sha256
         AND a.desired_state_sha256 = NEW.desired_state_sha256 AND a.route_id = NEW.route_id
-        AND a.public_identity = NEW.public_identity AND a.public_identity = rr.reply_identity
+        AND a.public_identity = NEW.public_identity
+        AND EXISTS (SELECT 1 FROM alias_route_reply_identities binding JOIN identities public ON public.id = binding.public_identity_id
+          WHERE binding.route_id = a.route_id AND binding.operator_id = NEW.operator_id
+            AND binding.policy_sha256 = NEW.policy_sha256 AND public.address = NEW.public_identity)
         AND a.identity_profile_ref = NEW.identity_profile_ref AND a.identity_profile_sha256 = NEW.identity_profile_sha256
         AND a.operator_set_sha256 = NEW.operator_set_sha256 AND a.sender_adapter = NEW.sender_adapter
         AND a.sender_domain = NEW.sender_domain AND rr.thread_id = NEW.thread_id
