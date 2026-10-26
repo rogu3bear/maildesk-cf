@@ -69,6 +69,43 @@ test("DNS failure is indeterminate and therefore fail closed", async () => {
   expect(result.boundedErrorCode).toBe("dkim_key_unavailable");
 });
 
+test("one DKIM deadline bounds all signatures and ignores late DNS results", async () => {
+  const original = decode(await signedMessage("deadline-late"));
+  const [signature, ...rest] = original.split("\r\n");
+  const raw = encode([...Array(8).fill(signature), ...rest].join("\r\n"));
+  let signal: AbortSignal | null | undefined;
+  let calls = 0;
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { release = resolve; });
+  const result = await verifyOperatorDkim(raw, "operator@example.com", {
+    fetcher: (async (_input, init) => { calls++; signal = init?.signal; return pending; }) as typeof fetch,
+  });
+  expect(result.status).toBe("indeterminate");
+  expect(result.boundedErrorCode).toBe("dkim_key_unavailable");
+  expect(result.ordinaryBinding).toBeUndefined();
+  expect(signal?.aborted).toBe(true);
+  expect(calls).toBe(1);
+  release(await dnsFetcher()("https://dns.example.com"));
+  await Bun.sleep(0);
+  // Expired work must neither authorize nor seed the key cache for the next call.
+  const later = await verifyOperatorDkim(raw, "operator@example.com", {
+    fetcher: (async () => { calls++; return new Response(null, { status: 503 }); }) as typeof fetch,
+  });
+  expect(later.status).toBe("indeterminate");
+  expect(calls).toBe(9);
+}, 10_000);
+
+test("the DKIM deadline includes a stalled DNS response body", async () => {
+  let body!: ReadableStreamDefaultController<Uint8Array>;
+  try {
+    const result = await verifyOperatorDkim(await signedMessage("deadline-body"), "operator@example.com", {
+      fetcher: (async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { body = controller; } }))) as typeof fetch,
+    });
+    expect(result.status).toBe("indeterminate");
+    expect(result.boundedErrorCode).toBe("dkim_key_unavailable");
+  } finally { body.close(); }
+}, 10_000);
+
 test("a cryptographically valid 1024-bit RSA signature is rejected as weak", async () => {
   const pair = await crypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },

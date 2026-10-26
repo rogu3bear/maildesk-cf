@@ -27,7 +27,7 @@ import { acceptOperatorReply } from "./operator-reply";
 
 export const MIME_CONTENT_TYPE = "message/rfc822";
 
-export async function acceptEmail(message: ForwardableEmailMessage, env: Env): Promise<void> {
+export async function acceptEmail(message: ForwardableEmailMessage, env: Env, affectedRoutes?: Set<string>): Promise<void> {
   const config = operatorDeliveryConfig(env);
   if (config.mode === "invalid") {
     message.setReject("maildesk operator delivery mode is invalid");
@@ -48,7 +48,7 @@ export async function acceptEmail(message: ForwardableEmailMessage, env: Env): P
     return;
   }
   if (token) {
-    await acceptOperatorReply(message, token, env);
+    await acceptOperatorReply(message, token, env, affectedRoutes);
     return;
   }
 
@@ -57,6 +57,7 @@ export async function acceptEmail(message: ForwardableEmailMessage, env: Env): P
     message.setReject(boundRoute.message);
     return;
   }
+  affectedRoutes?.add(stableId("route", boundRoute.route.domain, boundRoute.route.localPart));
 
   if (config.mode === "inbox_relay") {
     if (boundRoute.route.disposition) {

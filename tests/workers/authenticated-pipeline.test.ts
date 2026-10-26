@@ -25,6 +25,34 @@ async function ingress(f: Runtime, raw: ArrayBuffer, to = f.relayRecipient) {
   return rejected;
 }
 
+test("a DKIM deadline cannot consume ordinary authority, stage content or dispatch mail", async () => {
+  const f = await relayRuntime();
+  const prior = globalThis.fetch;
+  try {
+    await activateFixture(f);
+    const raw = await signer.sign({ headers: headers(f), body: "A plain reply.\r\n", selector: "pipeline-deadline" });
+    const before = { jobs: f.jobs.length, sends: f.sends.length, spools: f.spools.size };
+    let signal: AbortSignal | null | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+      });
+    }) as typeof fetch;
+    let rejected: string | undefined;
+    await mailRouter.email({ from: "operator@example.com", to: f.relayRecipient, rawSize: raw.byteLength,
+      raw: new Response(raw).body!, headers: new Headers(),
+      setReject(reason: string) { rejected = reason; },
+    } as ForwardableEmailMessage, f.env);
+    expect(rejected).toContain("aligned email authentication");
+    expect(signal?.aborted).toBe(true);
+    expect({ jobs: f.jobs.length, sends: f.sends.length, spools: f.spools.size }).toEqual(before);
+    expect(f.db.query("SELECT count(*) AS n FROM ordinary_reply_admissions").get()).toEqual({ n: 0 });
+    expect(f.db.query("SELECT count(*) AS n FROM relay_attempts").get()).toEqual({ n: 1 });
+    expect(f.db.query("SELECT status FROM route_reply_authorizations").get()).toEqual({ status: "active" });
+  } finally { globalThis.fetch = prior; f.db.close(); }
+}, 10_000);
+
 for (const field of ["message-id", "to", "content-type", "content-transfer-encoding", "mime-version", "subject"]) {
   test(`valid From/body cannot admit an ordinary reply with unsigned ${field}`, async () => {
     const f = await relayRuntime();

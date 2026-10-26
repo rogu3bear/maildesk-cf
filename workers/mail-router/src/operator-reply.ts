@@ -27,6 +27,7 @@ export async function acceptOperatorReply(
   message: ForwardableEmailMessage,
   token: string,
   env: Env,
+  affectedRoutes?: Set<string>,
 ): Promise<void> {
   const config = operatorDeliveryConfig(env);
   if (config.mode !== "inbox_relay" || config.replyProcessingMode !== "enabled" || !config.replyDomain) {
@@ -80,6 +81,7 @@ export async function acceptOperatorReply(
     message.setReject("maildesk reply route is unknown");
     return;
   }
+  affectedRoutes?.add(historicalRelay.route_id);
   const identities = await replyAttemptIdentities(historicalRelay.id, parsed.messageId);
   // Historical identity lookup precedes current admission, policy and proof freshness.
   // A duplicate never mints authority, even when the old proof or relay expired.

@@ -2,7 +2,9 @@ import { addressParser } from "postal-mime";
 import { messageIdentity } from "./message-identity";
 import type { OperatorAuthenticationResult } from "./contracts";
 import { normalizeMailbox, sha256Hex } from "./inbox-relay";
+import { RequestDeadlineError, withRequestDeadline } from "./request-deadline";
 
+export const DKIM_VERIFICATION_TIMEOUT_MS = 5_000;
 const MAX_DNS_TTL_SECONDS = 300;
 const keyCache = new Map<string, { expiresAt: number; spki: ArrayBuffer }>();
 
@@ -50,26 +52,35 @@ export async function verifyOperatorDkim(
   if (signatures.some((signature) => signature.tags.has("invalid-duplicate-tag"))) return rejected("dkim_duplicate_tag", verifiedAt);
   if (signatures.length === 0) return rejected("dkim_missing", verifiedAt);
 
-  let verifiedWithoutBinding: OperatorAuthenticationResult | null = null;
-  let sawIndeterminate = false;
-  let lastRejection: OperatorAuthenticationResult | null = null;
-  for (const signature of signatures) {
-    const result = await verifySignature(parsed.headers, parsed.body, signature, mailbox, operatorDomain, {
-      fetcher: options.fetcher ?? fetch,
-      now: options.now ?? new Date(),
-      verifiedAt, binding: options.binding,
+  try {
+    return await withRequestDeadline(DKIM_VERIFICATION_TIMEOUT_MS, async (signal) => {
+      let verifiedWithoutBinding: OperatorAuthenticationResult | null = null;
+      let sawIndeterminate = false;
+      let lastRejection: OperatorAuthenticationResult | null = null;
+      for (const signature of signatures) {
+        signal.throwIfAborted();
+        const result = await verifySignature(parsed.headers, parsed.body, signature, mailbox, operatorDomain, {
+          fetcher: options.fetcher ?? fetch,
+          now: options.now ?? new Date(),
+          verifiedAt, binding: options.binding, signal,
+        });
+        signal.throwIfAborted();
+        if (result.status === "verified") {
+          if (!options.binding || result.ordinaryBinding) return result;
+          verifiedWithoutBinding = result;
+        }
+        if (result.status === "indeterminate") sawIndeterminate = true;
+        if (result.status === "rejected") lastRejection = result;
+      }
+      if (verifiedWithoutBinding) return verifiedWithoutBinding;
+      return sawIndeterminate
+        ? indeterminate("dkim_key_unavailable", verifiedAt)
+        : lastRejection ?? rejected("dkim_verification_failed", verifiedAt);
     });
-    if (result.status === "verified") {
-      if (!options.binding || result.ordinaryBinding) return result;
-      verifiedWithoutBinding = result;
-    }
-    if (result.status === "indeterminate") sawIndeterminate = true;
-    if (result.status === "rejected") lastRejection = result;
+  } catch (error) {
+    if (!(error instanceof RequestDeadlineError)) throw error;
+    return indeterminate("dkim_key_unavailable", verifiedAt);
   }
-  if (verifiedWithoutBinding) return verifiedWithoutBinding;
-  return sawIndeterminate
-    ? indeterminate("dkim_key_unavailable", verifiedAt)
-    : lastRejection ?? rejected("dkim_verification_failed", verifiedAt);
 }
 
 async function verifySignature(
@@ -78,7 +89,7 @@ async function verifySignature(
   signature: DkimSignature,
   operator: string,
   operatorDomain: string,
-  options: { fetcher: typeof fetch; now: Date; verifiedAt: string; binding?: DkimVerificationOptions["binding"] },
+  options: { fetcher: typeof fetch; now: Date; verifiedAt: string; binding?: DkimVerificationOptions["binding"]; signal: AbortSignal },
 ): Promise<OperatorAuthenticationResult> {
   const { tags } = signature;
   if (tags.has("l")) return rejected("dkim_partial_body_unsupported", options.verifiedAt);
@@ -113,7 +124,7 @@ async function verifySignature(
   if (!signedData) return rejected("dkim_signed_header_missing", options.verifiedAt);
   let spki: ArrayBuffer;
   try {
-    spki = await resolveDkimKey(selector, signingDomain, options.fetcher, options.now.getTime());
+    spki = await resolveDkimKey(selector, signingDomain, options.fetcher, options.now.getTime(), options.signal);
   } catch {
     return indeterminate("dkim_key_unavailable", options.verifiedAt, signingDomain);
   }
@@ -150,14 +161,16 @@ async function resolveDkimKey(
   domain: string,
   fetcher: typeof fetch,
   nowMs: number,
+  signal: AbortSignal,
 ): Promise<ArrayBuffer> {
+  signal.throwIfAborted();
   const name = `${selector}._domainkey.${domain}`;
   const cached = keyCache.get(name);
   if (cached && cached.expiresAt > nowMs) return cached.spki.slice(0);
   const url = new URL("https://cloudflare-dns.com/dns-query");
   url.searchParams.set("name", name);
   url.searchParams.set("type", "TXT");
-  const response = await fetcher(url, { headers: { accept: "application/dns-json" } });
+  const response = await fetcher(url, { headers: { accept: "application/dns-json" }, signal });
   if (!response.ok) throw new Error("dns_http_error");
   const payload = await response.json() as {
     Status?: number;
@@ -173,6 +186,7 @@ async function resolveDkimKey(
   const spki = decodeBase64(tags.get("p") ?? "");
   if (!spki || spki.byteLength < 128) throw new Error("dns_key_invalid");
   const ttl = Math.max(0, Math.min(MAX_DNS_TTL_SECONDS, Number(answer.TTL) || 0));
+  signal.throwIfAborted();
   if (keyCache.size >= 512) keyCache.clear();
   keyCache.set(name, { expiresAt: nowMs + ttl * 1000, spki: spki.slice(0) });
   return spki;

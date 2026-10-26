@@ -52,6 +52,26 @@ test("missing or stale coverage, incomplete notification, disabled mode, and non
   } finally { db.close(); }
 });
 
+test("a stalled heartbeat is cancelled once without changing the canary ledger", async () => {
+  const db = database();
+  let calls = 0;
+  let signal: AbortSignal | null | undefined;
+  try {
+    db.run("UPDATE mail_canary_state SET last_notified_at_ms = ?, last_coverage_at_ms = ?, attempt_state = 'idle' WHERE singleton = 1", [now, now]);
+    const before = db.query("SELECT * FROM mail_canary_state").get();
+    await expect(runHeartbeat(envFor(db), (async (_input, init) => {
+      calls++;
+      signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+      });
+    }) as typeof fetch, now)).rejects.toThrow("request deadline exceeded");
+    expect(calls).toBe(1);
+    expect(signal?.aborted).toBe(true);
+    expect(db.query("SELECT * FROM mail_canary_state").get()).toEqual(before);
+  } finally { db.close(); }
+}, 10_000);
+
 function database(): Database {
   const db = new Database(":memory:");
   const root = resolve(import.meta.dir, "../..");

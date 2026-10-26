@@ -35,20 +35,39 @@ const MAX_OUTBOUND_ATTEMPTS = 6;
 export async function processQueueBatch(batch: MessageBatch<MailJob>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       let disposition: QueueDisposition;
+      let job: MailJob | null = null;
       try {
-        const job = decodeMailJob(message.body);
+        job = decodeMailJob(message.body);
         if (!job) {
           await recordAuditEvent(env, "system", "queue_contract_rejected", { reason: "unsupported_or_malformed_job" });
           disposition = ACK;
         } else disposition = await recordQueueEvent(job, env, Math.max(1, message.attempts));
       }
-      finally { await refreshRouteStatuses(env).catch(() => console.error(JSON.stringify({ event: "status_projection_unavailable" }))); }
+      finally {
+        // Read-only status work cannot change dispatch, acknowledgment or replay policy.
+        if (job) await refreshJobRouteStatus(job, env)
+          .catch(() => console.error(JSON.stringify({ event: "status_projection_unavailable" })));
+      }
       if (disposition.kind === "retry") {
         message.retry({ delaySeconds: disposition.delaySeconds });
       } else {
         message.ack();
       }
     }
+}
+
+async function refreshJobRouteStatus(job: MailJob, env: Env): Promise<void> {
+  if (operatorDeliveryConfig(env).mode !== "inbox_relay") return;
+  let statement: D1PreparedStatement;
+  if (job.kind === "inbox_reply_received") {
+    statement = env.DB.prepare("SELECT route_id FROM reply_relays WHERE id = ?1 LIMIT 1").bind(job.relayId);
+  } else if ("threadId" in job) {
+    statement = env.DB.prepare("SELECT route_id FROM threads WHERE id = ?1 LIMIT 1").bind(job.threadId);
+  } else {
+    statement = env.DB.prepare("SELECT route_id FROM inbound_deliveries WHERE id = ?1 LIMIT 1").bind(job.deliveryId);
+  }
+  const row = await statement.first<{ route_id: string }>();
+  if (row) await refreshRouteStatuses(env, Date.now(), { routeIds: [row.route_id] });
 }
 
 async function processInboxReply(

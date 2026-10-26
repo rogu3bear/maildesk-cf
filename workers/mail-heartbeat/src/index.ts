@@ -1,3 +1,7 @@
+import { withRequestDeadline } from "../../shared/request-deadline";
+
+export const HEARTBEAT_REQUEST_TIMEOUT_MS = 5_000;
+
 export interface HeartbeatEnv {
   DB: D1Database;
   MAILDESK_HEARTBEAT_MODE?: string;
@@ -19,8 +23,12 @@ export async function runHeartbeat(
   if (!Number.isSafeInteger(hours) || hours < 1 || hours > 24) throw new Error("invalid heartbeat age");
   const ready = await configurationReady(env, now, hours * HOUR);
   if (!ready) throw new Error("heartbeat withheld; configuration ledger is stale or notification attempt is incomplete");
-  const response = await fetchImpl(url, { method: "POST", redirect: "error" });
-  if (!response.ok) throw new Error("heartbeat endpoint rejected the ping");
+  await withRequestDeadline(HEARTBEAT_REQUEST_TIMEOUT_MS, async (signal) => {
+    const response = await fetchImpl(url, { method: "POST", redirect: "error", signal });
+    // Only the status is needed; do not leave a response body consuming resources.
+    await response.body?.cancel();
+    if (!response.ok) throw new Error("heartbeat endpoint rejected the ping");
+  });
   return "sent";
 }
 

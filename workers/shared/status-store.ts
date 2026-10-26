@@ -5,6 +5,13 @@ import { publicIdentityProfileSha256, sha256Hex } from "./inbox-relay";
 import { projectRouteStatus, proofMillis } from "./route-status";
 import type { RouteDecision } from "./router";
 
+export const ROUTE_STATUS_REFRESH_PAGE_SIZE = 32;
+
+export interface RouteStatusRefreshScope {
+  routeIds?: readonly string[];
+  afterRouteId?: string;
+}
+
 interface StatusRow {
   route_id: string; source_generation: number; enabled: number; policy_sha256: string;
   desired_provider: string; inbound_status: string | null; reply_status: string | null;
@@ -55,20 +62,38 @@ export const ROUTE_STATUS_INPUT_SQL = `SELECT ar.id AS route_id, ar.status_gener
   FROM alias_routes ar JOIN route_health rh ON rh.route_id = ar.id
   LEFT JOIN current_route_reply_authorizations a ON a.id =
     (SELECT min(representative.id) FROM current_route_reply_authorizations representative WHERE representative.route_id = ar.id)
-  WHERE ar.policy_sha256 = ?1 ORDER BY ar.id`;
+  WHERE ar.policy_sha256 = ?1 AND ar.id > ?2
+    AND (?3 IS NULL OR ar.id IN (SELECT value FROM json_each(?3)))
+  ORDER BY ar.id LIMIT ${ROUTE_STATUS_REFRESH_PAGE_SIZE + 1}`;
 
 /** Best-effort derived-state materialization. Losing a generation race leaves
  * the projection absent/unknown; it never overwrites newer evidence.
  */
-export async function refreshRouteStatuses(env: MaildeskEnv, now = Date.now()): Promise<void> {
+export async function refreshRouteStatuses(
+  env: MaildeskEnv,
+  now = Date.now(),
+  scope: RouteStatusRefreshScope = {},
+): Promise<{ refreshed: number; nextCursor: string | null }> {
+  const empty = { refreshed: 0, nextCursor: null };
+  const routeIds = scope.routeIds === undefined ? null : [...new Set(scope.routeIds)];
+  if (routeIds && (routeIds.length > ROUTE_STATUS_REFRESH_PAGE_SIZE ||
+      routeIds.some((id) => typeof id !== "string" || !id.startsWith("route:") || id.length > 1024))) {
+    throw new Error("status refresh route scope is invalid");
+  }
+  if (routeIds?.length === 0) return empty;
   const config = operatorDeliveryConfig(env);
-  if (config.mode !== "inbox_relay") return;
+  if (config.mode !== "inbox_relay") return empty;
+  // Full policy validation/parity remains mandatory even for a single route.
   const active = await loadActivePolicy(env);
-  if (!active) return;
-  const data = await env.DB.prepare(ROUTE_STATUS_INPUT_SQL).bind(active.sha256).all<StatusRow>();
+  if (!active) return empty;
+  const data = await env.DB.prepare(ROUTE_STATUS_INPUT_SQL)
+    .bind(active.sha256, scope.afterRouteId ?? "", routeIds === null ? null : JSON.stringify(routeIds)).all<StatusRow>();
   if (!data.success || !data.results) throw new Error("status input unavailable");
-  for (const row of data.results) {
-    const route = active.projection.routes.find((entry) => policyStorageId("route", entry.domain, entry.localPart) === row.route_id);
+  const routes = new Map(active.projection.routes.map((route) => [policyStorageId("route", route.domain, route.localPart), route]));
+  const page = data.results.slice(0, ROUTE_STATUS_REFRESH_PAGE_SIZE);
+  let refreshed = 0;
+  for (const row of page) {
+    const route = routes.get(row.route_id);
     if (!route) continue;
     const coverage = await completeActivationCoverage(route, row.authorizations_json, env, now);
     const inboxAt = route.operatorReplyIdentities ? coverage?.inboxAt ?? null : row.last_inbox_verified_at;
@@ -94,7 +119,7 @@ export async function refreshRouteStatuses(env: MaildeskEnv, now = Date.now()): 
       }),
     ].filter((time) => Number.isFinite(time) && time > now);
     projection.valid_until = new Date(Math.min(...expirations)).toISOString();
-    await env.DB.prepare(`INSERT INTO route_status_projection
+    const saved = await env.DB.prepare(`INSERT INTO route_status_projection
       (route_id, schema_version, projection_revision, source_generation, policy_sha256, observed_at, valid_until, projection_json)
       SELECT ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7 FROM alias_routes ar JOIN runtime_state rs ON rs.singleton = 1
       WHERE ar.id = ?1 AND ar.status_generation = ?3 AND ar.policy_sha256 = ?4 AND rs.active_policy_sha256 = ?4
@@ -104,7 +129,10 @@ export async function refreshRouteStatuses(env: MaildeskEnv, now = Date.now()): 
         valid_until = excluded.valid_until, projection_json = excluded.projection_json`)
       .bind(row.route_id, projection.projection_revision, row.source_generation, active.sha256,
         projection.observed_at, projection.valid_until, JSON.stringify(projection)).run();
+    if (!saved.success) throw new Error("status projection persistence unavailable");
+    if (Number(saved.meta?.changes ?? 0) > 0) refreshed++;
   }
+  return { refreshed, nextCursor: data.results.length > ROUTE_STATUS_REFRESH_PAGE_SIZE ? page.at(-1)!.route_id : null };
 }
 
 /** A representative ID is exposed only when every distinct Rust-selected

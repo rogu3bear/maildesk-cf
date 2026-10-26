@@ -129,6 +129,11 @@ parser disagreement and unsupported algorithms fail closed. DNS uncertainty is
 not authentication. The real Apple Mail/Workspace signing shape must be
 qualified with captured fixtures before ordinary activation.
 
+DKIM verification has one five-second deadline shared by all signatures and DNS
+response parsing. Expiry aborts the DNS request and remains
+`indeterminate`/`dkim_key_unavailable`; no admission, spool or dispatch follows.
+Late responses cannot populate the key cache or create authority.
+
 New reply identity hashes use a domain-separated v2 preimage and preserve case.
 Legacy lowercase hashes are also looked up to prevent reopening historical
 attempts under the new digest. An exact authenticated redelivery resolves its
@@ -216,6 +221,16 @@ A later accepted delivery cannot hide those outstanding recipients or turn the
 route current. This derived status grants no replay authority.
 Migration 0017 invalidates cached projections on inbound delivery and recipient
 changes and advances the source generation to fence concurrent refreshes.
+
+Message paths refresh only the affected route: Rust's resolved inbound route or
+the reply/job's durable stored route. Empty or unresolved scopes do no refresh.
+`refreshRouteStatuses` validates the complete active policy/inventory before
+materializing at most 32 route projections per call. An explicit full sweep uses
+the returned `nextCursor` as `afterRouteId` until null; a point scope accepts at
+most 32 distinct IDs. Publication retains the policy/generation fence, and
+refresh failure never changes Queue acknowledgment, send claims or recovery.
+Untouched, invalidated or expired projections remain unknown/stale until refreshed.
+
 For personal-first groups, status requires matching activation coverage for
 every distinct Rust-selected public profile. Its representative activation ID
 is an actual member of that complete set, and proof freshness uses the oldest

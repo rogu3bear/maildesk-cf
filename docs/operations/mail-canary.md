@@ -59,6 +59,11 @@ hours). A dead database, a stale configuration read, or a notification left
 what alerts on a missed ping. This Worker cannot email, so a dead sender cannot
 hide by failing to send the canary message. The public example stays disabled.
 
+The monitor request has a five-second deadline, cancels its response body after
+reading the status, and is never retried within the run. A timeout leaves the
+canary ledger unchanged and reports an unavailable ping; it establishes no mail
+delivery failure and cannot replay a mail-provider operation.
+
 ## Deployment
 
 Use `wrangler.mail-canary.toml` as the template for a private production config.

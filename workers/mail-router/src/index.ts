@@ -10,9 +10,11 @@ export default {
     const config = operatorDeliveryConfig(env);
     const isReply = config.replyDomain && relayTokenFromRecipient(message.to, config.replyDomain);
     const enabled = config.mode === "inbox_relay" && (isReply ? config.replyProcessingMode : config.inboundProcessingMode) === "enabled";
-    try { await acceptEmail(message, env); }
+    const affectedRoutes = new Set<string>();
+    try { await acceptEmail(message, env, affectedRoutes); }
     finally {
-      if (enabled) await refreshRouteStatuses(env).catch(() => console.error(JSON.stringify({ event: "status_projection_unavailable" })));
+      if (enabled) await refreshRouteStatuses(env, Date.now(), { routeIds: [...affectedRoutes] })
+        .catch(() => console.error(JSON.stringify({ event: "status_projection_unavailable" })));
     }
   },
 } satisfies ExportedHandler<MaildeskEnv>;
