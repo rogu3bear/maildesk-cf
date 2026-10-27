@@ -1,0 +1,28 @@
+name = "maildesk-cf-mcp"
+main = "generated/mail-workers/mail-mcp/index.js"
+compatibility_date = "2026-08-12"
+workers_dev = false
+
+[build]
+command = "bun run check:mail-worker-bundles"
+
+[vars]
+# Disabled until the resource, OAuth issuer and exact subject/client bindings
+# have independent authorization and runtime readback. No login server is supplied.
+MAILDESK_MCP_MODE = "disabled"
+MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"
+MAILDESK_MCP_RESOURCE = "https://maildesk.example.com/mcp"
+MAILDESK_MCP_ISSUER = "https://login.example.com"
+MAILDESK_MCP_JWKS_URL = "https://login.example.com/.well-known/jwks.json"
+MAILDESK_MCP_BINDINGS_JSON = "[]"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "maildesk-cf-relay-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "POLICY_STORE"
+bucket_name = "maildesk-cf-policy"
+
+# No Email, Queue, relay spool, schedule, HTTP route or credential binding.

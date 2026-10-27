@@ -39,6 +39,11 @@ mailbox, Gmail add-on, marketing sender, CRM, ticket system, or helpdesk clone.
 
 ## Repository Shape
 
+Bots can use an optional [read-only Maildesk MCP adapter](docs/operations/bot-mcp.md)
+for their authorized routes and existing delivery-status evidence. The existing
+mailbox connector remains the content path. The MCP example is disabled and provides no send,
+message-content, activation or email-trigger capability.
+
 ```text
 maildesk-cf/
   src/                  # Leptos Router UI and Cloudflare SSR adapter

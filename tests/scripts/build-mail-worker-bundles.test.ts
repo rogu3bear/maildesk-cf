@@ -82,6 +82,15 @@ const roles = [
     router: false,
     requiredInputs: ["workers/mail-heartbeat/src/index.ts"],
   },
+  {
+    role: "mail-mcp",
+    config: "wrangler.mail-mcp.toml",
+    entrypoint: "workers/mail-mcp/src/index.ts",
+    router: true,
+    requiredInputs: ["workers/mail-mcp/src/index.ts", "workers/mail-mcp/src/auth.ts", "workers/mail-mcp/src/read-model.ts",
+      "workers/mail-mcp/src/request.ts", "workers/shared/policy-store.ts", "workers/shared/route-status-reader.ts",
+      "generated/router-wasm/maildesk_router_bg.wasm"],
+  },
 ] as const;
 
 describe("closed Maildesk Worker bundles", () => {
