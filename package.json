@@ -40,6 +40,7 @@
     "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@cloudflare/workers-types": "5.20260812.1",
     "@types/node": "^25.9.3",
     "esbuild": "0.28.1",
@@ -52,7 +53,9 @@
     "esbuild": "0.28.1"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
     "jose": "6.2.8",
-    "postal-mime": "2.7.5"
+    "postal-mime": "2.7.5",
+    "zod": "4.6.7"
   }
 }

@@ -27,6 +27,7 @@ const roles = [
   { role: "mail-outbound", entrypoint: "workers/mail-outbound/src/index.ts", router: true },
   { role: "mail-canary", entrypoint: "workers/mail-canary/src/index.ts", router: true },
   { role: "mail-heartbeat", entrypoint: "workers/mail-heartbeat/src/index.ts", router: false },
+  { role: "mail-mcp", entrypoint: "workers/mail-mcp/src/index.ts", router: true },
 ] as const;
 
 interface ManifestEntry {
