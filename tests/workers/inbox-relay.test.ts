@@ -690,7 +690,7 @@ test("a policy revision change during persistence rejects without rewriting rout
 
   await mailRouterWorker.email(message, relayEnv(db, deliveries), {} as ExecutionContext);
 
-  expect(message.rejected).toContain("could not create a durable route");
+  expect(message.rejected).toBe("maildesk inbound persistence requires reconciliation");
   expect(deliveries).toHaveLength(0);
   expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_routes"))).toBe(false);
   expect(db.calls.some((call) => call.sql.includes("INSERT INTO alias_route_operators"))).toBe(false);
