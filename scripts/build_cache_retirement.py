@@ -81,7 +81,22 @@ def run(args, cwd=None):
             if re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", key):
                 env.pop(key)
         env["GIT_OPTIONAL_LOCKS"] = "0"
-    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, check=True)
+    pass_fds = ()
+    if args[0] == "cargo" and any(k in env for k in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY")):
+        candidates = []
+        for key in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY"):
+            if key not in env:
+                continue
+            fd = json.loads(env[key])["fd"]
+            if type(fd) is not int or fd < 3:
+                raise RuntimeError("Invalid inherited reservation descriptor")
+            os.fstat(fd); candidates.append(fd)
+        status = json.loads(subprocess.run(["disk-guard", "inheritance-status"], env=env,
+            pass_fds=tuple(candidates), capture_output=True, check=True).stdout)
+        if status.get("schema") != "disk-guard.inheritance-status.v1" or status.get("status") != "VALID" or sorted(status["pass_fds"]) != sorted(candidates):
+            raise RuntimeError("Inherited host capability did not validate")
+        pass_fds = tuple(status["pass_fds"])
+    result = subprocess.run(args, cwd=cwd, env=env, pass_fds=pass_fds, capture_output=True, check=True)
     return result.stdout
 
 
@@ -129,6 +144,32 @@ def protected(name, paths):
     return any(name == p or Path(name).is_relative_to(p) for p in paths)
 
 
+def stable_rows(rows):
+    # APFS may change block allocation without changing content or identity.
+    # Allocation is a measurement, not an integrity field.
+    return {name: {k: v for k, v in row.items() if k != "allocated"} for name, row in rows.items()}
+
+
+def workspace_targets(repo, root):
+    data = json.loads(run(["cargo", "metadata", "--no-deps", "--frozen", "--format-version=1"], repo))
+    if data["workspace_root"] != str(repo) or data["target_directory"] != str(root) or data.get("build_directory", str(root)) != str(root):
+        raise RuntimeError("Cargo metadata selects a different compiler envelope")
+    return [{"package": p["name"], "name": t["name"], "crate": t["name"].replace("-", "_"),
+             "source": t["src_path"], "kind": t["kind"], "crate_types": t["crate_types"]}
+            for p in data["packages"] if p["id"] in data["workspace_members"] for t in p["targets"]]
+
+
+def signature_retained(path):
+    with path.open("rb") as stream:
+        macho = stream.read(4) in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe")
+    if not macho:
+        return False
+    result = subprocess.run(["codesign", "-d", "--verbose=2", str(path)], capture_output=True, text=True, timeout=15)
+    if any(line.startswith("Authority=") for line in result.stderr.splitlines()):
+        return True
+    return result.returncode != 0 and "not signed at all" not in result.stderr
+
+
 def artifact_kind(path):
     with path.open("rb") as stream:
         raw = stream.read(32)
@@ -136,20 +177,20 @@ def artifact_kind(path):
         return "archive"
     if path.suffix == ".rmeta" and raw.startswith(b"rust\x00\x00\x00"):
         return "rust_metadata"
-    if path.suffix == ".o" and raw.startswith(b"\x00asm"):
-        return "object"
+    if raw.startswith(b"\x00asm"):
+        return "object" if path.suffix == ".o" else "wasm" if path.suffix == ".wasm" else None
     if raw[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") and len(raw) >= 16:
-        return {1: "object", 6: "shared_library", 8: "shared_library"}.get(struct.unpack("<I", raw[12:16])[0])
+        return {1: "object", 2: "executable", 6: "shared_library", 8: "shared_library"}.get(struct.unpack("<I", raw[12:16])[0])
     if raw.startswith(b"\x7fELF") and len(raw) >= 18:
-        return {1: "object", 3: "shared_library"}.get(struct.unpack("<H" if raw[5] == 1 else ">H", raw[16:18])[0])
+        return {1: "object", 2: "executable", 3: "shared_library"}.get(struct.unpack("<H" if raw[5] == 1 else ">H", raw[16:18])[0])
     return None
 
 
-def select_payload(root, files, keep):
+def select_payload(root, files, keep, workspace=()):
     """Only ordinary hashed Cargo dependencies with available regeneration inputs.
 
-    Build-script outputs, executables, WASM deliveries, locks, diagnostics and
-    fingerprint/dep-info control metadata are retained. Unknown formats retain.
+    Workspace codegen objects/unhashed products also require native metadata.
+    Delivered products, signed binaries, locks and unknown formats retain.
     """
     selected, controls, reasons, unit_controls = {}, {}, collections.Counter(), {}
     groups = collections.defaultdict(list)
@@ -161,25 +202,56 @@ def select_payload(root, files, keep):
             reasons["protected_or_nonregular"] += 1
             continue
         match = re.fullmatch(r"(?:lib)?([A-Za-z0-9_]+)-([a-f0-9]{16})(?:\.[A-Za-z0-9_.]+)?", path.name)
-        if len(parts) < 3 or parts[-2] != "deps" or not match or path.suffix not in (".rlib", ".rmeta", ".a", ".o", ".dylib", ".so"):
+        required = {".rlib": "archive", ".a": "archive", ".rmeta": "rust_metadata", ".o": "object",
+                    ".dylib": "shared_library", ".so": "shared_library", ".wasm": "wasm", "": "executable"}
+        if path.suffix not in required or len(parts) < 2:
             reasons["lock_product_metadata_or_unknown"] += 1
             continue
-        prefix = parts[:-2]
+        hashed = len(parts) >= 3 and parts[-2] == "deps" and match is not None
+        build_unit = re.fullmatch(r"([A-Za-z0-9_-]+)-([a-f0-9]{16})", parts[-2]) if len(parts) >= 4 and parts[-3] == "build" else None
+        build_script = build_unit and path.name in ("build-script-build", "build_script_build-" + build_unit[2])
+        prefix = parts[:-3] if build_script else parts[:-2] if parts[-2] == "deps" else parts[:-1]
         layout = prefix[1:] if prefix and prefix[0] == "front" else prefix
         if (not layout or layout[-1] not in ("debug", "release") or len(layout) > 2 or
                 len(layout) == 2 and not re.fullmatch(r"[a-z0-9_]+(?:-[a-z0-9_]+){2,}", layout[0])):
             reasons["unqualified_profile_namespace"] += 1
             continue
         kind = artifact_kind(path)
-        required = {".rlib": "archive", ".a": "archive", ".rmeta": "rust_metadata", ".o": "object",
-                    ".dylib": "shared_library", ".so": "shared_library"}
         if kind != required[path.suffix]:
             reasons["unrecognized_format"] += 1
             continue
         profile = root.joinpath(*prefix)
-        unit = match[2]
-        fingerprints = list((profile / ".fingerprint").glob("*-" + unit + "/*.json"))
-        depinfo = profile / "deps" / (match[1] + "-" + unit + ".d")
+        if kind in ("executable", "shared_library") and signature_retained(path):
+            reasons["signed_or_unqualified_signature"] += 1
+            continue
+        if build_script:
+            unit = "build-script:" + build_unit[2]
+            fingerprints = [profile / ".fingerprint" / parts[-2] / "build-script-build-script-build.json"]
+            depinfo = path.parent / ("build_script_build-" + build_unit[2] + ".d")
+        elif hashed:
+            unit = match[2]
+            fingerprints = list((profile / ".fingerprint").glob("*-" + unit + "/*.json"))
+            depinfo = profile / "deps" / (match[1] + "-" + unit + ".d")
+        else:
+            def compatible(t):
+                types = set(t["crate_types"])
+                return (path.suffix == ".o" or path.suffix == "" and "bin" in t["kind"] or
+                        path.suffix in (".rlib", ".rmeta") and bool(types & {"lib", "rlib"}) or
+                        path.suffix in (".dylib", ".so", ".wasm") and bool(types & {"cdylib", "dylib"}) or
+                        path.suffix == ".a" and "staticlib" in types)
+            owner = next((t for t in workspace if compatible(t) and (path.name in
+                (t["name"], t["crate"], "lib" + t["crate"] + path.suffix, t["crate"] + path.suffix) or
+                re.fullmatch(re.escape(t["crate"]) + r"\." + re.escape(t["crate"]) + r"\.[a-f0-9]{16}-cgu\.\d+\.rcgu\.o", path.name))), None)
+            if owner is None or not Path(owner["source"]).is_file():
+                reasons["unqualified_workspace_product"] += 1
+                continue
+            unit = "workspace:" + owner["crate"]
+            leaf = ("bin-" + owner["name"]) if "bin" in owner["kind"] else ("lib-" + owner["crate"])
+            fingerprints = list((profile / ".fingerprint").glob(owner["package"] + "-*/*" + leaf + ".json"))
+            candidates = [profile / "deps" / (owner["crate"] + ".d"), profile / ("lib" + owner["crate"] + ".d"), profile / (owner["crate"] + ".d")]
+            if "bin" in owner["kind"]:
+                candidates.insert(0, profile / (owner["name"] + ".d"))
+            depinfo = next((p for p in candidates if p.is_file()), profile / "missing-depinfo")
         try:
             valid = [p for p in fingerprints if not p.is_symlink() and p.stat().st_size <= 2_000_000 and
                      {"rustc", "features", "target", "profile", "deps"} <= json.loads(p.read_bytes()).keys()]
@@ -189,6 +261,8 @@ def select_payload(root, files, keep):
             inputs = shlex.split(first)
             if not inputs or len(inputs) > 20_000 or any(not (Path(p) if p.startswith("/") else root.parent / p).is_file() for p in inputs):
                 raise ValueError("Regeneration source unavailable")
+            if not hashed and not build_script and Path(owner["source"]).resolve() not in [(Path(p) if p.startswith("/") else root.parent / p).resolve() for p in inputs]:
+                raise ValueError("Workspace source is absent from dep-info")
         except (OSError, ValueError, IndexError, UnicodeError):
             reasons["regeneration_unqualified"] += 1
             continue
@@ -208,7 +282,7 @@ def select_payload(root, files, keep):
     for (profile, unit), paths in unit_controls.items():
         payloads = [n for n in files if str(Path(n).parent) == profile + "/deps" and
                     ("-" + unit + ".") in Path(n).name and Path(n).suffix in
-                    (".rlib", ".rmeta", ".a", ".o", ".dylib", ".so", ".wasm")]
+                    (".rlib", ".rmeta", ".a", ".o", ".dylib", ".so", ".wasm", "")]
         if not payloads or any(n not in selected for n in payloads):
             continue
         for path in paths:
@@ -258,7 +332,7 @@ def cargo_locks(root, files):
             fd = os.open(root / name, os.O_RDWR | os.O_NOFOLLOW)
             stack.callback(os.close, fd)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if metadata(root / name) != row:
+            if stable_rows({name: metadata(root / name)}) != stable_rows({name: row}):
                 raise RuntimeError("Cargo lock changed")
         yield
 
@@ -303,6 +377,7 @@ def exclusion(repo, root, policy, released, controls, policy_sha256=None):
 def prepare(repo, policy, plan_path, authorization, keep=()):
     repo, policy, plan_path = Path(repo), Path(policy), Path(plan_path)
     root = bindings(repo, policy, keep)
+    workspace = workspace_targets(repo, root)
     if not authorization.strip() or plan_path.resolve().is_relative_to(root):
         raise RuntimeError("Require separate authorization and a plan outside target")
     pins = json.loads(policy.read_bytes())["retention_pins"]
@@ -312,19 +387,21 @@ def prepare(repo, policy, plan_path, authorization, keep=()):
         with cargo_locks(root, files):
             source = git_state(repo)
             keep = sorted(set(keep) | {"site", "doc", "package", "ui-asset-hashes.env"})
-            selected, controls, reasons = select_payload(root, files, keep)
+            selected, controls, reasons = select_payload(root, files, keep, workspace)
             open_users(root, files)
             all_contents = contents(root, files)
             value = root.stat()
-            plan = {"schema": "maildesk-build-cache-retirement/v1", "repo": str(repo), "root": str(root),
+            plan = {"schema": "maildesk-build-cache-retirement/v2", "repo": str(repo), "root": str(root),
                     "root_identity": [value.st_dev, value.st_ino], "authorization": authorization,
                     "provider_manifest_sha256": provider()[1], "policy": str(policy), "policy_sha256": sha(policy),
                     "released_pins": released, "source": source, "keep": keep, "files": files,
                     "directories": dirs, "contents": all_contents, "selected": selected,
+                    "workspace_targets": workspace,
                     "classifier_controls": controls, "retained_reasons": reasons,
                     "external_products": external_products(repo)}
             held.before_effect()
-            if inventory(root) != (files, dirs) or git_state(repo) != source:
+            current_files, current_dirs = inventory(root)
+            if stable_rows(current_files) != stable_rows(files) or stable_rows(current_dirs) != stable_rows(dirs) or git_state(repo) != source:
                 raise RuntimeError("Snapshot changed during qualification")
             save(plan_path, plan)
     return {"plan": str(plan_path), "sha256": sha(plan_path), "files": len(selected),
@@ -384,27 +461,29 @@ def apply(plan_path, plan_sha256, journal_path, receipt_path, *, unlink=unlink_a
         raise RuntimeError("Existing transaction requires read-only reconciliation, never replay")
     repo, policy = Path(plan["repo"]), Path(plan["policy"])
     root = bindings(repo, policy, plan["keep"])
+    workspace = workspace_targets(repo, root)
     if root != Path(plan["root"]) or any(p.resolve().is_relative_to(root) for p in (journal_path, receipt_path)):
         raise RuntimeError("Transaction controls must survive outside target")
     result = {"status": "HELD_NO_EFFECT", "plan_sha256": plan_sha256, "removed": [], "effect_dispatched": False, "before": measure(root)}
     removed_links = collections.Counter()
+    removed_allocations = {}
     with journal_path.open("x") as journal:
         def event(kind, **values):
             journal.write(json.dumps({"event": kind, **values}, separators=(",", ":")) + "\n")
             journal.flush(); os.fsync(journal.fileno())
         event("STARTED", plan_sha256=plan_sha256, authorization=plan["authorization"])
         try:
-            if plan["schema"] != "maildesk-build-cache-retirement/v1" or sha(policy) != plan["policy_sha256"] or provider()[1] != plan["provider_manifest_sha256"]:
+            if plan["schema"] != "maildesk-build-cache-retirement/v2" or workspace != plan["workspace_targets"] or sha(policy) != plan["policy_sha256"] or provider()[1] != plan["provider_manifest_sha256"]:
                 raise RuntimeError("Policy/provider identity changed")
             with exclusion(repo, root, policy, plan["released_pins"], [str(plan_path), str(journal_path), str(receipt_path), str(repo / ".git")], plan["policy_sha256"]) as held:
                 if [root.stat().st_dev, root.stat().st_ino] != plan["root_identity"]:
                     raise RuntimeError("Target identity changed")
                 files, dirs = inventory(root)
-                if files != plan["files"] or dirs != plan["directories"]:
+                if stable_rows(files) != stable_rows(plan["files"]) or stable_rows(dirs) != stable_rows(plan["directories"]):
                     raise RuntimeError("Plan inventory changed")
                 with cargo_locks(root, files):
-                    selected, controls, _ = select_payload(root, files, plan["keep"])
-                    if selected != plan["selected"] or controls != plan["classifier_controls"] or contents(root, files) != plan["contents"] or git_state(repo) != plan["source"] or external_products(repo) != plan["external_products"]:
+                    selected, controls, _ = select_payload(root, files, plan["keep"], workspace)
+                    if stable_rows(selected) != stable_rows(plan["selected"]) or controls != plan["classifier_controls"] or contents(root, files) != plan["contents"] or git_state(repo) != plan["source"] or external_products(repo) != plan["external_products"]:
                         raise RuntimeError("Source, classifier or retained evidence changed")
                     open_users(root, files)
                     held.before_effect()
@@ -413,16 +492,18 @@ def apply(plan_path, plan_sha256, journal_path, receipt_path, *, unlink=unlink_a
                         identity = (expected["device"], expected["inode"])
                         wanted = {k: v for k, v in expected.items() if k not in ("kind", "sha256")}
                         wanted["nlink"] -= removed_links[identity]
-                        if current != wanted or sha(root / name) != expected["sha256"]:
+                        if stable_rows({name: current}) != stable_rows({name: wanted}) or sha(root / name) != expected["sha256"]:
                             raise RuntimeError("Selected file changed before effect")
-                        event("UNLINK_INTENT", path=name, sha256=expected["sha256"])
+                        event("UNLINK_INTENT", path=name, sha256=expected["sha256"], allocated_bytes=current["allocated"], nlink=current["nlink"])
                         result["effect_dispatched"] = True
                         unlink(held.targets[0]["fd"], name, dirs)
                         result["removed"].append(name); removed_links[identity] += 1
+                        if current["nlink"] == 1:
+                            removed_allocations[identity] = current["allocated"]
                         event("UNLINK_COMPLETE", path=name)
                     after, after_dirs = inventory(root)
                     retained = {n: r for n, r in files.items() if n not in selected}
-                    if after != retained or contents(root, after) != {n: h for n, h in plan["contents"].items() if n not in selected}:
+                    if stable_rows(after) != stable_rows(retained) or contents(root, after) != {n: h for n, h in plan["contents"].items() if n not in selected}:
                         raise RuntimeError("Retained files changed")
                     if set(after_dirs) != set(dirs) or any((r["device"], r["inode"]) != (dirs[n]["device"], dirs[n]["inode"]) for n, r in after_dirs.items()):
                         raise RuntimeError("Retained directory identity changed")
@@ -444,8 +525,8 @@ def apply(plan_path, plan_sha256, journal_path, receipt_path, *, unlink=unlink_a
         result["after"] = measure(root)
         result["target_allocation_change_bytes"] = result["after"]["target_allocated_bytes"] - result["before"]["target_allocated_bytes"]
         result["filesystem_free_change_bytes"] = result["after"]["filesystem_free_bytes"] - result["before"]["filesystem_free_bytes"]
-        result["removed_allocated_bytes"] = sum({(r["device"], r["inode"]): r["allocated"] for n, r in plan["selected"].items()
-            if n in result["removed"] and removed_links[(r["device"], r["inode"])] == r["nlink"]}.values())
+        result["removed_allocated_bytes"] = sum(removed_allocations.values())
+        result["allocation_measurement_basis"] = "Last-link metadata immediately before acknowledged unlink; not physical free-space recovery"
         save(receipt_path, result)
     return result
 

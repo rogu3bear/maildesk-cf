@@ -31,7 +31,11 @@ retained proof are never inferred expendable from their location. A host cleanup
 capability limited to a dev profile does not authorize release/triple siblings.
 The repository consumer instead uses the installed held-exclusion API and an
 independent exact dependency-payload classifier. Fingerprints, dep-info and
-available source must establish regeneration. Only a unit whose payloads all
+available source must establish regeneration. Unhashed workspace payloads also
+require native Cargo workspace targets and matching crate types. Signed binaries
+and products outside the compiler profiles remain protected. Only a unit whose payloads all
 qualify may lose its dependency metadata. Retained or external hardlinks keep
 the entire link set; unknown products, build-script outputs and diagnostics stay.
+Only build-script compiler executables with their exact fingerprint and available
+dep-info inputs qualify; generated `out/` contents do not follow them into retirement.
 The transaction's plan, journal, hashes and readback remain under ignored `var/`.

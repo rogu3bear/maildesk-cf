@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -130,6 +131,98 @@ class RetirementTests(unittest.TestCase):
         os.link(self.first, self.base / "external.rmeta")
         (self.first.parent / "libalias-2222222222222222.rmeta").symlink_to(self.first)
         self.assertEqual(self.prepare()["files"], 0)
+
+    def workspace_library(self):
+        crate = "retirement_fixture"
+        deps = self.target / "debug/deps"
+        source = self.repo / "src/lib.rs"
+        fingerprint = self.target / "debug/.fingerprint/retirement-fixture-3333333333333333"
+        fingerprint.mkdir(parents=True)
+        (fingerprint / ("lib-" + crate + ".json")).write_text(json.dumps(dict(rustc=1, features=[], target=1, profile=1, deps=[])))
+        library = deps / ("lib" + crate + ".rlib")
+        library.write_bytes(b"!<arch>\nfixture workspace archive")
+        peer = self.target / ("debug/lib" + crate + ".rlib")
+        os.link(library, peer)
+        obj = deps / (crate + "." + crate + ".4444444444444444-cgu.01.rcgu.o")
+        obj.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 8 + b"\x01\0\0\0" + b"\0" * 16)
+        (deps / (crate + ".d")).write_text(str(library) + ": " + str(source) + "\n")
+        return library, peer, obj
+
+    def test_native_workspace_metadata_qualifies_unhashed_library_links_and_codegen_objects(self):
+        products = self.workspace_library()
+        bound = self.prepare()
+        selected = json.loads(self.plan.read_text())["selected"]
+        self.assertTrue(all(str(p.relative_to(self.target)) in selected for p in products))
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertTrue(all(not p.exists() for p in products))
+
+    def test_workspace_unknown_namespace_format_and_missing_source_remain(self):
+        library, peer, obj = self.workspace_library()
+        unknown = obj.with_name("retirement_fixture.unowned.o")
+        unknown.write_bytes(obj.read_bytes())
+        misplaced = self.target / "evidence/libretirement_fixture.rlib"
+        misplaced.parent.mkdir(); misplaced.write_bytes(library.read_bytes())
+        library.write_bytes(b"unrecognized workspace format")
+        (obj.parent / "retirement_fixture.d").write_text(str(obj) + ": " + str(self.repo / "Cargo.toml") + "\n")
+        bound = self.prepare()
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertTrue(all(p.exists() for p in (library, peer, obj, unknown, misplaced)))
+
+    def test_workspace_protected_hardlink_keeps_entire_library_set(self):
+        library, peer, _ = self.workspace_library()
+        bound = self.prepare([str(peer.relative_to(self.target))])
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertTrue(library.exists() and peer.exists())
+
+    def test_build_script_compiler_binaries_retire_but_generated_outputs_and_diagnostics_remain(self):
+        unit = "5" * 16
+        directory = self.target / ("debug/build/fixture-" + unit)
+        directory.mkdir(parents=True)
+        binary = directory / ("build_script_build-" + unit)
+        binary.write_bytes(b"\x7fELF\x02\x01" + b"\0" * 10 + b"\x02\0" + b"\0" * 14)
+        peer = directory / "build-script-build"; os.link(binary, peer)
+        (directory / (binary.name + ".d")).write_text(str(binary) + ": " + str(self.repo / "src/lib.rs") + "\n")
+        fingerprint = self.target / ("debug/.fingerprint/fixture-" + unit)
+        fingerprint.mkdir(parents=True)
+        (fingerprint / "build-script-build-script-build.json").write_text(json.dumps(dict(rustc=1, features=[], target=1, profile=1, deps=[])))
+        output = directory / "out/generated.rs"; output.parent.mkdir(); output.write_text("retained generated input")
+        diagnostic = directory / "output"; diagnostic.write_text("retained build-script diagnostics")
+        bound = self.prepare()
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertFalse(binary.exists() or peer.exists())
+        self.assertEqual(output.read_text(), "retained generated input")
+        self.assertEqual(diagnostic.read_text(), "retained build-script diagnostics")
+
+    def test_signed_or_unqualified_signature_is_retained(self):
+        _, _, obj = self.workspace_library()
+        binary = obj.parent / "libretirement_fixture-1111111111111111.dylib"
+        binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 8 + b"\x06\0\0\0" + b"\0" * 16)
+        # Real signing identities are deliberately not needed by this fixture.
+        with mock.patch.object(cache, "signature_retained", return_value=True):
+            bound = self.prepare()
+            result = self.apply(bound)
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertTrue(binary.exists())
+
+    def test_retained_allocation_changes_are_measurements_and_not_integrity_failures(self):
+        product = self.target / "site/delivery.wasm"
+        product.parent.mkdir(); product.write_bytes(b"retained exact UI delivery")
+        identity, digest = cache.metadata(product), cache.sha(product)
+        bound = self.prepare()
+        native_metadata = cache.metadata
+        phase = 0
+        def allocation_only(path):
+            row = native_metadata(path)
+            if Path(path) == product:
+                row["allocated"] += (phase + 1) * 4096
+            return row
+        def unlink(fd, name, dirs):
+            nonlocal phase
+            cache.unlink_at(fd, name, dirs); phase += 1
+        with mock.patch.object(cache, "metadata", side_effect=allocation_only):
+            result = self.apply(bound, unlink=unlink)
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual((cache.metadata(product), cache.sha(product)), (identity, digest))
 
     def test_partial_effect_requires_reconciliation_and_never_replays(self):
         self.unit("second", "2"); bound = self.prepare()

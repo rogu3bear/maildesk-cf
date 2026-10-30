@@ -182,9 +182,13 @@ python3 -B scripts/build-and-retire.py \
 Use the existing admitted resource request unchanged and a fresh proof directory.
 The authorization reference records a real instruction; it creates no permission.
 Run this outer workflow outside an inherited reservation. It waits for the
-admitted command, checks settled source, then qualifies exact hashed Cargo
-dependency payloads and associated metadata using fingerprints and available
-regeneration inputs. It acquires held provider exclusion and existing Cargo
+admitted command, checks settled source, then qualifies exact Cargo dependency
+payloads and associated metadata using fingerprints and available regeneration
+inputs. Unhashed workspace libraries and codegen objects additionally require
+native Cargo target metadata. Build-script executables require their exact
+Cargo fingerprint and dep-info; their generated outputs and diagnostics remain.
+Signed binaries and delivered site assets remain
+protected. It acquires held provider exclusion and existing Cargo
 locks, checks current open consumers and complete hardlink sets, and preserves
 locks, products, diagnostics, unknown files and protected evidence. No mutable
 provider source, broad target removal or global cleaner is used.
@@ -195,7 +199,9 @@ retirement never replays its journal. Inspect it with
 any remaining effect needs a fresh qualified plan. Unsupported provider or
 open-file coverage holds retirement. Allocated-byte reduction and filesystem
 free-space changes are recorded separately; concurrent activity can affect the
-latter. Standalone build commands leave retirement to their encompassing
+latter. APFS allocated blocks are measurements; preservation compares exact
+content, identity, permissions, links and modification time independently.
+Standalone build commands leave retirement to their encompassing
 operation, never between router generation and bundling.
 
 Current local checks:
