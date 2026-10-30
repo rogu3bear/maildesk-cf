@@ -9,6 +9,7 @@
     "build:mail-workers": "bun run scripts/build-mail-worker-bundles.ts",
     "check:mail-worker-bundles": "bun run scripts/build-mail-worker-bundles.ts --check",
     "ci": "bash scripts/ci.sh",
+    "ci:retire": "python3 -B scripts/build-and-retire.py",
     "check": "bun run typecheck",
     "preflight": "bun run scripts/preflight.ts",
     "preflight:template": "bun run scripts/preflight.ts --mode template",

@@ -29,3 +29,9 @@ Cache retirement follows a qualified exact-path snapshot transaction after the
 encompassing operation. Source/lockfiles, session history, active binaries and
 retained proof are never inferred expendable from their location. A host cleanup
 capability limited to a dev profile does not authorize release/triple siblings.
+The repository consumer instead uses the installed held-exclusion API and an
+independent exact dependency-payload classifier. Fingerprints, dep-info and
+available source must establish regeneration. Only a unit whose payloads all
+qualify may lose its dependency metadata. Retained or external hardlinks keep
+the entire link set; unknown products, build-script outputs and diagnostics stay.
+The transaction's plan, journal, hashes and readback remain under ignored `var/`.

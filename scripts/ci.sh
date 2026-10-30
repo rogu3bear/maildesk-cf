@@ -45,6 +45,9 @@ bun test ./tests/workers
 step "bun run test:scripts"
 bun test ./tests/scripts
 
+step "selective compiler-retirement preservation fixtures"
+python3 -B -m unittest discover -s tests/python -p 'test_*.py'
+
 step "scripts/check-template.sh"
 bash scripts/check-template.sh --reuse-worker-bundles
 

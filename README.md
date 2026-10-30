@@ -168,12 +168,35 @@ rebuilds the complete closure. A changed or missing input refuses reuse.
 
 Compiler intermediates are disposable after the entire build/test/package
 operation settles. Final products under `build/`, `generated/` and `target/site`
-are separate from compiler cache. Retire cache through the host's qualified
-exact-snapshot cleanup boundary after checking live consumers and retained
-evidence. Do not run blanket target deletion or cleanup between router generation
-and bundling. On a host without a qualified retirement operation for the selected
-scope, retain it with an explicit hold; a successful build does not prove cache
-retirement.
+are separate from compiler cache. The repository's optional outer workflow uses
+the verified installed Disk Guard preservation API for selective retirement:
+
+```bash
+python3 -B scripts/build-and-retire.py \
+  --resource-request var/native-resource-request.json \
+  --receipt-dir var/proof/fresh-ci-retirement \
+  --authorization-ref existing-operator-instruction \
+  -- bash scripts/ci.sh
+```
+
+Use the existing admitted resource request unchanged and a fresh proof directory.
+The authorization reference records a real instruction; it creates no permission.
+Run this outer workflow outside an inherited reservation. It waits for the
+admitted command, checks settled source, then qualifies exact hashed Cargo
+dependency payloads and associated metadata using fingerprints and available
+regeneration inputs. It acquires held provider exclusion and existing Cargo
+locks, checks current open consumers and complete hardlink sets, and preserves
+locks, products, diagnostics, unknown files and protected evidence. No mutable
+provider source, broad target removal or global cleaner is used.
+
+Operation failure retains outputs for diagnosis. A held, partial or interrupted
+retirement never replays its journal. Inspect it with
+`python3 -B scripts/build_cache_retirement.py reconcile --plan /absolute/plan.json --journal /absolute/journal.jsonl`;
+any remaining effect needs a fresh qualified plan. Unsupported provider or
+open-file coverage holds retirement. Allocated-byte reduction and filesystem
+free-space changes are recorded separately; concurrent activity can affect the
+latter. Standalone build commands leave retirement to their encompassing
+operation, never between router generation and bundling.
 
 Current local checks:
 

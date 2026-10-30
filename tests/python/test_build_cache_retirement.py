@@ -1,0 +1,190 @@
+"""Disposable fixtures use the verified installed API, never mutable provider source."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+import build_cache_retirement as cache
+
+
+class RetirementTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not (Path.home() / ".local/share/disk-guard/installation.json").exists():
+            raise unittest.SkipTest("Optional installed preservation API absent; retirement integration is unqualified")
+        cache.provider()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="maildesk-retirement-fixture-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        self.repo = self.base / "repo"; self.repo.mkdir()
+        self.target = self.repo / "target"; self.target.mkdir()
+        self.proof = self.repo / "var/proof/run"; self.proof.mkdir(parents=True)
+        (self.repo / "src").mkdir()
+        (self.repo / "src/lib.rs").write_text("pub fn fixture() {}\n")
+        (self.repo / "Cargo.toml").write_text('[package]\nname="retirement-fixture"\nversion="0.1.0"\n')
+        (self.repo / ".gitignore").write_text("/target/\n/var/\n/build/\n/generated/\n")
+        cache.run(["git", "init"], self.repo)
+        cache.run(["git", "config", "user.name", "Retirement Fixture"], self.repo)
+        cache.run(["git", "config", "user.email", "operator@example.com"], self.repo)
+        cache.run(["git", "add", "Cargo.toml", "src/lib.rs", ".gitignore"], self.repo)
+        cache.run(["git", "commit", "-m", "fixture source"], self.repo)
+        self.api, _ = cache.provider()
+        self.state = self.base / "state"; self.state.mkdir()
+        (self.state / "admission.lock").touch(mode=0o600)
+        self.pin = {"path": str(self.repo), "owner": "fixture-operator", "reason": "retained scope"}
+        self.policy = self.base / "policy.json"
+        self.policy.write_text(json.dumps({"version": 1, "cleanup_mode": "report-only", "state_dir": str(self.state),
+            "reserve_gb": 5, "hard_reserve_gb": 5, "warning_gb": 150, "critical_gb": 4, "hysteresis_gb": 10,
+            "retention_pins": [self.pin], "preservation_coordination": dict(self.api.COORDINATION)}))
+        self.lock = self.target / "debug/.cargo-lock"; self.lock.parent.mkdir(); self.lock.touch()
+        self.first = self.unit("first", "1")
+        self.plan = self.proof / "plan.json"
+        self.journal = self.proof / "journal.jsonl"
+        self.receipt = self.proof / "receipt.json"
+
+    def unit(self, name, character):
+        unit = character * 16
+        deps = self.target / "debug/deps"; deps.mkdir(exist_ok=True)
+        artifact = deps / ("lib" + name + "-" + unit + ".rmeta")
+        artifact.write_bytes(b"rust\x00\x00\x00fixture metadata")
+        (deps / (name + "-" + unit + ".d")).write_text(str(artifact) + ": " + str(self.repo / "src/lib.rs") + "\n")
+        fingerprint = self.target / ("debug/.fingerprint/" + name + "-" + unit)
+        fingerprint.mkdir(parents=True)
+        (fingerprint / ("lib-" + name + ".json")).write_text(json.dumps(dict(rustc=1, features=[], target=1, profile=1, deps=[])))
+        return artifact
+
+    def prepare(self, keep=()):
+        return cache.prepare(self.repo, self.policy, self.plan, "Explicit fixture-only authorized retirement", keep)
+
+    def apply(self, bound, **kwargs):
+        return cache.apply(self.plan, bound["sha256"], self.journal, self.receipt, **kwargs)
+
+    def test_selective_retirement_preserves_locks_products_release_evidence_and_history(self):
+        evidence = self.unit("release_evidence", "2")
+        retained = [self.lock, evidence, self.repo / "var/history.json", self.target / "site/delivery.wasm",
+                    self.repo / "build/worker.mjs", self.repo / "generated/router.wasm"]
+        for path in retained[2:]:
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"exact retained content")
+        before = {str(p): (cache.metadata(p), cache.sha(p)) for p in retained}
+        bound = self.prepare([str(evidence.relative_to(self.target))])
+        self.assertEqual(bound["files"], 3)
+        result = self.apply(bound)
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertFalse(self.first.exists())
+        self.assertTrue(result["locks_products_source_policy_preserved"])
+        self.assertEqual(before, {str(p): (cache.metadata(p), cache.sha(p)) for p in retained})
+        self.assertEqual(json.loads(self.policy.read_text())["retention_pins"], [self.pin])
+
+    def test_missing_exact_pin_disposition_refuses_before_effect(self):
+        self.prepare(); plan = json.loads(self.plan.read_text()); plan["released_pins"] = []
+        self.plan.write_text(json.dumps(plan))
+        result = self.apply({"sha256": cache.sha(self.plan)})
+        self.assertEqual(result["status"], "HELD_NO_EFFECT")
+        self.assertEqual(result["provider_details"]["reason"], "PRESERVATION_PINNED")
+        self.assertTrue(self.first.exists())
+
+    def test_held_admission_and_cargo_lock_refuse(self):
+        bound = self.prepare()
+        for path in (self.state / "admission.lock", self.lock):
+            with path.open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = self.apply(bound)
+            self.assertEqual(result["status"], "HELD_NO_EFFECT")
+            self.assertTrue(self.first.exists())
+            self.journal.unlink(); self.receipt.unlink()
+
+    def test_live_writer_lease_refuses_before_effect(self):
+        bound = self.prepare()
+        identity = "a" * 32
+        path = self.state / ("reservation-" + identity + ".json")
+        path.write_text(json.dumps({"id": identity, "workspace": str(self.repo), "bytes": 1,
+                                   "volumes": [str(self.repo)], "build_lanes": [str(self.target)]}))
+        with path.open("rb") as live:
+            fcntl.flock(live, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.apply(bound)
+        self.assertEqual(result["status"], "HELD_NO_EFFECT")
+        self.assertEqual(result["provider_details"]["reason"], "PRESERVATION_LEASED")
+
+    def test_current_unleased_reader_is_observed(self):
+        bound = self.prepare()
+        child = subprocess.Popen([sys.executable, "-c", "import sys; f=open(sys.argv[1],'rb'); print('ready',flush=True); input()", str(self.first)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "ready")
+            result = self.apply(bound)
+            self.assertEqual(result["status"], "HELD_NO_EFFECT")
+            self.assertTrue(self.first.exists())
+        finally:
+            child.communicate("release\n", timeout=10)
+
+    def test_external_or_retained_hardlinks_and_symlinks_are_never_selected(self):
+        os.link(self.first, self.base / "external.rmeta")
+        (self.first.parent / "libalias-2222222222222222.rmeta").symlink_to(self.first)
+        self.assertEqual(self.prepare()["files"], 0)
+
+    def test_partial_effect_requires_reconciliation_and_never_replays(self):
+        self.unit("second", "2"); bound = self.prepare()
+        calls = 0
+        def interrupted(fd, name, dirs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("Owned fixture interrupt before second unlink")
+            cache.unlink_at(fd, name, dirs)
+        result = self.apply(bound, unlink=interrupted)
+        self.assertEqual(result["status"], "PARTIAL_REQUIRES_RECONCILIATION")
+        self.assertEqual(len(result["removed"]), 1)
+        reconciled = cache.reconcile(self.plan, self.journal)
+        self.assertEqual(list(reconciled["paths"].values()).count("ABSENT"), 1)
+        self.assertEqual(list(reconciled["paths"].values()).count("ORIGINAL_CONTENT"), bound["files"] - 1)
+        self.assertFalse(reconciled["replay_allowed"])
+        with self.assertRaisesRegex(RuntimeError, "reconciliation"):
+            self.apply(bound)
+
+    def test_plan_source_or_selected_content_drift_never_deletes(self):
+        bound = self.prepare(); self.first.write_bytes(b"changed cache generation")
+        self.assertEqual(self.apply(bound)["status"], "HELD_NO_EFFECT")
+        self.assertTrue(self.first.exists())
+
+    def test_unlink_then_failure_is_uncertain_not_a_no_effect_claim(self):
+        bound = self.prepare()
+        def lost_ack(fd, name, dirs):
+            cache.unlink_at(fd, name, dirs)
+            raise RuntimeError("Owned fixture loses acknowledgment after unlink")
+        result = self.apply(bound, unlink=lost_ack)
+        self.assertEqual(result["status"], "EFFECT_UNCERTAIN_REQUIRES_RECONCILIATION")
+        self.assertEqual(len(result["removed"]), 0)
+        self.assertFalse(self.first.exists())
+        observed = cache.reconcile(self.plan, self.journal)
+        self.assertEqual(list(observed["paths"].values()).count("ABSENT"), 1)
+
+    def test_source_change_after_plan_holds_before_any_unlink(self):
+        bound = self.prepare()
+        (self.repo / "src/lib.rs").write_text("pub fn changed_source() {}\n")
+        result = self.apply(bound)
+        self.assertEqual(result["status"], "HELD_NO_EFFECT")
+        self.assertTrue(self.first.exists())
+        self.assertTrue(any("settled committed source" in row["error"] for row in result["cause_chain"]))
+
+    def test_reconciliation_retains_and_reports_a_torn_last_journal_record(self):
+        bound = self.prepare(); self.apply(bound)
+        with self.journal.open("a") as journal:
+            journal.write('{"event":')
+        before = self.journal.read_bytes()
+        result = cache.reconcile(self.plan, self.journal)
+        self.assertTrue(result["incomplete_trailing_journal_record"])
+        self.assertFalse(result["replay_allowed"])
+        self.assertEqual(self.journal.read_bytes(), before)
+
+
+if __name__ == "__main__":
+    unittest.main()
