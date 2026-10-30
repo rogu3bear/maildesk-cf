@@ -1,6 +1,6 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { inheritedBuildStdio } from "../../scripts/inherited-build-stdio";
@@ -152,6 +152,22 @@ describe("closed Maildesk Worker bundles", () => {
       encoding: "utf8",
     });
     expect(check.status, check.stderr).toBe(0);
+
+    const reused = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--verify-inputs"], {
+      stdio: inheritedBuildStdio(), cwd: root, encoding: "utf8",
+    });
+    expect(reused.status, reused.stderr).toBe(0);
+
+    const added = resolve(root, "workers/shared/closure-resolution-probe.ts");
+    expect(existsSync(added)).toBe(false);
+    try {
+      writeFileSync(added, "export {};\n", { flag: "wx" });
+      const changedInventory = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--verify-inputs"], {
+        stdio: inheritedBuildStdio(), cwd: root, encoding: "utf8",
+      });
+      expect(changedInventory.status).toBe(1);
+      expect(changedInventory.stderr).toContain("bundle resolution inventory drifted");
+    } finally { unlinkSync(added); }
   });
 
   test("verification fails when an imported shared source drifts from the reviewed artifact", () => {
@@ -166,6 +182,11 @@ describe("closed Maildesk Worker bundles", () => {
     const original = readFileSync(sharedSource);
     try {
       writeFileSync(sharedSource, Buffer.concat([original, Buffer.from("\n// closure drift probe\n")]));
+      const reused = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--verify-inputs"], {
+        stdio: inheritedBuildStdio(), cwd: root, encoding: "utf8",
+      });
+      expect(reused.status).toBe(1);
+      expect(reused.stderr).toContain("bundle input workers/shared/policy-store.ts drifted");
       const drifted = spawnSync("bun", ["scripts/build-mail-worker-bundles.ts", "--check"], {
         stdio: inheritedBuildStdio(),
         cwd: root,

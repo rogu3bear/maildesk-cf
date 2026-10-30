@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXPECTED_CARGO_LEPTOS_VERSION="0.3.5"
+EXPECTED_CARGO_LEPTOS_VERSION="0.3.11"
 EXPECTED_WORKER_BUILD_VERSION="0.7.5"
 
 cd "$ROOT_DIR"
+bun "$ROOT_DIR/scripts/build-root.ts"
+export CARGO_TARGET_DIR="$ROOT_DIR/target"
 
 # Keep the repository's pinned UI tool independent of host-wide CLI upgrades.
 LEPTOS_TOOL_BIN="$ROOT_DIR/var/cargo-tools/cargo-leptos-$EXPECTED_CARGO_LEPTOS_VERSION/bin"

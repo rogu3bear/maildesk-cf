@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inheritedBuildStdio } from "./inherited-build-stdio";
+import { canonicalCargoEnvironment } from "./build-root";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -44,7 +45,7 @@ export async function buildRouterWasm(outDir = join(root, "generated", "router-w
       "--out-dir",
       resolvedOutDir,
     ],
-    { cwd: root, encoding: "utf8", stdio: inheritedBuildStdio() },
+    { cwd: root, env: canonicalCargoEnvironment(root), encoding: "utf8", stdio: inheritedBuildStdio() },
   );
 
   if (build.stdout) process.stdout.write(build.stdout);

@@ -9,6 +9,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+bun "$ROOT_DIR/scripts/build-root.ts"
+export CARGO_TARGET_DIR="$ROOT_DIR/target"
 
 step() { printf '\n==> %s\n' "$1"; }
 
@@ -44,6 +46,6 @@ step "bun run test:scripts"
 bun test ./tests/scripts
 
 step "scripts/check-template.sh"
-bash scripts/check-template.sh
+bash scripts/check-template.sh --reuse-worker-bundles
 
 printf '\nlocal CI OK\n'

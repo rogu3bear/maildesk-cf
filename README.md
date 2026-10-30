@@ -149,9 +149,31 @@ The Worker build requires `wasm-pack`, `cargo-leptos`, `worker-build`, the Rust
 locked `wasm-bindgen` ABI and install its matching CLI under ignored local
 tooling state so generated JavaScript and WASM stay compatible.
 
-UI builds pin `cargo-leptos` to `0.3.5` and `worker-build` to `0.7.5`.
+UI builds pin `cargo-leptos` to `0.3.11` and `worker-build` to `0.7.5`.
 The UI wrapper validates the selected version and prefers the ignored
-`var/cargo-tools/cargo-leptos-0.3.5/bin/cargo-leptos` executable when present.
+`var/cargo-tools/cargo-leptos-0.3.11/bin/cargo-leptos` executable when present.
+Cargo-leptos 0.3.5 hardcodes a separate frontend target; 0.3.11 supports the
+declared `front-target-dir = "CARGO_TARGET_DIR"`. All compilation uses the
+repository's `target/`, including the frontend, SSR Worker and Rust router.
+`wasm-pack --out-dir` selects final bindings under `generated/`, not a compiler
+cache. Dev/test profiles disable debug information and incremental sessions for
+workspace crates as well as dependencies, while retaining host dynamic-library
+structure. New custom profiles must inherit these settings unless a specific
+diagnostic contract requires otherwise.
+
+Combined CI reuses its completed Worker build only after verifying every
+recorded input, the Worker filename inventory, Rust source inventory, tool
+versions and final output hashes. Standalone `check:mail-worker-bundles` still
+rebuilds the complete closure. A changed or missing input refuses reuse.
+
+Compiler intermediates are disposable after the entire build/test/package
+operation settles. Final products under `build/`, `generated/` and `target/site`
+are separate from compiler cache. Retire cache through the host's qualified
+exact-snapshot cleanup boundary after checking live consumers and retained
+evidence. Do not run blanket target deletion or cleanup between router generation
+and bundling. On a host without a qualified retirement operation for the selected
+scope, retain it with an explicit hold; a successful build does not prove cache
+retirement.
 
 Current local checks:
 

@@ -46,11 +46,19 @@ interface ArtifactManifest {
   };
   inputs: ManifestEntry[];
   outputs: ManifestEntry[];
+  resolution_inventory_sha256: string;
 }
 
 const checkOnly = process.argv.slice(2).includes("--check");
-if (process.argv.slice(2).some((argument) => argument !== "--check")) {
-  throw new Error("usage: build-mail-worker-bundles.ts [--check]");
+const verifyInputs = process.argv.slice(2).includes("--verify-inputs");
+if (process.argv.slice(2).length > 1 || process.argv.slice(2).some((argument) => !["--check", "--verify-inputs"].includes(argument))) {
+  throw new Error("usage: build-mail-worker-bundles.ts [--check|--verify-inputs]");
+}
+
+if (verifyInputs) {
+  verifyCurrentArtifacts();
+  console.log("mail Worker inputs, resolution inventory and output hashes verified without recompilation");
+  return;
 }
 
 mkdirSync(generatedRoot, { recursive: true });
@@ -130,6 +138,7 @@ async function buildRole(
     tools,
     inputs,
     outputs,
+    resolution_inventory_sha256: resolutionInventory(),
   };
   writeFileSync(
     join(outputDirectory, "artifact-manifest.json"),
@@ -194,6 +203,45 @@ function closureInputs(metafile: Metafile, wasmDirectory: string, bindRouter: bo
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
+function resolutionInventory(): string {
+  // New files can change extension/index resolution without editing an old
+  // dependency. Bind the whole Worker filename inventory as well as the
+  // imported content hashes; the standalone --check still rebuilds everything.
+  return createHash("sha256").update(JSON.stringify(
+    regularFiles(join(root, "workers")).map(repositoryRelative).sort(),
+  )).digest("hex");
+}
+
+function verifyCurrentArtifacts(): void {
+  const tools = { esbuild: esbuildVersion, rustc: toolVersion("rustc", ["--version"]), wasm_pack: toolVersion("wasm-pack", ["--version"]) };
+  for (const role of roles) {
+    const directory = join(finalWorkersDirectory, role.role);
+    const manifest = JSON.parse(readFileSync(join(directory, "artifact-manifest.json"), "utf8")) as ArtifactManifest;
+    if (manifest.schema_version !== 1 || manifest.role !== role.role || manifest.entrypoint !== role.entrypoint ||
+        manifest.resolution_inventory_sha256 !== resolutionInventory() || JSON.stringify(manifest.tools) !== JSON.stringify(tools)) {
+      throw new Error(`${role.role} bundle resolution inventory drifted; rebuild the mail Workers`);
+    }
+    const expectedOutputs = role.router ? ["index.js", "maildesk_router_bg.wasm"] : ["index.js"];
+    if (JSON.stringify(manifest.outputs.map(entry => entry.path).sort()) !== JSON.stringify(expectedOutputs)) {
+      throw new Error(`${role.role} bundle outputs are incomplete`);
+    }
+    if (role.router && rustBuildInputs().some(path => !manifest.inputs.some(entry => entry.path === path))) {
+      throw new Error(`${role.role} Rust source inventory drifted`);
+    }
+    for (const entry of manifest.inputs) {
+      const path = resolve(root, entry.path);
+      if (repositoryRelative(path) !== entry.path || sha256File(path) !== entry.sha256) {
+        throw new Error(`${role.role} bundle input ${entry.path} drifted`);
+      }
+    }
+    for (const entry of manifest.outputs) {
+      if (sha256File(join(directory, entry.path)) !== entry.sha256) {
+        throw new Error(`${role.role} bundle output ${entry.path} drifted`);
+      }
+    }
+  }
+}
+
 function rustBuildInputs(): string[] {
   const fixed = [
     "Cargo.lock",
@@ -202,6 +250,8 @@ function rustBuildInputs(): string[] {
     "scripts/build-mail-worker-bundles.ts",
     "scripts/build-router-wasm.ts",
     "scripts/inherited-build-stdio.ts",
+    "scripts/build-root.ts",
+    ".cargo/config.toml",
   ];
   return [...fixed, ...regularFiles(join(root, "crates/maildesk-router/src"))]
     .map((path) => isAbsolute(path) ? repositoryRelative(path) : path)
