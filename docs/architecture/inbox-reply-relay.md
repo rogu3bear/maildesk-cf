@@ -59,6 +59,11 @@ may atomically become `sending`. A `sending`, accepted or uncertain recipient
 is never resent automatically. Cloudflare's non-idempotent send boundary cannot
 provide an exactly-once delivery guarantee.
 
+A persistence exception or unavailable/absent readback does not prove rollback.
+Retain the bounded staging payloads for reconciliation or lifecycle expiry.
+When readback identifies this invocation's committed spool generation, recover
+that generation; only a different durable winner permits losing-spool cleanup.
+
 Recovery verifies the exact per-recipient spool digest, recipient reference,
 delivery reference and relay token before claiming a pending send. That digest
 also binds the original Rust-selected public identity and its matching banner

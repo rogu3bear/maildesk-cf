@@ -328,19 +328,25 @@ export async function acceptInboxRelay(
     );
   } catch {
     structuredError("inbound_persistence_failed", { deliveryId });
-    const concurrent = await loadInboundDelivery(fingerprintSha256, env).catch(() => null);
-    if (concurrent) {
-      // A simultaneous provider delivery may have won the unique fingerprint
-      // claim after our initial read. Delete only this invocation's unique
-      // spool below; the winning claim points at a different immutable key.
-      await deleteOperatorDeliverySpools(operatorDeliverySpools.map((spool) => spool.key), env);
-      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
-      await recoverExistingInbound(concurrent, env);
+    let committed: InboundDeliveryRow | null;
+    try { committed = await loadInboundDelivery(fingerprintSha256, env); }
+    catch {
+      message.setReject("maildesk inbound persistence requires reconciliation");
       return;
     }
-    await deleteOperatorDeliverySpools(operatorDeliverySpools.map((spool) => spool.key), env);
-    await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
-    message.setReject("maildesk could not create a durable route for this message");
+    // An exception or absent readback cannot prove rollback. Keep the bounded
+    // staging spools until exact redelivery/reconciliation or lifecycle expiry.
+    if (!committed) {
+      message.setReject("maildesk inbound persistence requires reconciliation");
+      return;
+    }
+    // The batch may have committed before its acknowledgement or audit failed.
+    // Delete our generation only when a different durable generation won.
+    if (committed.raw_r2_key !== candidateSpoolKey) {
+      await deleteOperatorDeliverySpools(operatorDeliverySpools.map((spool) => spool.key), env);
+      await env.RELAY_SPOOL.delete(candidateSpoolKey).catch(() => undefined);
+    }
+    await recoverExistingInbound(committed, env);
     return;
   }
 
