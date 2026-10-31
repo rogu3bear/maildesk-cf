@@ -39,6 +39,8 @@ def settings(repo):
     value = retirement.read_plan(path)
     if value.get("schema") != "maildesk-local-cache-lifecycle/v1" or not value.get("authorization_ref", "").strip():
         raise RuntimeError("Local cache lifecycle needs its real operator instruction reference")
+    if not isinstance(value.get("pin_dispositions", []), list):
+        raise RuntimeError("Local pin dispositions must be an independently authorized JSON array")
     resource = repo / value["resource_request"]
     if resource.resolve() != resource or not resource.is_relative_to(repo / "var"):
         raise RuntimeError("Local resource request must remain in the repository's ignored var")
@@ -89,7 +91,8 @@ def workflow(repo, name, extra, *, execute=subprocess.run, outer=None):
     output = repo / "var/proof" / ("build-lifecycle-" + uuid.uuid4().hex)
     if outer is None:
         outer = runpy.run_path(str(repo / "scripts/build-and-retire.py"))["operation"]
-    return outer(repo, output, value["authorization_ref"], resource.read_text(), command, ())
+    return outer(repo, output, value["authorization_ref"], resource.read_text(), command, (),
+                 pin_dispositions=value.get("pin_dispositions", []))
 
 
 def main():

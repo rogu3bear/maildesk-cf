@@ -181,12 +181,18 @@ local lifecycle in ignored `var/build-cache-retirement.json`:
 {
   "schema": "maildesk-local-cache-lifecycle/v1",
   "authorization_ref": "existing-operator-instruction",
-  "resource_request": "var/native-resource-request.json"
+  "resource_request": "var/native-resource-request.json",
+  "pin_dispositions": []
 }
 ```
 
 The reference must identify real authorization to retire ordinary compiler cache.
 Use the existing complete resource request and its unchanged growth estimate.
+`pin_dispositions` contains only exact independently authorized dispositions for
+this target; an empty list preserves all pins. Never derive permission by copying
+the live policy's pins. A new pin or changed pin identity holds cleanup instead
+of inheriting an older approval. The actual policy and dispositions are rechecked
+inside the held installed exclusion for every fresh transaction.
 Configured standalone package commands own admission and automatically qualify
 retirement after success; no additional cleanup arguments are needed. Each run
 keeps a fresh record under `var/proof/build-lifecycle-*`. Without local activation,
@@ -201,6 +207,7 @@ python3 -B scripts/build-and-retire.py \
   --resource-request var/native-resource-request.json \
   --receipt-dir var/proof/fresh-ci-retirement \
   --authorization-ref existing-operator-instruction \
+  --pin-dispositions var/approved-pin-dispositions.json \
   -- bash scripts/ci.sh
 ```
 

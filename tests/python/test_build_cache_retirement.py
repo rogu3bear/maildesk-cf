@@ -70,7 +70,8 @@ class RetirementTests(unittest.TestCase):
         return artifact
 
     def prepare(self, keep=()):
-        return cache.prepare(self.repo, self.policy, self.plan, "Explicit fixture-only authorized retirement", keep)
+        return cache.prepare(self.repo, self.policy, self.plan, "Explicit fixture-only authorized retirement", keep,
+                             released_pins=[self.pin])
 
     def apply(self, bound, **kwargs):
         return cache.apply(self.plan, bound["sha256"], self.journal, self.receipt, **kwargs)
@@ -98,6 +99,32 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(result["status"], "HELD_NO_EFFECT")
         self.assertEqual(result["provider_details"]["reason"], "PRESERVATION_PINNED")
         self.assertTrue(self.first.exists())
+
+    def test_prepare_never_invents_a_pin_disposition_from_live_policy(self):
+        with self.assertRaises(Exception) as held:
+            cache.prepare(self.repo, self.policy, self.plan, "Fixture cache scope without pin release")
+        self.assertEqual(held.exception.details["reason"], "PRESERVATION_PINNED")
+        self.assertTrue(self.first.exists())
+        self.assertFalse(self.plan.exists())
+
+    def test_new_pin_retains_cache_instead_of_inheriting_an_older_release(self):
+        value = json.loads(self.policy.read_text())
+        value["retention_pins"].append({"path": str(self.target / "debug"), "owner": "fixture-operator", "reason": "New retained obligation"})
+        self.policy.write_text(json.dumps(value))
+        with self.assertRaises(Exception) as held:
+            self.prepare()
+        self.assertEqual(held.exception.details["reason"], "PRESERVATION_PINNED")
+        self.assertTrue(self.first.exists())
+        self.assertFalse(self.plan.exists())
+
+    def test_changed_pin_identity_refuses_a_stale_approved_disposition(self):
+        value = json.loads(self.policy.read_text()); value["retention_pins"][0]["reason"] = "Changed retention contract"
+        self.policy.write_text(json.dumps(value))
+        with self.assertRaises(Exception) as held:
+            self.prepare()
+        self.assertEqual(held.exception.details["reason"], "PRESERVATION_UNKNOWN")
+        self.assertTrue(self.first.exists())
+        self.assertFalse(self.plan.exists())
 
     def test_held_admission_and_cargo_lock_refuse(self):
         bound = self.prepare()
@@ -242,7 +269,7 @@ class RetirementTests(unittest.TestCase):
                                        "write_paths": [str(self.repo)]}))
         (self.repo / "var/build-cache-retirement.json").write_text(json.dumps({
             "schema": "maildesk-local-cache-lifecycle/v1", "authorization_ref": "Explicit disposable fixture only",
-            "resource_request": "var/request.json"}))
+            "resource_request": "var/request.json", "pin_dispositions": [self.pin]}))
 
     def test_default_workflow_waits_for_build_and_real_consumer_before_retirement(self):
         self.lifecycle_settings()
@@ -256,9 +283,9 @@ class RetirementTests(unittest.TestCase):
             with (output / "operation.log").open("x") as log:
                 code = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
             return code, {"status": "SETTLED", "fixture_only": True}
-        def outer(repo, output, authorization, resource, actual, keep):
+        def outer(repo, output, authorization, resource, actual, keep, **approved):
             self.assertEqual(actual, ["bash", "-c", 'bun scripts/build-mail-worker-bundles.ts && bun test ./tests/workers "$@"', "maildesk-worker-tests"])
-            return operation(repo, output, authorization, resource, actual, keep, policy=self.policy, supervise=admit)
+            return operation(repo, output, authorization, resource, actual, keep, policy=self.policy, supervise=admit, **approved)
         native_fds = cache.inherited_fds
         with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
             result = workflow["workflow"](self.repo, "test:workers", [], outer=outer)
@@ -272,8 +299,8 @@ class RetirementTests(unittest.TestCase):
             with (output / "operation.log").open("x") as log:
                 code = subprocess.run([sys.executable, "-c", "import sys; print('owned fixture failure'); sys.exit(7)"], cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
             return code, {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "fixture_only": True}
-        def outer(repo, output, authorization, resource, command, keep):
-            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, supervise=fail)
+        def outer(repo, output, authorization, resource, command, keep, **approved):
+            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, supervise=fail, **approved)
         native_fds = cache.inherited_fds
         with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
             result = workflow["workflow"](self.repo, "ci", [], outer=outer)

@@ -34,7 +34,7 @@ def profile_for(repo, command):
     return None
 
 
-def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run):
+def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run, pin_dispositions=()):
     """The production CLI fixes repo/policy; disposable fixtures inject their own."""
     if repo.resolve() != repo or output.resolve() != output or not output.is_relative_to(repo / "var/proof"):
         raise RuntimeError("Operation proof must remain in the canonical repository's ignored var/proof")
@@ -43,12 +43,13 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
     output.mkdir(mode=0o700, exist_ok=False)
     before = retirement.git_state(repo)
     profile = profile_for(repo, command)
+    approved_pins = json.loads(json.dumps(list(pin_dispositions)))
     environment = dict(os.environ)
     component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
     environment.update(MAILDESK_BUILD_LIFETIME_PROOF=str(output), MAILDESK_BUILD_COMPONENT=component)
     retirement.save(output / "operation.json", {"source": before, "command": command,
         "resource_request": json.loads(resource), "resource_request_sha256": hashlib.sha256(resource.encode()).hexdigest(),
-        "authorization": authorization, "consumer_profile": profile,
+        "authorization": authorization, "consumer_profile": profile, "approved_pin_dispositions": approved_pins,
         "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
         "environment_names": sorted(environment),
         "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
@@ -68,7 +69,8 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
     if retirement.git_state(repo) != before:
         raise RuntimeError("Outer operation changed source; preserve outputs for reconciliation")
     plan = output / "retirement-plan.json"
-    bound = retirement.prepare(repo, policy or Path.home() / ".config/disk-guard/policy.json", plan, authorization, keep)
+    bound = retirement.prepare(repo, policy or Path.home() / ".config/disk-guard/policy.json", plan, authorization, keep,
+                               released_pins=approved_pins)
     retired = retirement.apply(plan, bound["sha256"], output / "retirement-journal.jsonl", output / "retirement-receipt.json")
     print(json.dumps({"status": retired["status"], "retired_allocated_bytes": retired["removed_allocated_bytes"], "proof": str(output)}))
     return 0 if retired["status"] == "COMPLETE" else 1
@@ -115,6 +117,7 @@ def main():
     parser.add_argument("--receipt-dir", required=True, help="Fresh directory under ignored var/proof")
     parser.add_argument("--authorization-ref", required=True)
     parser.add_argument("--protect", action="append", default=[])
+    parser.add_argument("--pin-dispositions", help="Owned JSON array of independently authorized exact pin dispositions")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
@@ -126,7 +129,8 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise RuntimeError("An exact encompassing build/test/package command is required")
-    return operation(repo, output, args.authorization_ref, Path(args.resource_request).read_text(), command, args.protect)
+    return operation(repo, output, args.authorization_ref, Path(args.resource_request).read_text(), command, args.protect,
+                     pin_dispositions=retirement.read_plan(args.pin_dispositions) if args.pin_dispositions else [])
 
 
 if __name__ == "__main__":

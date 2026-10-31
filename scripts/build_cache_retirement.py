@@ -384,14 +384,15 @@ def exclusion(repo, root, policy, released, controls, policy_sha256=None):
         policy_sha256=policy_sha256 or sha(policy), released_pins=released, protected_paths=controls)
 
 
-def prepare(repo, policy, plan_path, authorization, keep=()):
+def prepare(repo, policy, plan_path, authorization, keep=(), *, released_pins=()):
     repo, policy, plan_path = Path(repo), Path(policy), Path(plan_path)
     root = bindings(repo, policy, keep)
     workspace = workspace_targets(repo, root)
     if not authorization.strip() or plan_path.resolve().is_relative_to(root):
         raise RuntimeError("Require separate authorization and a plan outside target")
-    pins = json.loads(policy.read_bytes())["retention_pins"]
-    released = [p for p in pins if root.is_relative_to(p["path"]) or Path(p["path"]).is_relative_to(root)]
+    # Policy is evidence of retention, never a source of release authority.
+    # Only independently authorized exact dispositions enter this transaction.
+    released = list(released_pins)
     with exclusion(repo, root, policy, released, [str(plan_path.parent), str(repo / ".git")]) as held:
         files, dirs = inventory(root)
         with cargo_locks(root, files):
@@ -574,13 +575,15 @@ def main():
     commands = parser.add_subparsers(dest="mode", required=True)
     p = commands.add_parser("prepare"); p.add_argument("--plan", required=True); p.add_argument("--authorization-ref", required=True)
     p.add_argument("--protect", action="append", default=[])
+    p.add_argument("--pin-dispositions", help="Owned JSON array of independently authorized exact pin dispositions")
     p = commands.add_parser("apply"); p.add_argument("--plan", required=True); p.add_argument("--plan-sha256", required=True); p.add_argument("--journal", required=True); p.add_argument("--receipt", required=True)
     p = commands.add_parser("reconcile"); p.add_argument("--plan", required=True); p.add_argument("--journal", required=True)
     args = parser.parse_args()
-    if "DISK_GUARD_RESERVATION" in os.environ and args.mode != "reconcile":
+    if any(key in os.environ for key in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY")) and args.mode != "reconcile":
         raise RuntimeError("Retirement must run after the outer admission and its descendants settle; preserve its token")
     if args.mode == "prepare":
-        value = prepare(Path(__file__).resolve().parents[1], Path.home() / ".config/disk-guard/policy.json", args.plan, args.authorization_ref, args.protect)
+        value = prepare(Path(__file__).resolve().parents[1], Path.home() / ".config/disk-guard/policy.json", args.plan, args.authorization_ref, args.protect,
+                        released_pins=read_plan(args.pin_dispositions) if args.pin_dispositions else [])
     elif args.mode == "apply":
         bound = read_plan(args.plan, args.plan_sha256)
         if bound["repo"] != str(Path(__file__).resolve().parents[1]) or bound["policy"] != str(Path.home() / ".config/disk-guard/policy.json"):
