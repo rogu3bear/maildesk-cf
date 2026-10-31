@@ -1,5 +1,7 @@
 """Native normal-exit controls; all processes/leases are disposable fixtures."""
 import fcntl
+import ctypes
+import errno
 import json
 import os
 from pathlib import Path
@@ -8,11 +10,57 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
+import types
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_cache_retirement as cache
 import build_settlement as settlement
+
+
+class NativeIdentityTests(unittest.TestCase):
+    def reader(self, size, error):
+        reader = settlement.Processes.__new__(settlement.Processes)
+        def query(*args):
+            ctypes.set_errno(error)
+            return size
+        reader.lib = types.SimpleNamespace(proc_pidinfo=query)
+        return reader
+
+    def test_empty_errorless_query_requires_independent_kernel_absence(self):
+        reader = self.reader(0, 0)
+        with mock.patch.object(settlement.os, "kill", side_effect=ProcessLookupError(errno.ESRCH, "ended")) as probe:
+            self.assertIsNone(reader.get(12345))
+        probe.assert_called_once_with(12345, 0)
+
+    def test_live_or_reused_pid_never_becomes_an_empty_population(self):
+        with mock.patch.object(settlement.os, "kill", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=0, PID exists"):
+                self.reader(0, 0).get(12345)
+
+    def test_denied_absence_probe_preserves_unknown(self):
+        with mock.patch.object(settlement.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
+            with self.assertRaisesRegex(RuntimeError, "probe errno=1"):
+                self.reader(0, 0).get(12345)
+
+    def test_native_denial_is_not_relabelled_as_exit(self):
+        with mock.patch.object(settlement.os, "kill") as probe:
+            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=1, not probed"):
+                self.reader(0, errno.EPERM).get(12345)
+        probe.assert_not_called()
+
+    def test_partial_native_record_remains_unknown(self):
+        with mock.patch.object(settlement.os, "kill") as probe:
+            with self.assertRaisesRegex(RuntimeError, "not probed"):
+                self.reader(ctypes.sizeof(settlement.BSDInfo) - 1, 0).get(12345)
+        probe.assert_not_called()
+
+    def test_explicit_native_absence_needs_no_fallback(self):
+        for error in (errno.ESRCH, errno.ENOENT):
+            with self.subTest(error=error), mock.patch.object(settlement.os, "kill") as probe:
+                self.assertIsNone(self.reader(0, error).get(12345))
+                probe.assert_not_called()
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")

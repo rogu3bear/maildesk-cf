@@ -41,9 +41,24 @@ class Processes:
         row = BSDInfo(); ctypes.set_errno(0)
         size = self.lib.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
         if size != ctypes.sizeof(row):
-            if ctypes.get_errno() in (errno.ESRCH, errno.ENOENT):
+            error = ctypes.get_errno()
+            if error in (errno.ESRCH, errno.ENOENT):
                 return None
-            raise RuntimeError("Unknown native process identity for PID " + str(pid))
+            # An enumerated process can exit before libproc supplies a record.
+            # An empty/errorless read alone proves nothing. Only independent
+            # kernel absence qualifies this case; denial, partial data, a live
+            # or reused PID, and any other probe failure remain unknown.
+            absence = "not probed"
+            if size == 0 and error == 0:
+                try:
+                    os.kill(pid, 0)
+                    absence = "PID exists"
+                except OSError as probe:
+                    if probe.errno == errno.ESRCH:
+                        return None
+                    absence = "probe errno=" + str(probe.errno)
+            raise RuntimeError("Unknown native process identity for PID " + str(pid) +
+                               " (bytes=" + str(size) + ", errno=" + str(error) + ", " + absence + ")")
         if row.pid != pid or row.uid != os.getuid() or not row.seconds:
             raise RuntimeError("Native process identity/owner drift")
         if row.status == 5:  # Kernel zombie: no executable writer remains.
