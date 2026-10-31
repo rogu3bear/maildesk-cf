@@ -100,13 +100,26 @@ class Tracker:
         self.processes, self.session = processes, root["session"]
         self.known = {root["pid"]: root}
         self.history = {(root["pid"], tuple(root["birth"])): root}
+        self.root_pid = root["pid"]
+        self.live = dict(self.known)
+        self.ended = set()
 
     def register(self, expected):
         actual = self.processes.get(expected["pid"])
         if actual is None or actual["birth"] != expected["birth"]:
             raise RuntimeError("Registered generation changed before launch acknowledgement")
+        self.validate_generation(actual)
         self.known[actual["pid"]] = actual
         self.history[(actual["pid"], tuple(actual["birth"]))] = actual
+        self.live[actual["pid"]] = actual
+
+    def validate_generation(self, row):
+        pid = row["pid"]
+        if pid in self.known and row["birth"] != self.known[pid]["birth"]:
+            previous = (pid, tuple(self.known[pid]["birth"]))
+            if pid == self.root_pid or previous not in self.ended:
+                raise RuntimeError("Known process generation drift for PID " + str(pid) +
+                                   " (expected=" + str(previous[1]) + ", observed=" + str(tuple(row["birth"])) + ")")
 
     def scan(self):
         table = self.processes.table()
@@ -119,11 +132,21 @@ class Tracker:
             live.update(children)
         for pid, row in live.items():
             key = (pid, tuple(row["birth"]))
-            if pid in self.known and row["birth"] != self.known[pid]["birth"]:
-                raise RuntimeError("Known process generation drift")
+            self.validate_generation(row)
             self.history[key] = row
         if len(self.history) > 16384:
             raise RuntimeError("Known producer population exceeds qualified bound")
+        ended = set(self.ended)
+        for pid, row in self.live.items():
+            if pid not in live:
+                current = self.processes.get(pid)
+                if current is not None and current["birth"] == row["birth"]:
+                    raise RuntimeError("Known live generation missing from native population for PID " + str(pid))
+                # Only an independent identity read establishes this generation
+                # ended. A later owned child may reuse its PID; preserve both
+                # immutable births in history. The operation root never rebinds.
+                ended.add((pid, tuple(row["birth"])))
+        self.ended, self.live = ended, live
         self.known.update(live)
         return list(live.values())
 

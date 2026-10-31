@@ -39,3 +39,10 @@ the entire link set; unknown products, build-script outputs and diagnostics stay
 Only build-script compiler executables with their exact fingerprint and available
 dep-info inputs qualify; generated `out/` contents do not follow them into retirement.
 The transaction's plan, journal, hashes and readback remain under ignored `var/`.
+
+Settlement binds processes by PID and birth identity. Partial native records,
+incomplete population coverage and unresolved generation changes retain the
+cache. A later owned child may reuse a PID only after an independent identity
+read established the earlier generation ended; both births remain in history.
+The operation root never rebinds. A refused operation's receipt is immutable;
+it cannot be replayed to authorize retirement.

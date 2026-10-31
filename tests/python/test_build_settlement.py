@@ -94,6 +94,67 @@ class NativeIdentityTests(unittest.TestCase):
                          {observer: identity})
 
 
+class GenerationTrackingTests(unittest.TestCase):
+    def setUp(self):
+        self.root = {"pid": 10, "birth": [1, 0], "ppid": 1, "session": 10, "pgid": 10}
+        self.child = {"pid": 11, "birth": [2, 0], "ppid": 10, "session": 10, "pgid": 10}
+        self.current = {10: self.root, 11: self.child}
+        self.native = types.SimpleNamespace(table=lambda: dict(self.current),
+                                            get=mock.Mock(side_effect=lambda pid: self.current.get(pid)))
+        self.tracker = settlement.Tracker(self.native, self.root)
+
+    def test_reused_child_pid_requires_prior_independent_generation_exit(self):
+        self.tracker.scan()
+        self.current.pop(11)
+        self.tracker.scan()
+        self.native.get.assert_called_once_with(11)
+        replacement = {**self.child, "birth": [3, 0]}
+        self.current[11] = replacement
+        self.assertEqual(self.tracker.scan(), [self.root, replacement])
+        self.assertEqual(len(self.tracker.history), 3)
+        self.assertEqual(self.tracker.history[(11, (2, 0))], self.child)
+
+    def test_changed_live_generation_still_refuses(self):
+        self.tracker.scan()
+        self.current[11] = {**self.child, "birth": [3, 0]}
+        with self.assertRaisesRegex(RuntimeError, "generation drift.*PID 11"):
+            self.tracker.scan()
+
+    def test_population_omission_does_not_establish_generation_exit(self):
+        self.tracker.scan()
+        self.current.pop(11)
+        self.native.get.side_effect = lambda pid: self.child if pid == 11 else self.current.get(pid)
+        with self.assertRaisesRegex(RuntimeError, "live generation missing"):
+            self.tracker.scan()
+        self.current[11] = {**self.child, "birth": [3, 0]}
+        with self.assertRaisesRegex(RuntimeError, "generation drift"):
+            self.tracker.scan()
+
+    def test_root_identity_never_rebinds_after_exit(self):
+        self.tracker.scan()
+        self.current.clear()
+        self.tracker.scan()
+        self.current[10] = {**self.root, "birth": [4, 0]}
+        with self.assertRaisesRegex(RuntimeError, "generation drift.*PID 10"):
+            self.tracker.scan()
+
+    def test_registration_cannot_rebind_a_live_generation(self):
+        self.tracker.scan()
+        self.current[11] = {**self.child, "birth": [3, 0]}
+        with self.assertRaisesRegex(RuntimeError, "generation drift.*PID 11"):
+            self.tracker.register(self.current[11])
+
+    def test_denied_exit_observation_never_qualifies_reuse(self):
+        self.tracker.scan()
+        self.current.pop(11)
+        self.native.get.side_effect = RuntimeError("native identity unknown")
+        with self.assertRaisesRegex(RuntimeError, "native identity unknown"):
+            self.tracker.scan()
+        self.current[11] = {**self.child, "birth": [3, 0]}
+        with self.assertRaisesRegex(RuntimeError, "generation drift"):
+            self.tracker.scan()
+
+
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")
 class SettlementTests(unittest.TestCase):
     def setUp(self):
