@@ -168,8 +168,31 @@ rebuilds the complete closure. A changed or missing input refuses reuse.
 
 Compiler intermediates are disposable after the entire build/test/package
 operation settles. Final products under `build/`, `generated/` and `target/site`
-are separate from compiler cache. The repository's optional outer workflow uses
-the verified installed Disk Guard preservation API for selective retirement:
+are separate from compiler cache. Ordinary `ci`, `build:ui`, `build:router-wasm`,
+`build:mail-workers`, `check:mail-worker-bundles`, `check:ui`, `test:workers`,
+`test:scripts`, `typecheck`, preflight aliases and `check:template` package commands
+enter `scripts/build-workflow.py`.
+Build-then-test and build-then-typecheck keep their consumers inside one operation.
+
+On a host with the qualified installed Disk Guard preservation API, enable this
+local lifecycle in ignored `var/build-cache-retirement.json`:
+
+```json
+{
+  "schema": "maildesk-local-cache-lifecycle/v1",
+  "authorization_ref": "existing-operator-instruction",
+  "resource_request": "var/native-resource-request.json"
+}
+```
+
+The reference must identify real authorization to retire ordinary compiler cache.
+Use the existing complete resource request and its unchanged growth estimate.
+Configured standalone package commands own admission and automatically qualify
+retirement after success; no additional cleanup arguments are needed. Each run
+keeps a fresh record under `var/proof/build-lifecycle-*`. Without local activation,
+template builds retain their original behavior and report that cleanup is not
+configured. The internal Bash/TypeScript scripts are components of these operations.
+Custom encompassing commands can use the explicit outer workflow:
 
 ```bash
 python3 -B scripts/build-and-retire.py \
@@ -203,6 +226,15 @@ latter. APFS allocated blocks are measurements; preservation compares exact
 content, identity, permissions, links and modification time independently.
 Standalone build commands leave retirement to their encompassing
 operation, never between router generation and bundling.
+
+Nested package commands forward the validated reservation and custody descriptors
+and defer cleanup to the real outer lifetime. A command under an external guard
+without a matching repository outer operation retains cache and returns status 78
+after a successful build: the installed guard currently has no post-EOF repository
+finalizer. That remaining integration belongs to Disk Guard's owner. Never clear
+an inherited token or release another operation's lifetime to force cleanup.
+Retirement requires a settled committed source candidate; dirty source and failed
+operations remain evidence holds.
 
 Current local checks:
 

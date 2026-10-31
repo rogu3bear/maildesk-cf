@@ -13,6 +13,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_cache_retirement as cache
+workflow = runpy.run_path(str(ROOT / "scripts/build-workflow.py"))
+operation = runpy.run_path(str(ROOT / "scripts/build-and-retire.py"))["operation"]
 
 
 class RetirementTests(unittest.TestCase):
@@ -28,6 +30,10 @@ class RetirementTests(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         self.repo = self.base / "repo"; self.repo.mkdir()
         self.target = self.repo / "target"; self.target.mkdir()
+        # CI's real root must not redirect a disposable foreign workspace.
+        # This changes only fixture Cargo configuration, never host capabilities.
+        cargo_env = mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(self.target)})
+        cargo_env.start(); self.addCleanup(cargo_env.stop)
         self.proof = self.repo / "var/proof/run"; self.proof.mkdir(parents=True)
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn fixture() {}\n")
@@ -223,6 +229,75 @@ class RetirementTests(unittest.TestCase):
             result = self.apply(bound, unlink=unlink)
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual((cache.metadata(product), cache.sha(product)), (identity, digest))
+
+    def lifecycle_settings(self):
+        request = self.repo / "var/request.json"
+        request.write_text(json.dumps({"working_directory": str(self.repo), "estimated_growth_gb": 12,
+                                       "write_paths": [str(self.repo)]}))
+        (self.repo / "var/build-cache-retirement.json").write_text(json.dumps({
+            "schema": "maildesk-local-cache-lifecycle/v1", "authorization_ref": "Explicit disposable fixture only",
+            "resource_request": "var/request.json"}))
+
+    def test_default_workflow_waits_for_build_and_real_consumer_before_retirement(self):
+        self.lifecycle_settings()
+        consumed = self.repo / "var/consumed.json"
+        command = [sys.executable, "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.exists(); pathlib.Path(sys.argv[2]).write_text(p.read_text())",
+                   str(self.first), str(consumed)]
+        # Simulate only admission for the isolated provider fixture. Native
+        # default-command qualification separately exercises real admission.
+        def admit(argv, **kwargs):
+            self.assertTrue(self.first.exists())
+            return subprocess.run(command, **kwargs)
+        def outer(repo, output, authorization, resource, actual, keep):
+            self.assertEqual(actual, ["bash", "-c", 'bun scripts/build-mail-worker-bundles.ts && bun test ./tests/workers "$@"', "maildesk-worker-tests"])
+            return operation(repo, output, authorization, resource, actual, keep, policy=self.policy, execute=admit)
+        native_fds = cache.inherited_fds
+        with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
+            result = workflow["workflow"](self.repo, "test:workers", [], outer=outer)
+        self.assertEqual(result, 0)
+        self.assertTrue(consumed.exists())
+        self.assertFalse(self.first.exists())
+
+    def test_default_workflow_failure_preserves_cache_and_exact_failure_log(self):
+        self.lifecycle_settings()
+        def fail(argv, **kwargs):
+            return subprocess.run([sys.executable, "-c", "import sys; print('owned fixture failure'); sys.exit(7)"], **kwargs)
+        def outer(repo, output, authorization, resource, command, keep):
+            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, execute=fail)
+        native_fds = cache.inherited_fds
+        with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
+            result = workflow["workflow"](self.repo, "ci", [], outer=outer)
+        self.assertEqual(result, 7)
+        self.assertTrue(self.first.exists())
+        proofs = list((self.repo / "var/proof").glob("build-lifecycle-*"))
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual((proofs[0] / "operation.log").read_text(), "owned fixture failure\n")
+        self.assertFalse((proofs[0] / "retirement-plan.json").exists())
+
+    def test_nested_and_external_active_lifetimes_never_retire_between_consumers(self):
+        self.lifecycle_settings()
+        cache.save(self.proof / "operation.json", {"resource_request": {"working_directory": str(self.repo)}})
+        def consumer(command, **kwargs):
+            self.assertTrue(self.first.exists())
+            self.assertEqual(kwargs["pass_fds"], (123,))
+            return subprocess.CompletedProcess(command, 0)
+        with mock.patch.object(cache, "inherited_fds", return_value=(123,)), mock.patch.object(cache, "capability_identity", return_value={"fixture_identity": True}):
+            cache.save(self.proof / "reservation-binding.json", {"fixture_identity": True})
+            with mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": str(self.proof)}):
+                self.assertEqual(workflow["workflow"](self.repo, "build:ui", [], execute=consumer), 0)
+            with mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
+                self.assertEqual(workflow["workflow"](self.repo, "build:ui", [], execute=consumer), 78)
+        self.assertTrue(self.first.exists())
+        self.assertFalse(self.plan.exists() or self.journal.exists())
+
+    def test_nested_lifetime_marker_cannot_borrow_an_unrelated_admission(self):
+        self.lifecycle_settings()
+        cache.save(self.proof / "operation.json", {"resource_request": {"working_directory": str(self.repo)}})
+        cache.save(self.proof / "reservation-binding.json", {"fixture_identity": "different"})
+        with mock.patch.object(cache, "inherited_fds", return_value=(123,)), mock.patch.object(cache, "capability_identity", return_value={"fixture_identity": "current"}), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": str(self.proof)}):
+            with self.assertRaisesRegex(RuntimeError, "different admission"):
+                workflow["workflow"](self.repo, "build:ui", [], execute=lambda *a, **k: self.fail("Unrelated consumer launched"))
+        self.assertTrue(self.first.exists())
 
     def test_partial_effect_requires_reconciliation_and_never_replays(self):
         self.unit("second", "2"); bound = self.prepare()

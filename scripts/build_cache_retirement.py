@@ -81,8 +81,14 @@ def run(args, cwd=None):
             if re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", key):
                 env.pop(key)
         env["GIT_OPTIONAL_LOCKS"] = "0"
+    pass_fds = inherited_fds(env) if args[0] == "cargo" else ()
+    result = subprocess.run(args, cwd=cwd, env=env, pass_fds=pass_fds, capture_output=True, check=True)
+    return result.stdout
+
+
+def inherited_fds(env):
     pass_fds = ()
-    if args[0] == "cargo" and any(k in env for k in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY")):
+    if any(k in env for k in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY")):
         candidates = []
         for key in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY"):
             if key not in env:
@@ -96,8 +102,12 @@ def run(args, cwd=None):
         if status.get("schema") != "disk-guard.inheritance-status.v1" or status.get("status") != "VALID" or sorted(status["pass_fds"]) != sorted(candidates):
             raise RuntimeError("Inherited host capability did not validate")
         pass_fds = tuple(status["pass_fds"])
-    result = subprocess.run(args, cwd=cwd, env=env, pass_fds=pass_fds, capture_output=True, check=True)
-    return result.stdout
+    return pass_fds
+
+
+def capability_identity(fds):
+    return {"reservation_id": json.loads(os.environ["DISK_GUARD_RESERVATION"])["id"],
+            "descriptors": [[os.fstat(fd).st_dev, os.fstat(fd).st_ino] for fd in fds]}
 
 
 def git_state(repo):
