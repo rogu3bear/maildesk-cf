@@ -113,6 +113,9 @@ def parse_records(stdout):
         elif kind in NON_FILESYSTEM_TYPES:
             if set(record) != {"f", "t", "n"} or not record["f"].isdecimal():
                 raise CoverageError("Contradictory non-filesystem record")
+            # Unpaired pipes and these Darwin kernel descriptors have no name.
+            if not name and kind not in {"PIPE", "NPOLICY", "NEXUS", "key"}:
+                raise CoverageError("Incomplete non-filesystem name")
         else:
             raise CoverageError("Unsupported file type")
         identity = (process["p"], tuple(sorted(record.items())))

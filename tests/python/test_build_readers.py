@@ -43,9 +43,19 @@ class ReaderCoverageTests(unittest.TestCase):
         self.assertEqual(self.observe()["status"], "QUALIFIED_NO_CONSUMERS")
 
     def test_supported_nonfilesystem_types_do_not_require_inode(self):
-        for kind in sorted(readers.NON_FILESYSTEM_TYPES):
+        names = {"unix": "->0x123", "IPv4": "*:443", "IPv6": "[::1]:443",
+                 "PIPE": "", "KQUEUE": "count=0, state=0x8", "NPOLICY": "",
+                 "NEXUS": "", "systm": "[ctl example id 2 unit 2]", "CHAN": "channel",
+                 "key": "", "netlink": "ROUTE", "a_inode": "[eventpoll]"}
+        self.assertEqual(set(names), readers.NON_FILESYSTEM_TYPES)
+        for kind, name in names.items():
             with self.subTest(kind=kind):
-                self.assertEqual(self.observe(HEADER + "f3\nt" + kind + "\nn\n")["files"], 1)
+                self.assertEqual(self.observe(HEADER + "f3\nt" + kind + "\nn" + name + "\n")["files"], 1)
+
+    def test_opaque_nonfilesystem_names_refuse(self):
+        for kind in readers.NON_FILESYSTEM_TYPES - {"PIPE", "NPOLICY", "NEXUS", "key"}:
+            with self.subTest(kind=kind), self.assertRaises(readers.CoverageError):
+                self.observe(HEADER + "f3\nt" + kind + "\nn\n")
 
     def test_unknown_missing_and_contradictory_fields_refuse(self):
         cases = [FILE.replace("tREG\n", ""), FILE.replace("D123\n", ""),
