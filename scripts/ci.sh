@@ -9,7 +9,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${MAILDESK_BUILD_COMPONENT:-}" != ci ]]; then
-  exec python3 -B "$ROOT_DIR/scripts/build-workflow.py" ci "$@"
+  # CI has no command arguments. Git's remote name/URL belong to pre-push,
+  # whose delegate may forward them here; they are not workflow options.
+  exec python3 -B "$ROOT_DIR/scripts/build-workflow.py" ci
 fi
 cd "$ROOT_DIR"
 bun "$ROOT_DIR/scripts/build-root.ts"

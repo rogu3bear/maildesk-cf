@@ -388,6 +388,11 @@ class RetirementTests(unittest.TestCase):
                                     pass_fds=host_fds)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["-B", str(scripts / "build-workflow.py"), name])
+            if name == "ci":
+                hook = subprocess.run(["/bin/bash", str(path), "origin", "https://example.com/maildesk.git"],
+                                      env=env, capture_output=True, text=True, pass_fds=host_fds)
+                self.assertEqual(hook.returncode, 0, hook.stderr)
+                self.assertEqual(hook.stdout.splitlines(), ["-B", str(scripts / "build-workflow.py"), "ci"])
 
     def test_partial_effect_requires_reconciliation_and_never_replays(self):
         self.unit("second", "2"); bound = self.prepare()
