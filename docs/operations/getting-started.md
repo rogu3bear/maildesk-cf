@@ -6,7 +6,7 @@ This guide is for a new project created from the `maildesk-cf` template.
 
 Install Bun, Rust/Cargo with `wasm32-unknown-unknown`, and `wasm-pack` before
 running local checks. Full UI/release proof additionally needs cargo-leptos
-0.3.5 and worker-build 0.7.5. The UI wrapper resolves the exact wasm-bindgen CLI
+0.3.11 and worker-build 0.7.5. The UI wrapper resolves the exact wasm-bindgen CLI
 version from Cargo.lock and installs it in the ignored repository-local
 `var/cargo-tools` directory if absent; this requires network/tool installation
 permission on a fresh machine. No sibling checkout or private strategy file is
@@ -93,6 +93,31 @@ bun run preflight:production -- --env-file .dev.vars
 See [preflight.md](preflight.md) for the full variable contract.
 
 ## 5. Roll Out Production Carefully
+
+For the already-built operator UI, use the local-only foreground launcher:
+
+```bash
+bun --no-env-file scripts/preview-ui.ts
+```
+
+Open the printed loopback `/desk` URL, normally `http://127.0.0.1:57591/desk`.
+The UI clearly says **Template preview** and shows empty local route state.
+This launches the retained Worker and hashed site assets without compilation,
+loads no private policy, uses an isolated local D1 and empty env file, excludes
+application/provider credentials, and disables outbound. It does not use the
+production Wrangler config's build command or mail bindings. Ctrl+C stops the
+owned process; its local state and receipt stay under ignored `var/proof/`.
+
+For a bounded startup/assets/stop check, use
+`bun --no-env-file scripts/preview-ui.ts --check --port 0`. On a guarded host, admit this runtime
+through the existing normal resource request before launch; never lower its
+estimate or clear an inherited capability. The launcher forwards the actual
+normal reservation descriptor. Build qualification is a separate operation if
+the required products are absent or fail verification.
+
+The launcher boundary tests select the exact current file with
+`bun --no-env-file test ./tests/scripts/local-ui-preview.test.ts`; keep the `./`
+prefix so Bun does not treat the path as a substring selector for other tests.
 
 Use [production-rollout.md](production-rollout.md) as the release runbook.
 Use [deliverability.md](deliverability.md) as the mail-authentication and probe

@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { inheritedBuildStdio } from "../../scripts/inherited-build-stdio";
+import { localUiPreviewConfig, previewEnvironment } from "../../scripts/local-ui-preview";
 
 test("the built routing-health UI starts at its configured compatibility date", async () => {
   const root = resolve(import.meta.dir, "../..");
@@ -13,26 +14,19 @@ test("the built routing-health UI starts at its configured compatibility date", 
   const configPath = join(scratch, "wrangler.json");
   const emptyEnv = join(scratch, "empty.env");
   writeFileSync(emptyEnv, "");
-  writeFileSync(configPath, JSON.stringify({
-    name: "maildesk-local-runtime-test", main: join(root, config.main),
-    compatibility_date: config.compatibility_date, workers_dev: false,
-    assets: { ...config.assets, directory: join(root, config.assets.directory) },
-    vars: { MAILDESK_UI_AUTH_MODE: "preview", MAILDESK_UI_ACCESS_SCOPE: "all_routes",
-      MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay", MAILDESK_OUTBOUND_MODE: "disabled" },
-    d1_databases: [{ binding: "DB", database_name: "maildesk-local-test",
-      database_id: "00000000-0000-0000-0000-000000000000" }],
-  }));
+  writeFileSync(configPath, JSON.stringify(localUiPreviewConfig(root, config)));
   const socket = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = socket.port;
   const inspector = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const inspectorPort = inspector.port;
   socket.stop(true);
   inspector.stop(true);
-  const child = spawn("bunx", ["--no-install", "wrangler", "dev", "--config", configPath,
+  const child = spawn(process.execPath, ["--no-env-file", "x", "--no-install", "wrangler", "dev", "--config", configPath,
     "--env-file", emptyEnv, "--local", "--ip", "127.0.0.1", "--port", String(port),
     "--inspector-port", String(inspectorPort), "--persist-to", join(scratch, "state")], {
     cwd: root, detached: true, stdio: inheritedBuildStdio(),
-    env: { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(scratch, "runtime.log") },
+    env: { ...previewEnvironment(process.env), CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false", CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",
+      WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(scratch, "runtime.log") },
   });
   let output = "";
   child.stdout?.on("data", (bytes) => { output = (output + bytes).slice(-32_768); });

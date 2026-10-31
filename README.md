@@ -286,9 +286,18 @@ Cloudflare account state.
 For a local edge-rendered preview of the public site and empty operator state:
 
 ```bash
-bunx wrangler dev --config wrangler.routing-health.toml --local --port 8788 \
-  --var MAILDESK_UI_AUTH_MODE:preview
+bun --no-env-file scripts/preview-ui.ts
 ```
+
+The launcher prints the loopback `/desk` URL (default port 57591), checks the
+retained UI artifacts, and uses isolated empty D1 state with outbound disabled.
+It excludes application/provider environment values and uses no production
+config build command. Ctrl+C stops its owned foreground process. A bounded
+check is `bun --no-env-file scripts/preview-ui.ts --check --port 0`; it verifies the exact
+owned listener and assets, stops, and retains a receipt under `var/proof/`.
+This needs Bun, the installed dependencies and `lsof`. On a guarded host, use
+the existing normally admitted runtime request unchanged. See
+[Getting Started](docs/operations/getting-started.md) for the local/release boundary.
 
 Preview mode is local-only. Production must keep `workers_dev = false`, retain
 `MAILDESK_UI_AUTH_MODE = "access"`, and provide
