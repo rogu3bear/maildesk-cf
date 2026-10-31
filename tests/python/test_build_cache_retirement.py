@@ -57,6 +57,19 @@ class RetirementTests(unittest.TestCase):
         self.plan = self.proof / "plan.json"
         self.journal = self.proof / "journal.jsonl"
         self.receipt = self.proof / "receipt.json"
+        # These disposable preservation fixtures own their parent and explicit
+        # reader children. Query those real actors, rather than making unlink
+        # assertions depend on unrelated host process churn. Parser controls
+        # exercise unknown coverage separately; production finalization keeps
+        # its full unscoped host query and may never use this fixture scope.
+        self.reader_pids = {os.getpid()}
+        native_run = subprocess.run
+        def fixture_run(args, *positional, **kwargs):
+            if args == ["lsof", "-nP", "-FpcftDin"]:
+                args = [*args, "-a", "-p", ",".join(str(p) for p in sorted(self.reader_pids))]
+            return native_run(args, *positional, **kwargs)
+        reader_scope = mock.patch.object(subprocess, "run", side_effect=fixture_run)
+        reader_scope.start(); self.addCleanup(reader_scope.stop)
 
     def unit(self, name, character):
         unit = character * 16
@@ -154,11 +167,15 @@ class RetirementTests(unittest.TestCase):
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), "ready")
+            self.reader_pids.add(child.pid)
             result = self.apply(bound)
             self.assertEqual(result["status"], "HELD_NO_EFFECT")
             self.assertTrue(self.first.exists())
+            errors = [result.get("error", ""), *[r["error"] for r in result.get("cause_chain", [])]]
+            self.assertTrue(any("Current target or hardlink consumer" in error for error in errors), result)
         finally:
             child.communicate("release\n", timeout=10)
+            self.reader_pids.discard(child.pid)
 
     def test_external_or_retained_hardlinks_and_symlinks_are_never_selected(self):
         os.link(self.first, self.base / "external.rmeta")
@@ -304,7 +321,9 @@ class RetirementTests(unittest.TestCase):
         native_fds = cache.inherited_fds
         with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
             result = workflow["workflow"](self.repo, "test:workers", [], outer=outer)
-        self.assertEqual(result, 0)
+        receipts = [json.loads(p.read_text()) for p in
+                    (self.repo / "var/proof").glob("build-lifecycle-*/retirement-receipt.json")]
+        self.assertEqual(result, 0, receipts)
         self.assertTrue(consumed.exists())
         self.assertFalse(self.first.exists())
 
