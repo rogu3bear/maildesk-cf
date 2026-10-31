@@ -79,12 +79,14 @@ for (const modern of [false, true]) {
   }, 15_000);
 
   test(`token expiry during a tool read withholds the streamed result (${era})`, async () => {
-    let now = Date.now();
+    // Keep the controlled server clock behind wall time so default token iat
+    // would fail deterministically instead of racing a real second boundary.
+    let now = Date.now() - 1000;
     const expires = (Math.floor(now / 1000) + 60) * 1000;
     const f = await fixture(0, () => now);
     try {
-      await refreshRouteStatuses(f.env as never);
-      const client = await f.connect(await token({ exp: expires / 1000 }), modern);
+      await refreshRouteStatuses(f.env as never, now);
+      const client = await f.connect(await token({ iat: Math.floor(now / 1000), exp: expires / 1000 }), modern);
       f.d1.before = sql => { if (sql === MCP_GENERATION_SQL) now = expires; };
       await expect(call(client, "get_delivery_status", { route_id: "route:example.com:support" })).rejects.toThrow("invalid_token");
     } finally { await f.close(); }
