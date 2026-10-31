@@ -212,6 +212,10 @@ def select_payload(root, files, keep, workspace=()):
             reasons["protected_or_nonregular"] += 1
             continue
         match = re.fullmatch(r"(?:lib)?([A-Za-z0-9_]+)-([a-f0-9]{16})(?:\.[A-Za-z0-9_.]+)?", path.name)
+        if match is None:
+            # rustc also emits per-CGU objects with both Cargo's unit hash and
+            # its own codegen hash. Keep the exact unit's dep-info/fingerprint.
+            match = re.fullmatch(r"([A-Za-z0-9_]+)-([a-f0-9]{16})\.\1\.[a-f0-9]{16}-cgu\.\d+\.rcgu\.o", path.name)
         required = {".rlib": "archive", ".a": "archive", ".rmeta": "rust_metadata", ".o": "object",
                     ".dylib": "shared_library", ".so": "shared_library", ".wasm": "wasm", "": "executable"}
         if path.suffix not in required or len(parts) < 2:

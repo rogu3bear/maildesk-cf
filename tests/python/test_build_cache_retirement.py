@@ -189,6 +189,21 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(self.apply(bound)["status"], "COMPLETE")
         self.assertTrue(all(not p.exists() for p in products))
 
+    def test_hashed_codegen_generation_uses_its_exact_cargo_unit_provenance(self):
+        obj = self.first.parent / "first-1111111111111111.first.4444444444444444-cgu.01.rcgu.o"
+        obj.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 8 + b"\x01\0\0\0" + b"\0" * 16)
+        bound = self.prepare()
+        self.assertEqual(bound["files"], 4)
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertFalse(obj.exists() or self.first.exists())
+
+    def test_hashed_codegen_without_exact_unit_provenance_is_retained(self):
+        obj = self.first.parent / "first-2222222222222222.first.4444444444444444-cgu.01.rcgu.o"
+        obj.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 8 + b"\x01\0\0\0" + b"\0" * 16)
+        bound = self.prepare()
+        self.assertEqual(self.apply(bound)["status"], "COMPLETE")
+        self.assertTrue(obj.exists())
+
     def test_workspace_unknown_namespace_format_and_missing_source_remain(self):
         library, peer, obj = self.workspace_library()
         unknown = obj.with_name("retirement_fixture.unowned.o")
