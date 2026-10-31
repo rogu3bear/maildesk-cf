@@ -10,28 +10,61 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import hashlib
+import runpy
+import time
 
 import build_cache_retirement as retirement
+import build_settlement as settlement
 
 
-def operation(repo, output, authorization, resource, command, keep, *, policy=None, execute=subprocess.run):
+def profile_for(repo, command):
+    factory = runpy.run_path(str(repo / "scripts/build-workflow.py"))["command_for"]
+    for name in ("ci", "build:ui", "build:router-wasm", "build:mail-workers", "check:mail-worker-bundles",
+                 "check:ui", "preflight", "test:scripts", "test:workers", "typecheck", "template"):
+        base = factory(name, [])
+        if command == base:
+            return name
+        extra = command[len(base):]
+        if command[:len(base)] == base and (name == "template" and extra == ["--reuse-worker-bundles"] or
+                name == "test:scripts" and len(extra) == 2 and extra[0] == "--test-name-pattern" or
+                name == "preflight" and extra in (["--mode", "template"], ["--mode", "production"],
+                    ["--mode", "production", "--control-plane", "emergency-api"])):
+            return name
+    return None
+
+
+def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run):
     """The production CLI fixes repo/policy; disposable fixtures inject their own."""
+    if repo.resolve() != repo or output.resolve() != output or not output.is_relative_to(repo / "var/proof"):
+        raise RuntimeError("Operation proof must remain in the canonical repository's ignored var/proof")
     if json.loads(resource)["working_directory"] != str(repo):
         raise RuntimeError("Resource request belongs to a different checkout")
-    output.mkdir(exist_ok=False)
+    output.mkdir(mode=0o700, exist_ok=False)
     before = retirement.git_state(repo)
+    profile = profile_for(repo, command)
+    environment = dict(os.environ)
+    component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
+    environment.update(MAILDESK_BUILD_LIFETIME_PROOF=str(output), MAILDESK_BUILD_COMPONENT=component)
     retirement.save(output / "operation.json", {"source": before, "command": command,
-        "resource_request": json.loads(resource), "authorization": authorization})
-    with (output / "operation.log").open("x") as log:
-        inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
-        component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
-        result = execute(["disk-guard", "run", "--resource-request", resource, "--", *inner],
-                         cwd=repo, stdout=log, stderr=subprocess.STDOUT,
-                         env={**os.environ, "MAILDESK_BUILD_LIFETIME_PROOF": str(output), "MAILDESK_BUILD_COMPONENT": component})
-    retirement.save(output / "operation-exit.json", {"exit": result.returncode})
-    if result.returncode:
-        print(json.dumps({"status": "OPERATION_FAILED_CACHE_RETAINED_FOR_DIAGNOSIS", "exit": result.returncode, "proof": str(output)}))
-        return result.returncode
+        "resource_request": json.loads(resource), "resource_request_sha256": hashlib.sha256(resource.encode()).hexdigest(),
+        "authorization": authorization, "consumer_profile": profile,
+        "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
+        "environment_names": sorted(environment),
+        "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
+            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_settlement.py")},
+        "retained_obligations": ["source and dirty bytes", "sessions", "locks", "products and releases", "failure diagnostics", "proof", "unknowns"]})
+    inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
+    code, settled = supervise(["disk-guard", "run", "--resource-request", resource, "--", *inner],
+        cwd=repo, env=environment,
+        output=output, read_record=retirement.read_plan)
+    retirement.save(output / "operation-exit.json", {"exit": code})
+    if code:
+        print(json.dumps({"status": "OPERATION_FAILED_CACHE_RETAINED_FOR_DIAGNOSIS", "exit": code, "proof": str(output)}))
+        return code
+    if settled["status"] != "SETTLED" or profile is None:
+        print(json.dumps({"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED" if profile else "CACHE_RETAINED_UNQUALIFIED_CONSUMER_CHAIN", "proof": str(output)}))
+        return 78
     if retirement.git_state(repo) != before:
         raise RuntimeError("Outer operation changed source; preserve outputs for reconciliation")
     plan = output / "retirement-plan.json"
@@ -50,10 +83,27 @@ def inner():
     operation = retirement.read_plan(output / "operation.json")
     if operation["command"] != command or operation["resource_request"]["working_directory"] != str(repo):
         raise RuntimeError("Inner command changed")
+    if retirement.git_state(repo) != operation["source"]:
+        raise RuntimeError("Source changed before launch acknowledgement")
     fds = retirement.inherited_fds(os.environ)
     if not fds:
         raise RuntimeError("Inner operation has no genuine inherited admission")
-    retirement.save(output / "reservation-binding.json", retirement.capability_identity(fds))
+    capability = retirement.capability_identity(fds)
+    record = os.pread(fds[0], 16385, 0)
+    if len(record) > 16384:
+        raise RuntimeError("Reservation record exceeds its qualified bound")
+    state = Path(json.loads((Path.home() / ".config/disk-guard/policy.json").read_bytes())["state_dir"])
+    binding = {"capability": capability, "inner_generation": settlement.Processes().get(os.getpid()),
+               "reservation_path": str(state / ("reservation-" + capability["reservation_id"] + ".json")),
+               "reservation_record_sha256": hashlib.sha256(record).hexdigest()}
+    settlement.atomic_save(output / "reservation-binding.json", binding)
+    deadline = time.monotonic() + 10
+    while not (output / "launch-acknowledgement.json").exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("Outer owner did not acknowledge the exact live generation and lease")
+        time.sleep(0.02)
+    if retirement.read_plan(output / "launch-acknowledgement.json")["binding_sha256"] != retirement.sha(output / "reservation-binding.json"):
+        raise RuntimeError("Launch acknowledgement belongs to another binding")
     for fd in fds:
         os.set_inheritable(fd, True)
     os.execvpe(command[0], command, os.environ)

@@ -206,8 +206,16 @@ python3 -B scripts/build-and-retire.py \
 
 Use the existing admitted resource request unchanged and a fresh proof directory.
 The authorization reference records a real instruction; it creates no permission.
-Run this outer workflow outside an inherited reservation. It waits for the
-admitted command, checks settled source, then qualifies exact Cargo dependency
+Run this outer workflow outside an inherited reservation. Before any new
+classification it records the admitted command's exit, drains both captured
+streams to EOF, independently observes all known producer generations using
+kernel birth identities, and observes natural unlock of the exact reservation
+inode bound before launch. A stream closing does not prove its producer stopped.
+Unknown queries, identity drift and settlement deadlines retain cache; the owner
+never kills a consumer, scrubs a token or abandons a writer to force completion.
+Only the source-bound ordinary producer chains qualify for automatic retirement;
+arbitrary commands retain cache even after an observed zero exit. The owner then
+checks settled source and qualifies exact Cargo dependency
 payloads and associated metadata using fingerprints and available regeneration
 inputs. Unhashed workspace libraries and codegen objects additionally require
 native Cargo target metadata. Build-script executables require their exact
@@ -232,8 +240,10 @@ operation, never between router generation and bundling.
 Nested package commands forward the validated reservation and custody descriptors
 and defer cleanup to the real outer lifetime. A command under an external guard
 without a matching repository outer operation retains cache and returns status 78
-after a successful build: the installed guard currently has no post-EOF repository
-finalizer. That remaining integration belongs to Disk Guard's owner. Never clear
+after a successful build. The actual external outer owner must adopt the same
+outside-guard lifecycle before launch; an already-active guard cannot be
+retrofitted from its nested child. The repository-owned route uses the existing
+installed preservation API and needs no provider callback or installation. Never clear
 an inherited token or release another operation's lifetime to force cleanup.
 Retirement requires a settled committed source candidate; dirty source and failed
 operations remain evidence holds.

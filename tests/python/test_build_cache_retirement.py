@@ -231,6 +231,12 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual((cache.metadata(product), cache.sha(product)), (identity, digest))
 
     def lifecycle_settings(self):
+        scripts = self.repo / "scripts"; scripts.mkdir(exist_ok=True)
+        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_settlement.py"]
+        for name in names:
+            (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+        cache.run(["git", "add", *["scripts/" + n for n in names]], self.repo)
+        cache.run(["git", "commit", "-m", "fixture lifecycle source"], self.repo)
         request = self.repo / "var/request.json"
         request.write_text(json.dumps({"working_directory": str(self.repo), "estimated_growth_gb": 12,
                                        "write_paths": [str(self.repo)]}))
@@ -245,12 +251,14 @@ class RetirementTests(unittest.TestCase):
                    str(self.first), str(consumed)]
         # Simulate only admission for the isolated provider fixture. Native
         # default-command qualification separately exercises real admission.
-        def admit(argv, **kwargs):
+        def admit(argv, *, cwd, env, output, read_record):
             self.assertTrue(self.first.exists())
-            return subprocess.run(command, **kwargs)
+            with (output / "operation.log").open("x") as log:
+                code = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+            return code, {"status": "SETTLED", "fixture_only": True}
         def outer(repo, output, authorization, resource, actual, keep):
             self.assertEqual(actual, ["bash", "-c", 'bun scripts/build-mail-worker-bundles.ts && bun test ./tests/workers "$@"', "maildesk-worker-tests"])
-            return operation(repo, output, authorization, resource, actual, keep, policy=self.policy, execute=admit)
+            return operation(repo, output, authorization, resource, actual, keep, policy=self.policy, supervise=admit)
         native_fds = cache.inherited_fds
         with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
             result = workflow["workflow"](self.repo, "test:workers", [], outer=outer)
@@ -260,10 +268,12 @@ class RetirementTests(unittest.TestCase):
 
     def test_default_workflow_failure_preserves_cache_and_exact_failure_log(self):
         self.lifecycle_settings()
-        def fail(argv, **kwargs):
-            return subprocess.run([sys.executable, "-c", "import sys; print('owned fixture failure'); sys.exit(7)"], **kwargs)
+        def fail(argv, *, cwd, env, output, read_record):
+            with (output / "operation.log").open("x") as log:
+                code = subprocess.run([sys.executable, "-c", "import sys; print('owned fixture failure'); sys.exit(7)"], cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+            return code, {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "fixture_only": True}
         def outer(repo, output, authorization, resource, command, keep):
-            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, execute=fail)
+            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, supervise=fail)
         native_fds = cache.inherited_fds
         with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
             result = workflow["workflow"](self.repo, "ci", [], outer=outer)
@@ -274,6 +284,28 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual((proofs[0] / "operation.log").read_text(), "owned fixture failure\n")
         self.assertFalse((proofs[0] / "retirement-plan.json").exists())
 
+    def test_zero_exit_with_unproved_settlement_never_classifies_or_retires(self):
+        self.lifecycle_settings()
+        def unproved(argv, *, output, **kwargs):
+            (output / "operation.log").write_text("owned successful command; live descendant remains\n")
+            return 0, {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "fixture_only": True}
+        result = operation(self.repo, self.repo / "var/proof/unproved", "Owned fixture only",
+            (self.repo / "var/request.json").read_text(), ["bash", "scripts/ci.sh"], (), policy=self.policy, supervise=unproved)
+        self.assertEqual(result, 78)
+        self.assertTrue(self.first.exists())
+        self.assertFalse((self.repo / "var/proof/unproved/retirement-plan.json").exists())
+
+    def test_arbitrary_command_has_no_exhaustive_consumer_qualification(self):
+        self.lifecycle_settings()
+        def observed(argv, *, output, **kwargs):
+            (output / "operation.log").write_text("owned arbitrary command fixture\n")
+            return 0, {"status": "SETTLED", "fixture_only": True}
+        result = operation(self.repo, self.repo / "var/proof/arbitrary", "Owned fixture only",
+            (self.repo / "var/request.json").read_text(), ["arbitrary-unknown-producer"], (), policy=self.policy, supervise=observed)
+        self.assertEqual(result, 78)
+        self.assertTrue(self.first.exists())
+        self.assertFalse((self.repo / "var/proof/arbitrary/retirement-plan.json").exists())
+
     def test_nested_and_external_active_lifetimes_never_retire_between_consumers(self):
         self.lifecycle_settings()
         cache.save(self.proof / "operation.json", {"resource_request": {"working_directory": str(self.repo)}})
@@ -282,7 +314,7 @@ class RetirementTests(unittest.TestCase):
             self.assertEqual(kwargs["pass_fds"], (123,))
             return subprocess.CompletedProcess(command, 0)
         with mock.patch.object(cache, "inherited_fds", return_value=(123,)), mock.patch.object(cache, "capability_identity", return_value={"fixture_identity": True}):
-            cache.save(self.proof / "reservation-binding.json", {"fixture_identity": True})
+            cache.save(self.proof / "reservation-binding.json", {"capability": {"fixture_identity": True}})
             with mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": str(self.proof)}):
                 self.assertEqual(workflow["workflow"](self.repo, "build:ui", [], execute=consumer), 0)
             with mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
@@ -293,7 +325,7 @@ class RetirementTests(unittest.TestCase):
     def test_nested_lifetime_marker_cannot_borrow_an_unrelated_admission(self):
         self.lifecycle_settings()
         cache.save(self.proof / "operation.json", {"resource_request": {"working_directory": str(self.repo)}})
-        cache.save(self.proof / "reservation-binding.json", {"fixture_identity": "different"})
+        cache.save(self.proof / "reservation-binding.json", {"capability": {"fixture_identity": "different"}})
         with mock.patch.object(cache, "inherited_fds", return_value=(123,)), mock.patch.object(cache, "capability_identity", return_value={"fixture_identity": "current"}), mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": str(self.proof)}):
             with self.assertRaisesRegex(RuntimeError, "different admission"):
                 workflow["workflow"](self.repo, "build:ui", [], execute=lambda *a, **k: self.fail("Unrelated consumer launched"))
@@ -307,10 +339,11 @@ class RetirementTests(unittest.TestCase):
         bun = commands / "bun"
         bun.write_text('#!/bin/bash\nexit 99\n'); bun.chmod(0o700)
         env = {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin", "MAILDESK_BUILD_COMPONENT": ""}
+        host_fds = cache.inherited_fds(os.environ)
         for leaf, name in (("ci.sh", "ci"), ("build-ui-edge.sh", "build:ui"), ("check-template.sh", "template")):
             path = scripts / leaf; path.write_bytes((ROOT / "scripts" / leaf).read_bytes())
             result = subprocess.run(["/bin/bash", str(path)], env=env, capture_output=True, text=True,
-                                    pass_fds=cache.inherited_fds(env))
+                                    pass_fds=host_fds)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["-B", str(scripts / "build-workflow.py"), name])
 

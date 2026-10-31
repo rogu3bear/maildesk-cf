@@ -55,7 +55,7 @@ def enclosing_operation(repo, proof, inherited):
     operation = retirement.read_plan(path / "operation.json")
     if operation["resource_request"]["working_directory"] != str(repo) or (path / "operation-exit.json").exists():
         raise RuntimeError("Enclosing operation is not a live matching lifetime")
-    if retirement.read_plan(path / "reservation-binding.json") != retirement.capability_identity(inherited):
+    if retirement.read_plan(path / "reservation-binding.json")["capability"] != retirement.capability_identity(inherited):
         raise RuntimeError("Enclosing operation belongs to a different admission")
     return path
 
