@@ -191,7 +191,9 @@ Configured standalone package commands own admission and automatically qualify
 retirement after success; no additional cleanup arguments are needed. Each run
 keeps a fresh record under `var/proof/build-lifecycle-*`. Without local activation,
 template builds retain their original behavior and report that cleanup is not
-configured. The internal Bash/TypeScript scripts are components of these operations.
+configured. Direct `bash scripts/ci.sh`, `bash scripts/build-ui-edge.sh` and
+`bash scripts/check-template.sh` calls also select this boundary. Their internal
+calls remain in the enclosing CI lifetime. TypeScript build functions are components.
 Custom encompassing commands can use the explicit outer workflow:
 
 ```bash

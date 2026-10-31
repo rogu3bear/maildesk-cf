@@ -24,9 +24,10 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         "resource_request": json.loads(resource), "authorization": authorization})
     with (output / "operation.log").open("x") as log:
         inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
+        component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
         result = execute(["disk-guard", "run", "--resource-request", resource, "--", *inner],
                          cwd=repo, stdout=log, stderr=subprocess.STDOUT,
-                         env={**os.environ, "MAILDESK_BUILD_LIFETIME_PROOF": str(output)})
+                         env={**os.environ, "MAILDESK_BUILD_LIFETIME_PROOF": str(output), "MAILDESK_BUILD_COMPONENT": component})
     retirement.save(output / "operation-exit.json", {"exit": result.returncode})
     if result.returncode:
         print(json.dumps({"status": "OPERATION_FAILED_CACHE_RETAINED_FOR_DIAGNOSIS", "exit": result.returncode, "proof": str(output)}))

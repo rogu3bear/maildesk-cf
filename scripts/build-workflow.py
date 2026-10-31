@@ -66,14 +66,14 @@ def workflow(repo, name, extra, *, execute=subprocess.run, outer=None):
     configured = settings(repo)
     if configured is None:
         # Preserve standalone template builds on hosts without this optional API.
-        result = execute(command, cwd=repo, pass_fds=inherited)
+        result = execute(command, cwd=repo, pass_fds=inherited, env={**os.environ, "MAILDESK_BUILD_COMPONENT": name})
         print(json.dumps({"status": "CACHE_LIFECYCLE_NOT_CONFIGURED", "operation_exit": result.returncode, "deletion_attempted": False}))
         return result.returncode
     if inherited:
         proof = os.environ.get("MAILDESK_BUILD_LIFETIME_PROOF")
         if proof:
             enclosing_operation(repo, proof, inherited)
-        result = execute(command, cwd=repo, pass_fds=inherited)
+        result = execute(command, cwd=repo, pass_fds=inherited, env={**os.environ, "MAILDESK_BUILD_COMPONENT": name})
         status = "NESTED_CONSUMER_SETTLED_OUTER_RETAINS_CACHE" if proof else "EXTERNAL_GUARD_FINALIZER_REQUIRED_CACHE_RETAINED"
         print(json.dumps({"status": status, "workflow": name, "operation_exit": result.returncode, "deletion_attempted": False}))
         return result.returncode if result.returncode or proof else 78

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${MAILDESK_BUILD_COMPONENT:-}" != ci && "${MAILDESK_BUILD_COMPONENT:-}" != template ]]; then
+  exec python3 -B "$ROOT_DIR/scripts/build-workflow.py" template "$@"
+fi
 bun "$ROOT_DIR/scripts/build-root.ts"
 export CARGO_TARGET_DIR="$ROOT_DIR/target"
 bundle_check=build

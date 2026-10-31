@@ -299,6 +299,21 @@ class RetirementTests(unittest.TestCase):
                 workflow["workflow"](self.repo, "build:ui", [], execute=lambda *a, **k: self.fail("Unrelated consumer launched"))
         self.assertTrue(self.first.exists())
 
+    def test_documented_bash_entrypoints_dispatch_before_any_compiler_work(self):
+        scripts = self.repo / "scripts"; scripts.mkdir()
+        commands = self.base / "commands"; commands.mkdir()
+        python = commands / "python3"
+        python.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n'); python.chmod(0o700)
+        bun = commands / "bun"
+        bun.write_text('#!/bin/bash\nexit 99\n'); bun.chmod(0o700)
+        env = {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin", "MAILDESK_BUILD_COMPONENT": ""}
+        for leaf, name in (("ci.sh", "ci"), ("build-ui-edge.sh", "build:ui"), ("check-template.sh", "template")):
+            path = scripts / leaf; path.write_bytes((ROOT / "scripts" / leaf).read_bytes())
+            result = subprocess.run(["/bin/bash", str(path)], env=env, capture_output=True, text=True,
+                                    pass_fds=cache.inherited_fds(env))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["-B", str(scripts / "build-workflow.py"), name])
+
     def test_partial_effect_requires_reconciliation_and_never_replays(self):
         self.unit("second", "2"); bound = self.prepare()
         calls = 0

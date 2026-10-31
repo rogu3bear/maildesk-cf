@@ -8,6 +8,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${MAILDESK_BUILD_COMPONENT:-}" != ci ]]; then
+  exec python3 -B "$ROOT_DIR/scripts/build-workflow.py" ci "$@"
+fi
 cd "$ROOT_DIR"
 bun "$ROOT_DIR/scripts/build-root.ts"
 export CARGO_TARGET_DIR="$ROOT_DIR/target"

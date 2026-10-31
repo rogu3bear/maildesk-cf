@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${MAILDESK_BUILD_COMPONENT:-}" != ci && "${MAILDESK_BUILD_COMPONENT:-}" != build:ui ]]; then
+  exec python3 -B "$ROOT_DIR/scripts/build-workflow.py" build:ui "$@"
+fi
 EXPECTED_CARGO_LEPTOS_VERSION="0.3.11"
 EXPECTED_WORKER_BUILD_VERSION="0.7.5"
 
