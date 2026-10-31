@@ -274,7 +274,7 @@ class RetirementTests(unittest.TestCase):
 
     def lifecycle_settings(self):
         scripts = self.repo / "scripts"; scripts.mkdir(exist_ok=True)
-        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_settlement.py"]
+        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py"]
         for name in names:
             (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         cache.run(["git", "add", *["scripts/" + n for n in names]], self.repo)

@@ -19,6 +19,8 @@ import subprocess
 import sys
 import types
 
+from build_readers import open_users
+
 LOADER_SHA256 = "8f7343ec66fb6a5d5b00e3120c5762bc91f5c28d4b3730a893ba40e57e26d77f"
 _PROVIDER = None
 MAX_ENTRIES = 100_000
@@ -304,35 +306,6 @@ def select_payload(root, files, keep, workspace=()):
             if row["type"] == stat.S_IFREG and row["nlink"] == 1 and not protected(name, keep):
                 selected[name] = {**row, "kind": "cargo_dependency_metadata", "sha256": sha(path)}
     return selected, controls, dict(reasons)
-
-
-def open_users(root, files):
-    result = subprocess.run(["lsof", "-nP", "-FpcfDin"], capture_output=True, text=True, timeout=45)
-    if result.returncode or result.stderr and ("smbfs file system /Volumes/.timemachine/" not in result.stderr or
-            any(x in result.stderr.lower() for x in ("permission denied", "operation not permitted"))):
-        raise RuntimeError("Current open-file coverage unavailable: " + result.stderr[:500])
-    identities = {(r["device"], r["inode"]) for r in files.values()}
-    pid = device = inode = name = None
-    found = []
-    def flush():
-        if pid != os.getpid() and ((device, inode) in identities or name and
-                (name == str(root) or name.startswith(str(root) + "/"))):
-            found.append({"pid": pid, "path": name})
-    for line in result.stdout.splitlines():
-        key, value = line[:1], line[1:]
-        if key == "p":
-            flush(); pid = int(value); device = inode = name = None
-        elif key == "f":
-            flush(); device = inode = name = None
-        elif key == "D":
-            device = int(value, 16)
-        elif key == "i":
-            inode = int(value)
-        elif key == "n":
-            name = value
-    flush()
-    if found:
-        raise RuntimeError("Current target or hardlink consumer: " + json.dumps(found[:5]))
 
 
 @contextlib.contextmanager

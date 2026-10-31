@@ -53,7 +53,7 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
         "environment_names": sorted(environment),
         "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
-            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_settlement.py")},
+            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py")},
         "retained_obligations": ["source and dirty bytes", "sessions", "locks", "products and releases", "failure diagnostics", "proof", "unknowns"]})
     inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
     code, settled = supervise(["disk-guard", "run", "--resource-request", resource, "--", *inner],
