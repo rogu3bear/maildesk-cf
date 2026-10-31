@@ -51,16 +51,47 @@ class NativeIdentityTests(unittest.TestCase):
         probe.assert_not_called()
 
     def test_partial_native_record_remains_unknown(self):
-        with mock.patch.object(settlement.os, "kill") as probe:
-            with self.assertRaisesRegex(RuntimeError, "not probed"):
-                self.reader(ctypes.sizeof(settlement.BSDInfo) - 1, 0).get(12345)
-        probe.assert_not_called()
+        for error in (0, errno.ESRCH, errno.ENOENT, errno.EPERM):
+            with self.subTest(error=error), mock.patch.object(settlement.os, "kill") as probe:
+                with self.assertRaisesRegex(RuntimeError, "not probed"):
+                    self.reader(ctypes.sizeof(settlement.BSDInfo) - 1, error).get(12345)
+                probe.assert_not_called()
 
     def test_explicit_native_absence_needs_no_fallback(self):
         for error in (errno.ESRCH, errno.ENOENT):
             with self.subTest(error=error), mock.patch.object(settlement.os, "kill") as probe:
                 self.assertIsNone(self.reader(0, error).get(12345))
                 probe.assert_not_called()
+
+    def population(self, pids, identities):
+        reader = settlement.Processes.__new__(settlement.Processes)
+        def query(_kind, _uid, buffer, _size):
+            target = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int))
+            for index, pid in enumerate(pids):
+                target[index] = pid
+            return len(pids) * ctypes.sizeof(ctypes.c_int)
+        reader.lib = types.SimpleNamespace(proc_listpids=query)
+        reader.get = mock.Mock(side_effect=lambda pid: identities.get(pid))
+        return reader
+
+    def test_population_requires_the_live_observer(self):
+        observer = os.getpid()
+        for pids, identities in (([0], {}), ([observer + 1], {observer + 1: {"pid": observer + 1}}),
+                                  ([observer], {})):
+            with self.subTest(pids=pids, identities=identities):
+                with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
+                    self.population(pids, identities).table()
+
+    def test_population_rejects_duplicate_process_ids(self):
+        observer = os.getpid()
+        with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
+            self.population([observer, observer], {observer: {"pid": observer}}).table()
+
+    def test_population_allows_exited_peers_and_zero_padding(self):
+        observer = os.getpid()
+        identity = {"pid": observer}
+        self.assertEqual(self.population([observer, 0, observer + 1], {observer: identity}).table(),
+                         {observer: identity})
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")

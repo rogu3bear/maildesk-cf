@@ -42,7 +42,7 @@ class Processes:
         size = self.lib.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
         if size != ctypes.sizeof(row):
             error = ctypes.get_errno()
-            if error in (errno.ESRCH, errno.ENOENT):
+            if size == 0 and error in (errno.ESRCH, errno.ENOENT):
                 return None
             # An enumerated process can exit before libproc supplies a record.
             # An empty/errorless read alone proves nothing. Only independent
@@ -75,8 +75,15 @@ class Processes:
         size = self.lib.proc_listpids(4, os.getuid(), ctypes.byref(pids), ctypes.sizeof(pids))
         if size <= 0 or size >= ctypes.sizeof(pids) or size % ctypes.sizeof(ctypes.c_int):
             raise RuntimeError("Native process population coverage unavailable")
-        return {pid: row for pid in pids[:size // ctypes.sizeof(ctypes.c_int)] if pid > 0
-                if (row := self.get(pid)) is not None}
+        population = [pid for pid in pids[:size // ctypes.sizeof(ctypes.c_int)] if pid > 0]
+        if len(population) != len(set(population)):
+            raise RuntimeError("Native process population coverage unavailable: duplicate PIDs")
+        table = {pid: row for pid in population if (row := self.get(pid)) is not None}
+        # This observer is necessarily live under the queried UID. Its absence
+        # makes an empty or partial native snapshot unknown, never settled.
+        if os.getpid() not in table:
+            raise RuntimeError("Native process population coverage unavailable: observer missing")
+        return table
 
 
 def atomic_save(path, value):
