@@ -80,6 +80,19 @@ class ReaderCoverageTests(unittest.TestCase):
         with self.assertRaises(readers.CoverageError):
             self.observe(code=1)
 
+    def test_darwin_threads_may_share_a_complete_working_directory(self):
+        directory = FILE.replace("f3", "ftwd").replace("tREG", "tDIR")
+        with mock.patch.object(readers.sys, "platform", "darwin"):
+            self.assertEqual(len(readers.parse_records(HEADER + directory * 4)), 4)
+            with self.assertRaises(readers.CoverageError):
+                readers.parse_records(HEADER + directory + directory.replace("i45\n", ""))
+            with self.assertRaises(readers.CoverageError):
+                readers.parse_records(HEADER + directory.replace("tDIR", "tREG"))
+            with mock.patch.object(readers.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, HEADER + directory.replace("/unrelated", str(self.root)) * 4, "")), mock.patch.object(
+                    readers, "darwin_mounts", return_value=[]), self.assertRaisesRegex(RuntimeError, "hardlink consumer"):
+                cache.open_users(self.root, {})
+
     def test_exact_distinct_nonoverlapping_smb_warning_qualifies(self):
         result = self.observe(stderr=WARNING)
         self.assertEqual(result["qualified_warnings"][0]["device"], 0x7fffff10)

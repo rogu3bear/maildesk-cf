@@ -110,6 +110,8 @@ def parse_records(stdout):
                     not re.fullmatch(r"[1-9][0-9]*", record["i"]) or int(record["D"], 16) == 0 or
                     not name.startswith("/")):
                 raise CoverageError("Incomplete filesystem identity")
+            if record["f"] in {"cwd", "rtd", "twd"} and kind != "DIR":
+                raise CoverageError("Contradictory working-directory type")
         elif kind in NON_FILESYSTEM_TYPES:
             if set(record) != {"f", "t", "n"} or not record["f"].isdecimal():
                 raise CoverageError("Contradictory non-filesystem record")
@@ -119,7 +121,11 @@ def parse_records(stdout):
         else:
             raise CoverageError("Unsupported file type")
         identity = (process["p"], tuple(sorted(record.items())))
-        if identity in seen_records:
+        # Darwin reports one twd per thread. Several threads can share exactly
+        # the same complete directory identity; retain every observation for
+        # target matching. This is not a duplicate numeric descriptor or field.
+        thread_directory = sys.platform == "darwin" and record["f"] == "twd" and kind == "DIR"
+        if identity in seen_records and not thread_directory:
             raise CoverageError("Duplicate file record")
         descriptor = (process["p"], record["f"])
         if record["f"].isdecimal() and descriptor in seen_descriptors:
