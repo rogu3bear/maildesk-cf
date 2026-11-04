@@ -294,6 +294,7 @@ describe("maildesk verifier", () => {
       mail_ready: false,
       canary_receipts_verified: false,
       operational_ready: false,
+      delivery_cleanup: "not_applicable",
       live_evidence_present: false,
     });
   });
@@ -726,7 +727,7 @@ describe("maildesk verifier", () => {
 
     expect(receipt.status.edge_ready).toBe(false);
     expect(receipt.status.mail_ready).toBe(false);
-    expect(receipt.gaps.filter((gap) => gap.readiness === "edge")).toHaveLength(0);
+    expect(receipt.gaps.filter((gap) => gap.readiness === "edge")).toEqual([expect.objectContaining({ field: "d1_queue", status: "not_checked" })]);
     expect(receipt.gaps).toContainEqual({
       domain: "example.com",
       field: "outbound_sender",
@@ -849,8 +850,8 @@ describe("maildesk verifier", () => {
     };
 
     expect(receipt.status.mail_ready).toBe(false);
-    expect(receipt.status).toMatchObject({ canary_receipts_verified: true, operational_ready: false });
-    expect(receipt.gaps.filter((gap) => gap.readiness === "mail")).toEqual([expect.objectContaining({field:"operational_state"})]);
+    expect(receipt.status).toMatchObject({ canary_receipts_verified: false, operational_ready: false });
+    expect(receipt.gaps.filter((gap) => gap.readiness === "mail")).toEqual(expect.arrayContaining([expect.objectContaining({field:"operational_state"})]));
     expect(receipt.rows[0]?.sender_domain).toMatchObject({
       provider: "disabled",
       provider_status: "disabled",
@@ -886,7 +887,10 @@ describe("maildesk verifier", () => {
       gaps: unknown[];
     };
     expect(inventoryReceipt.status.mail_ready).toBe(false);
-    expect(inventoryReceipt.gaps).toEqual([expect.objectContaining({field:"operational_state"})]);
+    expect(inventoryReceipt.gaps).toEqual([
+      expect.objectContaining({ field: "d1_queue", status: "not_checked" }),
+      expect.objectContaining({ field: "operational_state" }),
+    ]);
   });
 
   test("uses Resend sender-domain readback only for resend mode", () => {
@@ -1010,7 +1014,7 @@ describe("maildesk verifier", () => {
     };
 
     expect(receipt.status.mail_ready).toBe(false);
-    expect(receipt.status).toMatchObject({ canary_receipts_verified: true, operational_ready: false });
+    expect(receipt.status).toMatchObject({ canary_receipts_verified: false, operational_ready: false });
     expect(receipt.rows[0]).toMatchObject({
       outbound_sender: "ok",
       outbound_proof: "ok",
@@ -1202,3 +1206,18 @@ function canonicalTopology() {
     },
   };
 }
+
+test("verifier does not present a delivery-only destination as reply authority", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-verify-delivery-only-"));
+  const policyPath = join(dir, "policy.json"), desiredPath = join(dir, "desired.json");
+  writeJson(policyPath, { policy_version: 3, default_reply_mode: "personal_first", domains: { "example.com": {
+    role_aliases: { reports: { operators: ["reports@example.net"], reply_identity: "reports@example.com", delivery_only: true } }, personal_aliases: {},
+  } } });
+  writeJson(desiredPath, { ...canonicalTopology(), domains: [{ name: "example.com", role_aliases: ["reports"], personal_aliases: [],
+    catch_all: false, inbound_mx_provider: "cloudflare_email_routing" }], sender: { mode: "disabled", candidate_domains: [] } });
+  const result = spawnSync("bun", ["run", "scripts/verify-maildesk.ts", "--", "--policy", policyPath, "--desired-state", desiredPath, "--json"], { cwd: root, encoding: "utf8" });
+  expect(result.status).toBe(0);
+  const report = JSON.parse(result.stdout) as { status: { delivery_cleanup: string; mail_ready: boolean }; rows: Array<{ reply_identity_count: number; operator_count: number }> };
+  expect(report.rows[0]).toMatchObject({ reply_identity_count: 0, operator_count: 1 });
+  expect(report.status).toMatchObject({ delivery_cleanup: "held_exact_generation_cleanup_unqualified", mail_ready: false });
+});

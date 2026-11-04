@@ -630,3 +630,44 @@ test("intentional sinks require no provider delivery or operator inbox receipt",
   expect(route.planes.inbox_received.state).toBe("not_applicable");
   expect(route.planes.inbound_provider_accepted.state).toBe("not_applicable");
 });
+
+test("delivery-only evidence waives reply planes but still requires inbound and privacy proof", () => {
+  const value = input();
+  const original = structuredClone(evidenceFor(value, ROUTE_A).planes);
+  makeSink(value);
+  const route = value.route_inventory.routes.find((entry: any) => entry.route_sha256 === ROUTE_A);
+  route.route_kind = "role_alias";
+  route.delivery_contract = "delivery_only_v1";
+  const fields = { schema_version: 1, route_sha256: ROUTE_A, reason_code: "delivery_only_route",
+    owner_ref_sha256: sha("9"), expires_at: "2026-09-23T12:00:00.000Z" };
+  route.graduation_contract = { ...fields, contract_sha256: computeGraduationContractSha256(fields) };
+  const evidence = evidenceFor(value, ROUTE_A);
+  for (const plane of ["inbound_provider_accepted", "inbox_received", "privacy_proven"]) evidence.planes[plane] = original[plane];
+  for (const plane of ["reply_authorized", "outbound_provider_accepted", "recipient_delivered"]) {
+    evidence.planes[plane].evidence_sha256 = route.graduation_contract.contract_sha256;
+    evidence.planes[plane].graduation_contract_sha256 = route.graduation_contract.contract_sha256;
+  }
+  evidence.operational_status = operationalFixture(value.binding.policy_sha256, { deliveryOnly: true });
+  rebindRouteSet(value);
+  const compiled = compile(value).routes.find((entry) => entry.route_sha256 === ROUTE_A)!;
+  expect(compiled.status).toBe("ready");
+  expect(compiled.planes.reply_authorized.state).toBe("not_applicable");
+  expect(compiled.planes.inbound_provider_accepted.state).toBe("proven");
+  expect(compiled.planes.inbox_received.state).toBe("proven");
+  expect(compiled.planes.privacy_proven.state).toBe("proven");
+  const invalidKind = structuredClone(value);
+  invalidKind.route_inventory.routes.find((entry: any) => entry.route_sha256 === ROUTE_A).route_kind = "personal_alias";
+  expect(() => compile(invalidKind)).toThrow("delivery_only_v1 is restricted to role aliases");
+  const forged = structuredClone(value);
+  forged.route_inventory.routes.find((entry: any) => entry.route_sha256 === ROUTE_A).graduation_contract.reason_code = "changed_without_rehash";
+  rebindRouteSet(forged);
+  expect(compile(forged).routes.find((entry) => entry.route_sha256 === ROUTE_A)?.planes.reply_authorized.blocker_code).toBe("graduation_contract_digest_mismatch");
+  const schema = JSON.parse(readFileSync(resolve(root, "config/fleet-readiness.schema.json"), "utf8"));
+  expect(schema.$defs.delivery_only_route.properties.delivery_contract.const).toBe("delivery_only_v1");
+  expect(schema.$defs.route_inventory.properties.delivery_only_route).toBeUndefined();
+  delete evidence.planes.inbox_received;
+  expect(compile(value).routes.find((entry) => entry.route_sha256 === ROUTE_A)?.first_blocker?.plane).toBe("inbox_received");
+  evidence.planes.inbox_received = original.inbox_received;
+  evidence.planes.privacy_proven = { ...evidence.planes.reply_authorized };
+  expect(() => compile(value)).toThrow("privacy_proven cannot be not_applicable");
+});

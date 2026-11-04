@@ -16,6 +16,15 @@ const MAX_VISIBLE_AUDIT_EVENTS: i32 = 100;
 const MAX_REPLY_SUBJECT_BYTES: usize = 240;
 const MAX_REPLY_BODY_BYTES: usize = 24_000;
 
+// Early user-facing check only; the Worker repeats the full policy-bound
+// authorization atomically when it claims the provider boundary.
+const WEBDESK_REPLY_BINDING_SQL: &str = "SELECT 1 AS allowed FROM threads t JOIN alias_routes ar ON ar.id = t.route_id JOIN runtime_state rs ON rs.singleton = 1 AND rs.active_policy_sha256 = ar.policy_sha256 JOIN alias_route_reply_identities binding ON binding.route_id = ar.id AND binding.policy_sha256 = ar.policy_sha256 JOIN operators o ON o.id = binding.operator_id JOIN identities i ON i.id = binding.public_identity_id WHERE t.id = ?1 AND ar.enabled = 1 AND lower(o.email) = lower(?2) AND lower(i.address) = lower(?3) LIMIT 1";
+
+#[derive(Debug, Deserialize)]
+struct ReplyBindingRow {
+    allowed: i64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperatorDeliveryMode {
     WebDesk,
@@ -218,6 +227,21 @@ pub async fn queue_reply(
     let body = normalize_text(body, MAX_REPLY_BODY_BYTES, "Reply body")?;
     let db = state.db().map_err(db_binding_error)?;
     let thread = query_thread(&db, &operator, &thread_id).await?;
+    let thread_arg = D1Type::Text(&thread_id);
+    let operator_arg = D1Type::Text(&operator);
+    let identity_arg = D1Type::Text(&from_identity);
+    let binding = db
+        .prepare(WEBDESK_REPLY_BINDING_SQL)
+        .bind_refs([&thread_arg, &operator_arg, &identity_arg])
+        .map_err(|error| d1_error("Failed to bind current reply authorization.", error))?
+        .first::<ReplyBindingRow>(None)
+        .await
+        .map_err(|error| d1_error("Failed to check current reply authorization.", error))?;
+    if binding.is_none_or(|row| row.allowed != 1) {
+        return Err(AppError::client(
+            "The selected reply identity is not authorized by the current route.",
+        ));
+    }
 
     let decision = route_decision_for_thread(&thread, &operator)?;
     let authorization = authorize_reply(&decision, &operator, Some(&from_identity))
@@ -295,7 +319,7 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
                     last_reply_provider_message_id, last_reply_verified_at,
                     last_error_code, sp.projection_json,
                     CASE WHEN sp.route_id IS NULL OR sp.schema_version <> 1
-                           OR sp.projection_revision <> 'route-operational-v1'
+                           OR sp.projection_revision <> 'route-operational-v6'
                            OR sp.source_generation <> ar.status_generation
                            OR sp.policy_sha256 IS NOT ar.policy_sha256
                            OR sp.policy_sha256 IS NOT (SELECT active_policy_sha256 FROM runtime_state WHERE singleton = 1)
@@ -354,7 +378,7 @@ async fn query_route_health(db: &worker::D1Database) -> AppResult<Vec<RouteHealt
                     .and_then(|json| serde_json::from_str::<RouteOperationalStatus>(json).ok())
                     .filter(|status| {
                         status.schema_version == 1
-                            && status.projection_revision == "route-operational-v1"
+                            && status.projection_revision == "route-operational-v6"
                     }),
             })
         })
@@ -513,6 +537,8 @@ fn route_decision_for_thread(thread: &ThreadSummary, operator: &str) -> AppResul
         local_part: local_part.to_string(),
         route_kind,
         operators: vec![operator.to_string()],
+        // Legacy web-desk threads predate delivery-only claims.
+        delivery_only: false,
         default_reply_identity: thread.reply_identity.clone(),
         allowed_reply_identities: vec![thread.reply_identity.clone()],
         // Stored legacy web-desk rows do not carry policy-owned profiles or

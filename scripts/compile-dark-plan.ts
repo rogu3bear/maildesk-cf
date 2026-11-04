@@ -81,6 +81,12 @@ const plan = {
     reply_processing_mode: desired.operator_delivery.reply_processing_mode,
     required_dark_state: "disabled/disabled",
   },
+  router_recovery_trigger: {
+    cron: "*/10 * * * *",
+    worker_role: "relay_router",
+    execution_gate: "inbound_processing_mode_enabled",
+    status: "configured_in_candidate_not_deployed",
+  },
   access_requirement: {
     worker_role: desired.access.routing_health.worker_role,
     hostname_source: "access.routing_health.hostname",
@@ -216,8 +222,13 @@ function assertDarkWorkerConfigs(desired: DesiredState): void {
   const router = wranglerConfig(routerPath);
   assertExactTopLevelKeys(router, routerPath, [
     "name", "main", "compatibility_date", "workers_dev", "send_email", "build", "vars",
-    "d1_databases", "r2_buckets", "queues",
+    "d1_databases", "r2_buckets", "queues", "triggers",
   ]);
+  const routerTriggers = record(router.triggers, `${routerPath} [triggers]`);
+  if (Object.keys(routerTriggers).length !== 1 || !Array.isArray(routerTriggers.crons) ||
+      routerTriggers.crons.length !== 1 || routerTriggers.crons[0] !== "*/10 * * * *") {
+    throw new Error(`${routerPath} must contain exactly the delivery recovery cron`);
+  }
   requireWorkersDevOff(router, routerPath);
   requireExactEmailBinding(router, routerPath);
   assertConfigName(router, routerPath, desired.workers.relay_router.script_name);

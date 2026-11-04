@@ -565,6 +565,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env;
 
     const first = new MessageBatchRecorder([job]);
@@ -1367,6 +1368,7 @@ describe("mail API outbound sender modes", () => {
       MAIL_JOBS: {},
       MAILDESK_OUTBOUND_MODE: "disabled",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(batch.ackCount).toBe(1);
@@ -1408,6 +1410,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env,
     );
 
@@ -1460,6 +1463,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1509,6 +1513,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1553,6 +1558,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1603,6 +1609,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1646,6 +1653,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(0);
@@ -1691,6 +1699,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -1732,6 +1741,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(batch.retryCount).toBe(0);
@@ -1773,6 +1783,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(1);
@@ -1814,6 +1825,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(batch.retryCount).toBe(0);
@@ -1875,6 +1887,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(batch.retryCount).toBe(0);
@@ -1917,6 +1930,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(providerCalls).toBe(1);
@@ -2233,6 +2247,7 @@ describe("mail API outbound sender modes", () => {
       MAILDESK_OUTBOUND_MODE: "cloudflare_email_service",
       MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
       MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+      MAILDESK_POLICY_JSON: webDeskPolicyJson(),
     } as unknown as Env);
 
     expect(email.messages).toHaveLength(1);
@@ -2364,6 +2379,7 @@ describe("mail API outbound sender modes", () => {
         MAILDESK_OUTBOUND_MODE: "resend",
         MAILDESK_VERIFIED_SENDER_DOMAINS: "tenant.example.com",
         MAILDESK_OPERATOR_DELIVERY_MODE: "web_desk",
+        MAILDESK_POLICY_JSON: webDeskPolicyJson(),
       } as unknown as Env);
     } finally {
       globalThis.fetch = originalFetch;
@@ -2659,6 +2675,15 @@ function policyStore(policyJson: string): R2Bucket {
       ? { arrayBuffer: async () => new TextEncoder().encode(policyJson).buffer }
       : null,
   } as unknown as R2Bucket;
+}
+
+function webDeskPolicyJson(): string {
+  return JSON.stringify({ default_reply_mode: "role_first", domains: { "tenant.example.com": {
+    role_aliases: {
+      founders: { operators: ["operator@tenant.example.com"], reply_identity: "founders@tenant.example.com" },
+      security: { operators: ["operator@tenant.example.com"], reply_identity: "security@tenant.example.com" },
+    }, personal_aliases: {},
+  } } });
 }
 
 function inboxRelayPolicyJson(): string {

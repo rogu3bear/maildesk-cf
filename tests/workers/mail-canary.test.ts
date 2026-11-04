@@ -303,3 +303,95 @@ async function fixture() {
   } as unknown as CanaryEnv;
   return { db, env, sent };
 }
+
+test("delivery-only routes require inbox evidence but never count reply evidence", () => {
+  const snapshot = goodSnapshot();
+  const route = snapshot.routes[0]!;
+  route.delivery_only = true;
+  route.last_reply_verified_at = null;
+  route.reply_status = "recovery_required";
+  route.operational_status = projectRouteStatus({ policySha256: snapshot.policy_sha256, bindingCurrent: true,
+    enabled: true, routeKind: "role_alias", deliveryOnly: true, enrollment: "required", inboundProcessing: "enabled",
+    replyProcessing: "disabled", ordinaryProcessing: "disabled", activationId: null, quarantined: false,
+    inboundStatus: "provider_accepted", replyStatus: "recovery_required", inboxObservedAt: recent,
+    replyObservedAt: null, pendingDispatch: 0, pendingQueue: 0, unknownProviderAttempts: 0 }, now);
+  const report = reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "disabled" });
+  expect(report.status).toBe("receipts_current");
+  expect(report.inbox_proofs_fresh).toBe(1); expect(report.reply_proofs_fresh).toBe(0);
+  expect(report.reply_proofs_recorded).toBe(0);
+  expect(selectProbeRotation(snapshot.routes, now, 1)).toEqual([{ route_id: "route-example", reason: "oldest_proof" }]);
+  route.last_inbox_verified_at = null;
+  expect(reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "disabled" }).status).toBe("configuration_current");
+  expect(selectProbeRotation(snapshot.routes, now, 1)[0]?.reason).toBe("never_proven");
+});
+
+test("canary reads a v3 delivery-only policy and does not require reply receipts", async () => {
+  const { projectRoutes, projectionSql } = await import("../../scripts/sync-route-policy");
+  const f = await fixture();
+  try {
+    const policy = { policy_version: 3 as const, default_reply_mode: "personal_first" as const, domains: { "example.com": {
+      role_aliases: { postmaster: { operators: ["operator@example.com"], reply_identity: "postmaster@example.com", delivery_only: true } }, personal_aliases: {},
+    } } };
+    const json = JSON.stringify(policy);
+    const bytes = new TextEncoder().encode(json);
+    const sha = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (x) => x.toString(16).padStart(2, "0")).join("");
+    const desired = { storage: { d1_database: "fixture" }, domains: [{ name: "example.com", inbound_mx_provider: "cloudflare_email_routing" as const, role_aliases: ["postmaster"], personal_aliases: [] }] };
+    const routes = projectRoutes(policy, desired);
+    f.db.run("DELETE FROM alias_route_reply_identities");
+    f.db.run("DELETE FROM alias_route_operators");
+    f.db.run("DELETE FROM operators");
+    f.db.exec(projectionSql(routes, sha, `config/policy/${sha}.json`, "b".repeat(64)).sql);
+    f.env.POLICY_STORE = { get: async () => ({ arrayBuffer: async () => bytes.buffer }) } as unknown as R2Bucket;
+    f.env.MAILDESK_CANARY_REPLY_MODE = "disabled";
+    f.db.query("UPDATE route_health SET last_inbox_verified_at=?1, last_reply_verified_at=NULL WHERE route_id='route:example.com:postmaster'").run(recent);
+    const generation = (f.db.query("SELECT status_generation FROM alias_routes WHERE id='route:example.com:postmaster'").get() as { status_generation: number }).status_generation;
+    const status = projectRouteStatus({ policySha256: sha, sourceGeneration: generation, bindingCurrent: true, enabled: true,
+      routeKind: "role_alias", deliveryOnly: true, enrollment: "required", inboundProcessing: "enabled", replyProcessing: "disabled",
+      ordinaryProcessing: "disabled", activationId: null, quarantined: false, inboundStatus: "provider_accepted", replyStatus: null,
+      inboxObservedAt: recent, replyObservedAt: null, pendingDispatch: 0, pendingQueue: 0, unknownProviderAttempts: 0 }, now);
+    f.db.query("INSERT INTO route_status_projection(route_id,schema_version,projection_revision,source_generation,policy_sha256,observed_at,valid_until,projection_json) VALUES('route:example.com:postmaster',1,?1,?2,?3,?4,?5,?6)")
+      .run(status.projection_revision, generation, sha, status.observed_at, status.valid_until, JSON.stringify(status));
+    const { loadActivePolicy } = await import("../../workers/shared/policy-store");
+    const active = await loadActivePolicy({ ...f.env, MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay" });
+    const { POLICY_INVENTORY_SQL, assertPolicyInventory } = await import("../../workers/shared/policy-inventory");
+    const { projectPolicy } = await import("../../workers/shared/router");
+    const pp = projectPolicy(policy); if (!pp.ok) throw new Error(JSON.stringify(pp));
+    const inv = f.db.query(POLICY_INVENTORY_SQL).all();
+    expect(() => assertPolicyInventory(pp.value, inv as never, sha)).not.toThrow();
+    expect(active).not.toBeNull();
+    const { ROUTES_SQL } = await import("../../workers/mail-canary/src/index");
+    const rows = f.db.query(ROUTES_SQL).all(sha) as RouteInventoryRow[];
+    expect(() => assertPolicyRoutes(policy, rows)).not.toThrow();
+    const report = await runCanary(f.env, now);
+    expect(report?.status).toBe("receipts_current");
+    expect(report?.inbox_proofs_fresh).toBe(1); expect(report?.reply_proofs_recorded).toBe(0);
+    expect(report?.issues).toEqual({});
+    expect(f.db.query("SELECT verified_at_ms FROM route_proof_ledger WHERE plane='reply'").get()).toEqual({ verified_at_ms: null });
+    f.db.query("INSERT INTO delivery_only_deliveries(id,fingerprint_sha256,route_id,policy_sha256,raw_r2_key,recipient_count,received_at,status) VALUES ('held',?1,'route:example.com:postmaster',?2,'missing',1,?3,'recovery_required')").run("e".repeat(64), sha, recent);
+    f.db.query("INSERT INTO delivery_only_recipient_deliveries(delivery_id,recipient_ref,delivery_message_id,delivery_payload_r2_key,delivery_payload_sha256,error_code) VALUES ('held',?1,'id','missing',?2,'delivery_payload_missing_observed')").run("f".repeat(64), "d".repeat(64));
+    const { refreshRouteStatuses } = await import("../../workers/shared/status-store");
+    const refresh = await refreshRouteStatuses({ ...f.env, MAILDESK_OPERATOR_DELIVERY_MODE: "inbox_relay", MAILDESK_INBOUND_RELAY_MODE: "enabled", MAILDESK_REPLY_RELAY_MODE: "disabled" } as never, now + 500, { routeIds: ["route:example.com:postmaster"] });
+    expect(refresh.refreshed).toBe(1);
+    const heldReport = await runCanary(f.env, now + 1000);
+    expect(heldReport?.status).toBe("failed");
+    expect(heldReport?.issues.route_delivery_failed).toBe(1);
+    expect(heldReport?.issues.delivery_payload_missing_observed).toBe(1);
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]!.subject).toBe("Maildesk canary: failed");
+    expect(f.sent[1]!.text).toContain("route_delivery_failed: 1");
+    expect(f.sent[1]!.text).toContain("delivery_payload_missing_observed: 1");
+    expect(f.db.query("SELECT status FROM delivery_only_recipient_deliveries WHERE delivery_id='held'").get()).toEqual({ status: "pending" });
+  } finally { f.db.close(); }
+});
+
+test("a sink cannot hide unresolved historical delivery work", () => {
+  const snapshot = goodSnapshot();
+  snapshot.routes[0]!.decision_kind = "sink";
+  snapshot.routes[0]!.inbound_status = "intentionally_excluded";
+  snapshot.routes[0]!.reply_status = "intentionally_excluded";
+  snapshot.routes[0]!.unresolved_delivery_count = 1;
+  const report = reportRoutes(snapshot, now, 3_600_000, { inbound: "enabled", reply: "enabled" });
+  expect(report.status).toBe("failed");
+  expect(report.issues.route_delivery_failed).toBe(1);
+  expect(report.excluded_routes).toBe(0);
+});

@@ -8,6 +8,7 @@ pub(super) fn bind_operator_identities(
     mut decision: RouteDecision,
 ) -> Result<RouteDecision, RouteError> {
     if policy.default_reply_mode != ReplyMode::PersonalFirst
+        || decision.delivery_only
         || decision.route_kind == RouteKind::Sink
     {
         return Ok(decision);

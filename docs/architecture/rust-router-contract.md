@@ -85,6 +85,29 @@ identities must fail closed.
 
 Inbound routing and outbound identity are related, but separate.
 
+### Delivery-only route
+
+Policy version 3 defines an explicit `delivery_only` role-alias flag for a
+mailbox destination that receives mail without acquiring reply authority. The
+router projects the delivery recipients while returning no allowed reply
+identities, and reply authorization rejects every actor for that route. The
+flag is invalid in older policy versions or together with `sink`.
+
+The Worker stages an immutable raw message and per-recipient payloads, claims
+each recipient before a provider call, and retains uncertain outcomes for
+reconciliation without automatically resending. It records no reply relay for
+this path. Migration 0018 must precede a compatible Worker rollout; local
+checks alone do not establish provider execution or deployment readiness. A
+sink is not a substitute: it does not forward the message to the configured
+report recipient.
+
+Fleet readiness represents these role aliases as `delivery_only_v1`. A
+route-bound, unexpired graduation contract can mark only reply authorization,
+outbound provider acceptance and external reply delivery not applicable.
+Inbound provider acceptance, inbox receipt and privacy proof remain required;
+the contract is input to evidence evaluation, not permission to send or proof
+that a mailbox received a report.
+
 `role_first` retains the configured role identity, such as
 `founders@example.com`, as the default.
 

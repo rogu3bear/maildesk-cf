@@ -14,7 +14,7 @@ export interface RouteStatusRefreshScope {
 
 interface StatusRow {
   route_id: string; source_generation: number; enabled: number; policy_sha256: string;
-  desired_provider: string; inbound_status: string | null; reply_status: string | null;
+  desired_provider: string; inbound_status: string | null; delivery_only_status: string | null; delivery_only_unknown: number; delivery_only_pending: number; delivery_only_missing: number; inbound_pending: number; reply_status: string | null;
   last_inbox_verified_at: string | null; last_reply_verified_at: string | null;
   activation_id: string | null; identity_profile_sha256: string | null; operator_set_sha256: string | null;
   runtime_artifacts_sha256: string | null; topology_sha256: string | null;
@@ -32,6 +32,20 @@ export const ROUTE_STATUS_INPUT_SQL = `SELECT ar.id AS route_id, ar.status_gener
     ORDER BY (rd.status != 'pending') DESC, julianday(d.received_at) DESC LIMIT 1),
     (SELECT d.status FROM inbound_deliveries d WHERE d.route_id = ar.id AND d.policy_sha256 = ar.policy_sha256
     ORDER BY julianday(d.received_at) DESC LIMIT 1), rh.inbound_status) AS inbound_status,
+  COALESCE((SELECT CASE WHEN rd.status = 'pending' AND d.status = 'pending' AND d.policy_sha256 = ar.policy_sha256 THEN 'pending' ELSE 'recovery_required' END
+    FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status IN ('pending','sending','recovery_required')
+    ORDER BY (rd.status != 'pending' OR d.policy_sha256 != ar.policy_sha256 OR d.status IN ('recovery_required','partial_delivery')) DESC, julianday(d.received_at) DESC LIMIT 1),
+    (SELECT d.status FROM delivery_only_deliveries d WHERE d.route_id = ar.id AND d.policy_sha256 = ar.policy_sha256
+    ORDER BY julianday(d.received_at) DESC LIMIT 1)) AS delivery_only_status,
+  (SELECT count(*) FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status IN ('sending','recovery_required')) AS delivery_only_unknown,
+  (SELECT count(*) FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status = 'pending') AS delivery_only_pending,
+  (SELECT count(*) FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status = 'pending' AND rd.error_code = 'delivery_payload_missing_observed') AS delivery_only_missing,
+  (SELECT count(*) FROM inbound_recipient_deliveries rd JOIN inbound_deliveries d ON d.id = rd.delivery_id
+    WHERE d.route_id = ar.id AND rd.status = 'pending') AS inbound_pending,
   COALESCE((SELECT rad.status FROM reply_admissions_all rad WHERE rad.route_id = ar.id AND rad.policy_sha256 = ar.policy_sha256
     AND rad.status IN ('sending','provider_accepted','failed','recovery_required') ORDER BY julianday(rad.admitted_at) DESC LIMIT 1), rh.reply_status) AS reply_status,
   COALESCE((SELECT p.verified_at FROM route_proofs p WHERE p.route_id = ar.id AND p.policy_sha256 = ar.policy_sha256
@@ -101,15 +115,15 @@ export async function refreshRouteStatuses(
     const projection = projectRouteStatus({
       policySha256: active.sha256, sourceGeneration: row.source_generation,
       bindingCurrent: row.policy_sha256 === active.sha256, enabled: row.enabled === 1,
-      routeKind: route.routeKind, enrollment: row.desired_provider === "excluded" ? "excluded" : "required",
+      routeKind: route.routeKind, deliveryOnly: route.deliveryOnly === true, enrollment: row.desired_provider === "excluded" ? "excluded" : "required",
       inboundProcessing: config.inboundProcessingMode === "invalid" ? "unknown" : config.inboundProcessingMode,
       replyProcessing: config.replyProcessingMode === "invalid" ? "unknown" : config.replyProcessingMode,
       ordinaryProcessing: env.MAILDESK_ORDINARY_REPLY_MODE === "enabled" ? "enabled" : "disabled",
       activationId: coverage?.representativeId ?? null, quarantined: row.quarantined === 1,
-      inboundStatus: row.inbound_status, replyStatus: row.reply_status,
+      inboundStatus: route.deliveryOnly ? row.delivery_only_status : row.inbound_status, replyStatus: row.reply_status,
       inboxObservedAt: inboxAt, replyObservedAt: replyAt,
-      pendingDispatch: row.pending_dispatch, pendingQueue: row.pending_queue,
-      unknownProviderAttempts: row.unknown_provider_attempts,
+      pendingDispatch: row.pending_dispatch, pendingQueue: row.pending_queue, deliveryPending: row.delivery_only_pending + row.inbound_pending, missingPayloads: row.delivery_only_missing,
+      unknownProviderAttempts: row.delivery_only_unknown + row.unknown_provider_attempts,
     }, now);
     const expirations = [Date.parse(projection.valid_until),
       coverage?.expiresAt ?? NaN,

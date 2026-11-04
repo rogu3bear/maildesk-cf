@@ -6,7 +6,7 @@ import {
 } from "../../generated/router-wasm/maildesk_router.js";
 
 export interface RouterPolicy {
-  policy_version?: 1 | 2;
+  policy_version?: 1 | 2 | 3;
   default_reply_mode: "role_first" | "personal_first";
   accountables?: Record<string, { kind: "team" }>;
   destinations?: Record<string, DestinationPolicy>;
@@ -45,6 +45,7 @@ export interface RoleAliasPolicy {
   reply_identity: string;
   allowed_reply_identities?: string[];
   sink?: boolean;
+  delivery_only?: boolean;
 }
 
 export interface PersonalAliasPolicy {
@@ -71,6 +72,7 @@ export interface RouteDecision {
   localPart: string;
   routeKind: "role_alias" | "personal_alias" | "catch_all" | "sink";
   operators: string[];
+  deliveryOnly?: boolean;
   defaultReplyIdentity: string;
   allowedReplyIdentities: string[];
   identityProfile?: ResolvedIdentityProfile;
@@ -256,6 +258,12 @@ function mapRouteDecision(value: Record<string, unknown>): RouteDecision {
     defaultReplyIdentity: requireString(value, "default_reply_identity"),
     allowedReplyIdentities: requireStringArray(value, "allowed_reply_identities"),
   };
+  if (value.delivery_only !== undefined) {
+    if (value.delivery_only !== true || routeKind !== "role_alias") {
+      throw new Error("invalid Rust delivery-only route");
+    }
+    decision.deliveryOnly = true;
+  }
   if (value.identity_profile !== undefined) {
     decision.identityProfile = mapIdentityProfile(value.identity_profile);
   }

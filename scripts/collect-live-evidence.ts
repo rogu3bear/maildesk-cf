@@ -9,7 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSyn
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { senderModeOrDefault } from "./sender-mode";
-import { roleProofTarget, type RoleProofAlias } from "./mail-proof-target";
+import { roleInboundTarget, type RoleProofAlias } from "./mail-proof-target";
 import { collectGitCandidate } from "./git-candidate";
 import { CanonicalDesiredTopology, requireCanonicalDesiredTopology } from "./desired-topology";
 import {
@@ -57,6 +57,7 @@ interface Evidence {
   };
   sender_domains?: Record<string, string>;
   inbound_proofs?: Record<string, InboundProof>;
+  google_workspace_groups?: Record<string, GoogleWorkspaceGroupObservation>;
   outbound_proofs?: Record<string, OutboundProof>;
   cfctl_maildesk?: CfctlMaildeskEvidence;
   cfctl_readback?: CfctlReadbackEvidence;
@@ -205,6 +206,16 @@ interface InboundProof {
   audit_event_at?: string;
 }
 
+interface GoogleWorkspaceGroupObservation {
+  evidence_kind: "google_workspace_group_configuration";
+  envelope_to: string;
+  operator_count: number;
+  operator_set_sha256: string;
+  observed_at?: string;
+  external_receipt_path?: string;
+  external_receipt_sha256: string;
+}
+
 interface OutboundProof {
   status: "delivered";
   from_identity: string;
@@ -265,10 +276,8 @@ if (useResend) {
 }
 
 if (googleAdminBin) {
-  const externalInboundProofs = collectGoogleWorkspaceProofs(googleAdminBin);
-  if (Object.keys(externalInboundProofs).length > 0) {
-    evidence.inbound_proofs = { ...(evidence.inbound_proofs ?? {}), ...externalInboundProofs };
-  }
+  const groups = collectGoogleWorkspaceGroups(googleAdminBin);
+  if (Object.keys(groups).length > 0) evidence.google_workspace_groups = groups;
 }
 
 writeEvidenceAndExit(0);
@@ -1515,8 +1524,8 @@ function collectResendDomains(): Record<string, string> {
   }
 }
 
-function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof> {
-  const proofs: Record<string, InboundProof> = {};
+function collectGoogleWorkspaceGroups(bin: string): Record<string, GoogleWorkspaceGroupObservation> {
+  const proofs: Record<string, GoogleWorkspaceGroupObservation> = {};
   const policy = JSON.parse(readFileSync(policyPath, "utf8")) as {
     domains: Record<string, { role_aliases: Record<string, RoleProofAlias> }>;
   };
@@ -1524,9 +1533,8 @@ function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof>
   for (const domain of desiredState.domains.filter((entry) =>
     selected.has(entry.name) && entry.inbound_mx_provider === "google_workspace"
   )) {
-    const selection = roleProofTarget(domain.name, policy.domains[domain.name]?.role_aliases ?? {}, domain.role_aliases ?? []);
-    if (!selection) continue;
-    const target = selection.address;
+    const target = roleInboundTarget(domain.name, policy.domains[domain.name]?.role_aliases ?? {}, domain.role_aliases ?? []);
+    if (!target) continue;
     const result = spawnSync(bin, ["resource", "search", "--json", target], {
       cwd: root,
       encoding: "utf8",
@@ -1543,15 +1551,11 @@ function collectGoogleWorkspaceProofs(bin: string): Record<string, InboundProof>
       .sort();
     if (!group || members.length === 0) continue;
     proofs[domain.name] = {
-      status: "ok",
+      evidence_kind: "google_workspace_group_configuration",
       envelope_to: target,
-      route_kind: "role_alias",
       operator_count: members.length,
       operator_set_sha256: sha256(JSON.stringify(members)),
-      forward_errors: [],
-      default_reply_identity: selection.replyIdentity,
-      audit_event_at: parsed?.snapshot_captured_at,
-      provider: "google_workspace",
+      observed_at: parsed?.snapshot_captured_at,
       external_receipt_path: parsed?.receipt_path,
       external_receipt_sha256: sha256(result.stdout),
     };

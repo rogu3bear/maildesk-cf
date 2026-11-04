@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -738,4 +738,38 @@ describe("mail proof planner", () => {
     });
     expect(result.stderr).toContain("sender-domain PlanV2 operations are not ready");
   });
+});
+
+test("proof planner separates delivery-only inbound from Rust-selected reply identity", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maildesk-proof-delivery-only-"));
+  const policyPath = join(dir, "policy.json"), receiptPath = join(dir, "receipt.json");
+  const domain = "tenant.example.com";
+  const policy = { policy_version: 3, default_reply_mode: "personal_first", domains: { [domain]: {
+    role_aliases: { abuse: { operators: [`alice@${domain}`], reply_identity: `abuse@${domain}`, delivery_only: true },
+      support: { operators: [`alice@${domain}`], reply_identity: `support@${domain}` } },
+    personal_aliases: { alice: { operator: `alice@${domain}`, reply_identity: `alice@${domain}` } },
+  } } };
+  writeFileSync(policyPath, JSON.stringify(policy));
+  writeFileSync(receiptPath, JSON.stringify({ status: { delivery_cleanup: "not_applicable" }, rows: [{ domain, inbound_mx: "ok", inbound_mx_provider: "cloudflare_email_routing", inbound_proof: "ok", outbound_sender: "ok", outbound_proof: "not_checked" }],
+    gaps: [{ domain, field: "inbound_proof", status: "not_checked", readiness: "mail" }, { domain, field: "outbound_proof", status: "not_checked", readiness: "mail" }] }));
+  const run = () => spawnSync("bun", ["run", "scripts/plan-mail-proofs.ts", "--", "--receipt", receiptPath, "--policy", policyPath, "--json"], { cwd: root, encoding: "utf8" });
+  try {
+    let result = run(); expect(result.status).toBe(0);
+    let plan = JSON.parse(result.stdout) as { actions: Array<Record<string, string>> };
+    expect(plan.actions).toContainEqual(expect.objectContaining({ kind: "targeted_inbound_probe", target: `abuse@${domain}` }));
+    expect(plan.actions).toContainEqual(expect.objectContaining({ kind: "blocked", blocked_by: "delivery_cleanup_unqualified" }));
+    expect(plan.actions).toContainEqual(expect.objectContaining({ kind: "targeted_outbound_reply_probe", from_identity: `alice@${domain}` }));
+    policy.domains[domain].role_aliases.support.operators.push(`bob@${domain}`);
+    (policy.domains[domain].personal_aliases as Record<string, { operator: string; reply_identity: string }>).bob = { operator: `bob@${domain}`, reply_identity: `bob@${domain}` };
+    writeFileSync(policyPath, JSON.stringify(policy));
+    result = run(); expect(result.status).toBe(0);
+    plan = JSON.parse(result.stdout) as { actions: Array<Record<string, string>> };
+    expect(plan.actions.some((action) => action.kind === "targeted_outbound_reply_probe")).toBe(false);
+    expect(plan.actions).toContainEqual(expect.objectContaining({ kind: "blocked", blocked_by: "reply_identity_unavailable" }));
+    writeFileSync(policyPath, JSON.stringify({ policy_version: 3, default_reply_mode: "role_first", domains: { [domain]: { role_aliases: { abuse: policy.domains[domain].role_aliases.abuse }, personal_aliases: {} } } }));
+    result = run(); expect(result.status).toBe(0);
+    plan = JSON.parse(result.stdout) as { actions: Array<Record<string, string>> };
+    expect(plan.actions.some((action) => action.kind === "targeted_outbound_reply_probe")).toBe(false);
+    expect(plan.actions).toContainEqual(expect.objectContaining({ kind: "blocked", blocked_by: "reply_identity_unavailable" }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

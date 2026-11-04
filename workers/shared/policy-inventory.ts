@@ -21,6 +21,7 @@ export interface PolicyInventoryRow {
 
 /** Exact sorted Rust-projected operator, public identity and selection mode. */
 export function routeReplyIdentityBindings(route: RouteDecision): string[][] {
+  if (route.deliveryOnly) return [];
   if (route.operatorReplyIdentities && JSON.stringify(Object.keys(route.operatorReplyIdentities).sort()) !== JSON.stringify([...route.operators].sort())) {
     throw new Error("operator public identity membership differs from policy");
   }

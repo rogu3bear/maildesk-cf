@@ -30,6 +30,7 @@ export interface ProjectedRoute {
   operators: string[];
   replyIdentity: string;
   operatorReplyIdentities?: Record<string, string>;
+  deliveryOnly?: boolean;
   initialStatus: "local_policy_valid" | "declared" | "intentionally_excluded";
 }
 
@@ -67,6 +68,7 @@ export function projectRoutes(
       route.routeKind === "personal_alias" ? "personal" : "role",
       desiredDomain.inbound_mx_provider, route.operators, route.defaultReplyIdentity,
     );
+    if (route.deliveryOnly) projected.deliveryOnly = true;
     if (route.operatorReplyIdentities) {
       projected.operatorReplyIdentities = Object.fromEntries(Object.entries(route.operatorReplyIdentities)
         .map(([operator, binding]) => [operator, binding.publicAddress]));
@@ -148,7 +150,7 @@ export function projectionSql(
       fail("operator reply identity membership differs from Rust projection");
     }
     const routeId = stableId("route", route.domain, route.localPart);
-    for (const operator of route.operators) {
+    for (const operator of route.deliveryOnly ? [] : route.operators) {
       const identity = route.operatorReplyIdentities?.[operator] ?? route.replyIdentity;
       statements.push(`INSERT INTO alias_route_reply_identities (route_id, operator_id, public_identity_id, policy_sha256, reply_mode) VALUES (${sql(routeId)}, ${sql(stableId("operator", operator))}, ${sql(stableId("identity", identity))}, ${sql(policySha256)}, ${sql(route.operatorReplyIdentities ? "personal_first" : "role_first")});`);
     }

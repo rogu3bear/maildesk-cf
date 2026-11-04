@@ -27,6 +27,7 @@ export class LocalD1 {
   before?: (sql: string, values: SQLQueryBindings[]) => void;
   after?: (sql: string, values: SQLQueryBindings[]) => void;
   constructor(readonly db: Database) {}
+  withSession(_constraint?: string): LocalD1 { return this; }
   prepare(sql: string): D1PreparedStatement {
     let values: SQLQueryBindings[] = [];
     const run = () => {

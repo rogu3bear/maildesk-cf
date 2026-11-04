@@ -17,6 +17,35 @@ describe("relay deployment topology", () => {
     expect(result.stdout).toContain("relay topology ok");
   });
 
+  test("both planners reject missing, changed, or additional router schedules", () => {
+    const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
+    const base = readFileSync(resolve(root, original.workers.relay_router.config), "utf8");
+    const variants = [
+      base.replace('[triggers]\ncrons = ["*/10 * * * *"]\n', ""),
+      base.replace('crons = ["*/10 * * * *"]', 'crons = ["* * * * *"]'),
+      base.replace('crons = ["*/10 * * * *"]', 'crons = ["*/10 * * * *", "0 * * * *"]'),
+      base.replace('crons = ["*/10 * * * *"]', 'crons = ["*/10 * * * *"]\nextra = true'),
+    ];
+    for (const [index, config] of variants.entries()) {
+      const desired = structuredClone(original);
+      const configPath = `wrangler.mail-router.review-${process.pid}-cron-${index}.toml`;
+      const desiredPath = `config/desired-state.review-${process.pid}-cron-${index}.local.json`;
+      try {
+        writeFileSync(resolve(root, configPath), config);
+        desired.workers.relay_router.config = configPath;
+        writeFileSync(resolve(root, desiredPath), JSON.stringify(desired));
+        for (const args of [["run", "scripts/check-relay-topology.ts", desiredPath], ["run", "scripts/compile-dark-plan.ts", "--desired-state", desiredPath]]) {
+          const result = spawnSync("bun", args, { cwd: root, encoding: "utf8" });
+          expect(result.status).not.toBe(0);
+          expect(result.stdout).toBe("");
+        }
+      } finally {
+        rmSync(resolve(root, configPath), { force: true });
+        rmSync(resolve(root, desiredPath), { force: true });
+      }
+    }
+  });
+
   test("rejects role-swapped Worker entrypoints", () => {
     const original = JSON.parse(readFileSync(resolve(root, "config/desired-state.example.json"), "utf8")) as Record<string, any>;
     const cases: Array<[

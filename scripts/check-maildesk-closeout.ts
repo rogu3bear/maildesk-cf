@@ -8,6 +8,7 @@ interface ReceiptSummary {
   local_truth_ok?: boolean;
   live_evidence_present?: boolean;
   edge_ready?: boolean;
+  delivery_cleanup?: "held_exact_generation_cleanup_unqualified" | "not_applicable" | "not_checked";
   mail_ready?: boolean;
   domain_count?: number;
   gap_count?: number;
@@ -142,6 +143,7 @@ const closeout = {
     local_truth_ok: summary.local_truth_ok === true,
     live_evidence_present: summary.live_evidence_present === true,
     edge_ready: summary.edge_ready === true,
+    delivery_cleanup: summary.delivery_cleanup ?? "not_checked",
     mail_ready: summary.mail_ready === true,
     domain_count: summary.domain_count ?? 0,
     gap_count: summary.gap_count ?? 0,
@@ -219,6 +221,9 @@ function buildBlockers(
   }
   if (receipt.mail_ready !== true) {
     blockers.push({ kind: "mail_ready_false", count: receipt.mail_gap_count ?? receipt.gap_count ?? 0 });
+  }
+  if (receipt.delivery_cleanup !== "not_applicable") {
+    blockers.push({ kind: "delivery_cleanup_unqualified" });
   }
 
   const missingPlans = receipt.sender_domain_plan_missing_count ?? 0;

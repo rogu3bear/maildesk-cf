@@ -202,7 +202,7 @@ explicitly map its outcome to `provider_accepted`, never external receipt.
 `route_proofs`, `route_proof_ledger`, coverage records and admission/containment
 receipts retain their own historical evidence meaning. `route_health` is a
 mutable operational rollup. `route_status_projection` is a disposable body-free
-read model, revision `route-operational-v1`; it is neither proof nor authority.
+read model, revision `route-operational-v6`; it is neither proof nor authority.
 Source-generation changes invalidate it, and publication uses a generation
 check. Its validity stops at the earliest relevant future proof/authority expiry.
 
@@ -230,7 +230,7 @@ changes and advances the source generation to fence concurrent refreshes.
 Message paths refresh only the affected route: Rust's resolved inbound route or
 the reply/job's durable stored route. Empty or unresolved scopes do no refresh.
 `refreshRouteStatuses` validates the complete active policy/inventory before
-materializing at most 32 route projections per call. An explicit full sweep uses
+materializing at most 32 route projections per call. Scheduled delivery-only recovery also refreshes the affected route IDs best-effort after the sweep; its failure does not change provider outcomes. An explicit full sweep uses
 the returned `nextCursor` as `afterRouteId` until null; a point scope accepts at
 most 32 distinct IDs. Publication retains the policy/generation fence, and
 refresh failure never changes Queue acknowledgment, send claims or recovery.
@@ -259,3 +259,14 @@ ordinary provider capability is claimed installed. Qualify a governed operation
 pack and actual client signing fixtures before activation. Keep ordinary mode
 disabled before considering any downgrade, retain all terminal history, and do
 not downgrade to a binary that cannot interpret new authorization records.
+
+
+Delivery-only pending recovery is initiated by the router scheduled handler when inbound relay mode is enabled. A bounded scan advances a durable cursor before recovery; each pending recipient still requires its atomic active-policy claim. Cursor compare-and-set prevents concurrent sweeps from regressing progress, and an interrupted item is revisited after a wrap. Attempted or unknown outcomes remain held and are never replayed. Early delivery-only spool deletion is held because R2 Workers delete is unconditional and a metadata read cannot fence a replacement; accepted records retain their spool pointers until a qualified exact-generation cleanup mechanism exists. The separately configured lifecycle may still expire objects. The verifier and closeout explicitly hold mail readiness for delivery-only candidates until this cleanup contract is qualified. This does not provide an operator reconciliation mechanism for unknown outcomes or prove delivery; release remains gated on that mechanism and provider qualification.
+
+A delivery-only claim stores its own `X-Maildesk-Delivery-ID`; it is not the provider `messageId` returned by the Email Sending binding. If the response or its D1 projection is lost, that provider ID may be unavailable. Cloudflare documents its structured API `Message-ID` as platform-generated and permits custom `X-` headers; its sending events have a `messageId`, but the documented material does not establish that it equals the custom header or that a time/recipient match uniquely binds a claim. Never infer acceptance or authorize a resend from a missing or merely similar event. Qualify an exact, authenticated correlation and evidence source before implementing an outcome writer.
+
+The example spool lifecycle expires all `relay-spool/` objects after seven days, including delivery-only payloads, without inspecting D1 state. When a recipient payload is missing, recovery may rebuild it in memory from the retained raw spool and the exact active policy only if the unique recipient binding and complete serialized payload digest match the immutable claim. It never recreates the object or extends its retention; missing or unbound raw data, changed policy, ambiguous recipients, or a digest mismatch remain held. The route status and canary inputs surface a held or partially delivered parent as recovery required while preserving the distinction from an unknown provider attempt. A successful R2 lookup returning no recipient payload records a last-observed missing indicator against the exact pending claim; read failures and unbound objects do not. A later validated read clears the indicator before a claim. This indicates an observation, not its cause or deletion proof. Recovery qualification must address retention, timely detection and operator action under the selected lifecycle before release; do not infer that an unknown provider outcome is safe to replay or extend retention without a separate decision.
+
+Unresolved pending delivery recipients across policy revisions and route modes are classified `delivery_recovery_required`, with `inspect_delivery_recovery` as the next action when no provider attempt is unknown. This identifies a recovery hold without asserting a provider call occurred or that a payload is absent. If an attempt is unknown, provider reconciliation retains priority. Revision `route-operational-v6` fences consumers from the earlier action semantics.
+
+Web-desk ingress checks delivery-only fingerprints on the D1 primary before forwarding and rejects an existing or unavailable history. That check is not atomic with a concurrent delivery-only admission, and legacy web-desk messages have no corresponding fingerprint claim. Switching between these modes therefore still requires a separately qualified ingress drain and reconciliation of retained history; the check alone does not prove a safe concurrent cutover.

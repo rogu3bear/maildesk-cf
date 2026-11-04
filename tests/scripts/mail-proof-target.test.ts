@@ -12,3 +12,12 @@ test("founders preference never selects a sink; no role produces no target", () 
   expect(roleProofTarget("example.com", roles)?.address).toBe("support@example.com");
   expect(roleProofTarget("example.com", {})).toBeNull();
 });
+
+test("delivery-only roles may receive inbound proof but never supply reply proof identity", async () => {
+  const { roleInboundTarget } = await import("../../scripts/mail-proof-target");
+  const roles = { abuse: { reply_identity: "abuse@example.com", delivery_only: true }, support: { reply_identity: "support@example.com" } };
+  expect(roleInboundTarget("example.com", roles)).toBe("abuse@example.com");
+  expect(roleInboundTarget("example.com", roles, ["support"])).toBe("support@example.com");
+  expect(roleProofTarget("example.com", roles)).toEqual({ address: "support@example.com", replyIdentity: "support@example.com" });
+  expect(roleProofTarget("example.com", { abuse: roles.abuse })).toBeNull();
+});

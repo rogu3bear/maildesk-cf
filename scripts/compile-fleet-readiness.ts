@@ -24,7 +24,7 @@ type EnrollmentDecision =
   | "intentionally_excluded"
   | "pending_owner_decision";
 type RouteKind = "role_alias" | "personal_alias" | "catch_all" | "sink";
-type DeliveryContract = "bidirectional_reply" | "inbound_only_v1";
+type DeliveryContract = "bidirectional_reply" | "inbound_only_v1" | "delivery_only_v1";
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CODE = /^[a-z][a-z0-9_]{0,127}$/;
@@ -43,6 +43,11 @@ const SINK_NOT_APPLICABLE_PLANES = new Set<Plane>([
   "outbound_provider_accepted",
   "recipient_delivered",
   "privacy_proven",
+]);
+// Delivery-only routes still require inbound acceptance, inbox receipt, and
+// privacy evidence. Only the reply-specific planes can be explicitly waived.
+const DELIVERY_ONLY_NOT_APPLICABLE_PLANES = new Set<Plane>([
+  "reply_authorized", "outbound_provider_accepted", "recipient_delivered",
 ]);
 const KILL_BLOCKER_CODES = new Set(["private_identity_exposed", "wrong_public_identity"]);
 const SOURCE_BY_PLANE = {
@@ -553,9 +558,9 @@ function compilePlane(
         blocker_code: "graduation_contract_digest_mismatch",
       };
     }
-    const matchesContract = route.route_kind === "sink" &&
-      route.delivery_contract === "inbound_only_v1" &&
-      SINK_NOT_APPLICABLE_PLANES.has(plane) &&
+    const applicableWaiver = (route.route_kind === "sink" && route.delivery_contract === "inbound_only_v1" && SINK_NOT_APPLICABLE_PLANES.has(plane)) ||
+      (route.route_kind === "role_alias" && route.delivery_contract === "delivery_only_v1" && DELIVERY_ONLY_NOT_APPLICABLE_PLANES.has(plane));
+    const matchesContract = applicableWaiver &&
       route.graduation_contract !== undefined &&
       receipt.graduation_contract_sha256 === route.graduation_contract.contract_sha256 &&
       receipt.evidence_sha256 === route.graduation_contract.contract_sha256;
@@ -960,17 +965,20 @@ function validateRoute(value: unknown, index: number): RouteDefinition {
   const route = record(value, `routes[${index}]`);
   const delivery = route.delivery_contract;
   const keys = ["route_sha256", "domain_sha256", "route_kind", "delivery_contract"];
-  if (delivery === "inbound_only_v1") keys.push("graduation_contract");
+  if (delivery === "inbound_only_v1" || delivery === "delivery_only_v1") keys.push("graduation_contract");
   exactKeys(route, keys, `routes[${index}]`);
   requireDigest(route.route_sha256, `routes[${index}].route_sha256`);
   requireDigest(route.domain_sha256, `routes[${index}].domain_sha256`);
   if (!["role_alias", "personal_alias", "catch_all", "sink"].includes(route.route_kind as string)) throw new Error(`routes[${index}].route_kind is invalid`);
-  if (delivery !== "bidirectional_reply" && delivery !== "inbound_only_v1") throw new Error(`routes[${index}].delivery_contract is invalid`);
+  if (delivery !== "bidirectional_reply" && delivery !== "inbound_only_v1" && delivery !== "delivery_only_v1") throw new Error(`routes[${index}].delivery_contract is invalid`);
   if (route.route_kind === "sink" && delivery !== "inbound_only_v1") throw new Error("sink routes require inbound_only_v1");
   if (delivery === "inbound_only_v1" && route.route_kind !== "sink") {
     throw new Error("inbound_only_v1 is restricted to sink routes");
   }
-  const graduation = delivery === "inbound_only_v1" ? validateGraduation(route.graduation_contract, index) : undefined;
+  if (delivery === "delivery_only_v1" && route.route_kind !== "role_alias") {
+    throw new Error("delivery_only_v1 is restricted to role aliases");
+  }
+  const graduation = delivery === "inbound_only_v1" || delivery === "delivery_only_v1" ? validateGraduation(route.graduation_contract, index) : undefined;
   return {
     route_sha256: route.route_sha256 as string,
     domain_sha256: route.domain_sha256 as string,
@@ -1033,7 +1041,9 @@ function validatePlaneReceipt(value: unknown, plane: Plane, route: RouteDefiniti
       "state", "source", "route_sha256", "domain_sha256", "golden_thread_sha256",
       "evidence_sha256", "graduation_contract_sha256",
     ], `${plane} receipt`);
-    if (receipt.source !== "graduation_contract" || route.delivery_contract !== "inbound_only_v1" || !SINK_NOT_APPLICABLE_PLANES.has(plane)) {
+    const permitted = (route.delivery_contract === "inbound_only_v1" && SINK_NOT_APPLICABLE_PLANES.has(plane)) ||
+      (route.delivery_contract === "delivery_only_v1" && DELIVERY_ONLY_NOT_APPLICABLE_PLANES.has(plane));
+    if (receipt.source !== "graduation_contract" || !permitted) {
       throw new Error(`${plane} cannot be not_applicable for this route contract`);
     }
     requireDigest(receipt.route_sha256, `${plane} route_sha256`);

@@ -24,6 +24,8 @@ import { handoffSelectedWork,selectDestination,type SelectedDestination as Selec
 import { cloudflareEmailErrorCode,deleteOperatorDeliverySpools,operatorDeliverySpoolKey,persistOperatorDeliverySpools,recoverExistingInbound } from "./inbound-recovery";
 import { Env,InboundDeliveryRow,OperatorDeliveryResult,OperatorDeliverySpool,PersistedInbound,PolicyBoundRoute,claimInboundRecipient,discardSupersededUnsentInbound,inboundDeliveryResultJob,loadInboundDelivery,loadInboundRecipient,persistInboxRelay,persistSinkRoute,persistWebDeskMetadata,projectInboundRecipientResult,recordDeliveryResults,stableId,structuredError } from "./inbound-repository";
 import { acceptOperatorReply } from "./operator-reply";
+import { recoverDeliveryOnlyByFingerprint } from "./delivery-only-recovery";
+import { acceptDeliveryOnly } from "./delivery-only-inbound";
 
 export const MIME_CONTENT_TYPE = "message/rfc822";
 
@@ -58,6 +60,10 @@ export async function acceptEmail(message: ForwardableEmailMessage, env: Env, af
     return;
   }
   affectedRoutes?.add(stableId("route", boundRoute.route.domain, boundRoute.route.localPart));
+  if (boundRoute.route.deliveryOnly) {
+    await acceptDeliveryOnly(message, boundRoute, env);
+    return;
+  }
 
   if (config.mode === "inbox_relay") {
     if (boundRoute.route.disposition) {
@@ -211,6 +217,19 @@ export async function acceptInboxRelay(
     normalizeMailbox(message.to),
     rawSha256,
   ].join("\0"));
+  // A message already admitted in delivery-only mode owns this fingerprint
+  // even if the current route now uses ordinary inbox relay semantics.
+  try {
+    const deliveryOnly = await recoverDeliveryOnlyByFingerprint(env, fingerprintSha256);
+    if (deliveryOnly === "processed") return;
+    if (deliveryOnly === "held") {
+      message.setReject("maildesk delivery-only recovery requires reconciliation");
+      return;
+    }
+  } catch {
+    message.setReject("maildesk could not verify inbound delivery idempotency");
+    return;
+  }
   let existingInbound: InboundDeliveryRow | null;
   try {
     existingInbound = await loadInboundDelivery(fingerprintSha256, env);
@@ -487,15 +506,33 @@ export async function acceptWebDesk(
   const effectiveRoute: RouteDecision = selected.target.kind === "mailbox"
     ? { ...route, operators: selected.target.recipients }
     : { ...route, operators: [] };
+  // A delivery-only claim owns this message even after a mode change. Read the
+  // raw bytes before forwarding and refuse an existing or uncheckable claim;
+  // cutovers still require the independently qualified ingress drain.
+  let rawBytes: ArrayBuffer;
+  try {
+    rawBytes = await new Response(message.raw).arrayBuffer();
+    const fingerprint = await sha256Hex([
+      normalizeMailbox(message.from), normalizeMailbox(message.to), await sha256Hex(rawBytes),
+    ].join("\0"));
+    const existing = await env.DB.withSession("first-primary")
+      .prepare("SELECT id FROM delivery_only_deliveries WHERE fingerprint_sha256 = ?1 LIMIT 1")
+      .bind(fingerprint).first<{ id: string }>();
+    if (existing) {
+      message.setReject("maildesk delivery-only history requires reconciliation");
+      return;
+    }
+  } catch {
+    message.setReject("maildesk could not verify inbound delivery idempotency");
+    return;
+  }
   const messageId = message.headers.get("message-id") ?? crypto.randomUUID();
   const deliveryId = crypto.randomUUID();
   const rawR2Key = rawMailKey(messageId, deliveryId);
   const forwardResults = selected.target.kind === "mailbox"
     ? await forwardToOperators(message, effectiveRoute)
     : [];
-  let rawBytes: ArrayBuffer;
   try {
-    rawBytes = await new Response(message.raw).arrayBuffer();
     await env.RAW_MAIL.put(rawR2Key, rawBytes, {
       httpMetadata: { contentType: MIME_CONTENT_TYPE },
       customMetadata: { retentionClass: "archive" },

@@ -644,6 +644,17 @@ fn next_route_action(route: &RouteHealthSummary) -> &'static str {
         "review_enrollment" => "Review the recorded enrollment decision",
         "review_processing_modes" => "Review the governed processing switches",
         "reconcile_provider_outcome" => "Reconcile the existing provider attempt; do not resend",
+        "inspect_delivery_recovery"
+            if route.operational_status.as_ref().is_some_and(|status| {
+                status
+                    .reason_codes
+                    .iter()
+                    .any(|reason| reason == "delivery_payload_missing_observed")
+            }) =>
+        {
+            "The recovery payload was last observed missing; inspect the held delivery"
+        }
+        "inspect_delivery_recovery" => "Inspect the held delivery and its recovery payload",
         "recover_dispatch_by_claim_id" => {
             "Recover the known-unsent dispatch by its durable claim ID"
         }
@@ -948,13 +959,33 @@ mod routing_health_tests {
             "last_reply_provider_accepted_at": null, "last_reply_provider_message_id": null,
             "last_reply_verified_at": null, "last_error_code": null, "projection_state": state,
             "operational_status": {
-                "schema_version": 1, "projection_revision": "route-operational-v1", "observed_at": "2026-10-15T12:00:00Z",
+                "schema_version": 1, "projection_revision": "route-operational-v6", "observed_at": "2026-10-15T12:00:00Z",
                 "classification": classification, "reason_codes": ["dispatch_unconfirmed"], "next_action": "recover_dispatch_by_claim_id",
                 "inbound_processing": "enabled", "ordinary_authority_active": true, "ordinary_reply_enabled": true,
                 "inbound_outcome": "provider_accepted", "reply_outcome": "unobserved", "inbox_proof": "fresh", "reply_proof": "missing",
                 "pending_dispatch": 1, "pending_queue": 0, "unknown_provider_attempts": 0
             }
         }))
+    }
+
+    #[test]
+    fn held_delivery_does_not_imply_a_provider_attempt() -> Result<(), serde_json::Error> {
+        let mut route = fixture("current", "needs_attention")?;
+        if let Some(status) = route.operational_status.as_mut() {
+            status.next_action = "inspect_delivery_recovery".to_string();
+        }
+        assert_eq!(
+            next_route_action(&route),
+            "Inspect the held delivery and its recovery payload"
+        );
+        if let Some(status) = route.operational_status.as_mut() {
+            status.reason_codes = vec!["delivery_payload_missing_observed".to_string()];
+        }
+        assert_eq!(
+            next_route_action(&route),
+            "The recovery payload was last observed missing; inspect the held delivery"
+        );
+        Ok(())
     }
 
     #[test]

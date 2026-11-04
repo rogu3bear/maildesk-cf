@@ -1183,6 +1183,8 @@ class RelayD1 {
     private claimSupersedingPolicy?: RouterPolicy,
   ) {}
 
+  withSession(_constraint?: string): RelayD1 { return this; }
+
   prepare(sql: string): D1PreparedStatement {
     const call = { sql, bindings: [] as unknown[] };
     this.calls.push(call);

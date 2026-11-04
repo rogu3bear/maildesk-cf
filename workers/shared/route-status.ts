@@ -1,5 +1,5 @@
 /** Canonical body-free operational classification. Evidence planes remain separate. */
-export const ROUTE_STATUS_REVISION = "route-operational-v1";
+export const ROUTE_STATUS_REVISION = "route-operational-v6";
 export type ProofFreshness = "fresh" | "stale" | "missing" | "invalid" | "not_applicable";
 export type DeliveryOutcome = "provider_accepted" | "partial_delivery" | "failed" | "unknown" | "unobserved" | "not_applicable";
 export interface RouteStatusInput {
@@ -8,6 +8,7 @@ export interface RouteStatusInput {
   bindingCurrent: boolean;
   enabled: boolean;
   routeKind: string;
+  deliveryOnly?: boolean;
   enrollment: "required" | "excluded" | "pending" | "scheduled";
   inboundProcessing: "enabled" | "disabled" | "unknown";
   replyProcessing: "enabled" | "disabled" | "unknown";
@@ -18,6 +19,8 @@ export interface RouteStatusInput {
   replyStatus: string | null;
   inboxObservedAt: string | null;
   replyObservedAt: string | null;
+  deliveryPending?: number;
+  missingPayloads?: number;
   pendingDispatch: number;
   pendingQueue: number;
   unknownProviderAttempts: number;
@@ -44,7 +47,7 @@ export interface RouteOperationalStatus {
   unknown_provider_attempts: number;
   reason_codes: string[];
   next_action: "none" | "refresh_projection" | "review_enrollment" | "review_processing_modes" |
-    "reconcile_provider_outcome" | "recover_dispatch_by_claim_id" | "observe_queue" |
+    "reconcile_provider_outcome" | "inspect_delivery_recovery" | "recover_dispatch_by_claim_id" | "observe_queue" |
     "review_quarantine" | "review_route_activation" | "record_inbox_receipt" | "record_reply_receipt";
 }
 
@@ -74,22 +77,23 @@ export function deliveryOutcome(value: string | null): DeliveryOutcome {
 
 export function projectRouteStatus(input: RouteStatusInput, now = Date.now(), maxProofAgeMs = 86_400_000): RouteOperationalStatus {
   if (!Number.isFinite(now) || !Number.isFinite(maxProofAgeMs) || maxProofAgeMs <= 0 ||
-      [input.pendingDispatch, input.pendingQueue, input.unknownProviderAttempts].some((n) => !Number.isSafeInteger(n) || n < 0)) {
+      [input.pendingDispatch, input.pendingQueue, input.unknownProviderAttempts, input.deliveryPending ?? 0, input.missingPayloads ?? 0].some((n) => !Number.isSafeInteger(n) || n < 0)) {
     throw new Error("invalid route status input");
   }
   const sink = input.routeKind === "sink";
+  const noReply = sink || input.deliveryOnly === true;
   const projection: RouteOperationalStatus = {
     schema_version: 1, projection_revision: ROUTE_STATUS_REVISION, policy_sha256: input.policySha256,
     source_generation: input.sourceGeneration ?? 0,
     observed_at: new Date(now).toISOString(), valid_until: new Date(now + 7_200_000).toISOString(),
     classification: "unverified", inbound_processing: input.inboundProcessing,
-    ordinary_authority_active: !sink && input.activationId !== null && !input.quarantined,
-    ordinary_reply_enabled: !sink && input.activationId !== null && !input.quarantined && input.replyProcessing === "enabled" && input.ordinaryProcessing === "enabled",
-    activation_id: sink ? null : input.activationId,
+    ordinary_authority_active: !noReply && input.activationId !== null && !input.quarantined,
+    ordinary_reply_enabled: !noReply && input.activationId !== null && !input.quarantined && input.replyProcessing === "enabled" && input.ordinaryProcessing === "enabled",
+    activation_id: noReply ? null : input.activationId,
     inbound_outcome: sink ? "not_applicable" : deliveryOutcome(input.inboundStatus),
-    reply_outcome: sink ? "not_applicable" : deliveryOutcome(input.replyStatus),
+    reply_outcome: noReply ? "not_applicable" : deliveryOutcome(input.replyStatus),
     inbox_proof: sink ? "not_applicable" : proofFreshness(input.inboxObservedAt, now, maxProofAgeMs),
-    reply_proof: sink ? "not_applicable" : proofFreshness(input.replyObservedAt, now, maxProofAgeMs),
+    reply_proof: noReply ? "not_applicable" : proofFreshness(input.replyObservedAt, now, maxProofAgeMs),
     pending_dispatch: input.pendingDispatch, pending_queue: input.pendingQueue,
     unknown_provider_attempts: input.unknownProviderAttempts, reason_codes: [], next_action: "none",
   };
@@ -99,6 +103,10 @@ export function projectRouteStatus(input: RouteStatusInput, now = Date.now(), ma
   if (!input.bindingCurrent) {
     projection.ordinary_authority_active = false; projection.ordinary_reply_enabled = false;
     choose("unverified", "projection_binding_missing", "refresh_projection");
+  } else if (input.unknownProviderAttempts > 0) {
+    choose("needs_attention", "provider_outcome_requires_reconciliation", "reconcile_provider_outcome");
+  } else if ((input.deliveryPending ?? 0) > 0) {
+    choose("needs_attention", (input.missingPayloads ?? 0) > 0 ? "delivery_payload_missing_observed" : "delivery_recovery_required", "inspect_delivery_recovery");
   } else if (sink || input.enrollment === "excluded") {
     projection.ordinary_authority_active = false; projection.ordinary_reply_enabled = false;
     choose("intentionally_excluded", sink ? "sink_no_delivery_reply_not_applicable" : "enrollment_excluded", "none");
@@ -107,13 +115,16 @@ export function projectRouteStatus(input: RouteStatusInput, now = Date.now(), ma
   } else if (!input.enabled) {
     projection.ordinary_reply_enabled = false;
     choose("disabled", "route_disabled", "review_processing_modes");
-  } else if (input.quarantined) choose("needs_attention", "route_quarantined", "review_quarantine");
-  else if (input.unknownProviderAttempts || [projection.inbound_outcome, projection.reply_outcome].some((v) => ["unknown", "failed", "partial_delivery"].includes(v))) {
+  } else if (input.quarantined && !noReply) choose("needs_attention", "route_quarantined", "review_quarantine");
+  else if (input.deliveryOnly && input.inboundStatus === "recovery_required") {
+    choose("needs_attention", "delivery_recovery_required", "inspect_delivery_recovery");
+  } else if (input.unknownProviderAttempts || [projection.inbound_outcome, projection.reply_outcome].some((v) => ["unknown", "failed", "partial_delivery"].includes(v))) {
     choose("needs_attention", "provider_outcome_requires_reconciliation", "reconcile_provider_outcome");
   } else if (input.pendingDispatch) choose("needs_attention", "dispatch_unconfirmed", "recover_dispatch_by_claim_id");
   else if (input.pendingQueue) choose("unverified", "queue_processing_pending", "observe_queue");
   else if (input.inboundProcessing !== "enabled") choose("unverified", "inbound_processing_unconfirmed", "review_processing_modes");
   else if (projection.inbox_proof !== "fresh") choose(projection.inbox_proof === "stale" ? "stale" : "unverified", `inbox_proof_${projection.inbox_proof}`, "record_inbox_receipt");
+  else if (input.deliveryOnly) choose("current", "delivery_only_inbox_observed", "none");
   else if (projection.reply_proof !== "fresh") choose(projection.reply_proof === "stale" ? "stale" : "unverified", `reply_proof_${projection.reply_proof}`, "record_reply_receipt");
   else if (!projection.ordinary_authority_active) choose("unverified", "ordinary_route_not_activated", "review_route_activation");
   else if (!projection.ordinary_reply_enabled) choose("unverified", "reply_processing_disabled", "review_processing_modes");

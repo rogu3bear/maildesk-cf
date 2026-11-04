@@ -442,10 +442,14 @@ JSON
     const googleEvidenceText = readFileSync(googleOut, "utf8");
     expect(googleEvidenceText).not.toContain("operator-a@example.com");
     expect(googleEvidenceText).not.toContain("operator-b@example.com");
-    const googleProof = (JSON.parse(googleEvidenceText) as {
-      inbound_proofs?: Record<string, { operator_count?: number; operator_set_sha256?: string }>;
-    }).inbound_proofs?.["example.com"];
+    const observed = JSON.parse(googleEvidenceText) as {
+      inbound_proofs?: Record<string, unknown>;
+      google_workspace_groups?: Record<string, { operator_count: number; operator_set_sha256: string; envelope_to: string; observed_at: string; external_receipt_path: string; external_receipt_sha256: string }>;
+    };
+    expect(observed.inbound_proofs?.["example.com"]).toBeUndefined();
+    const googleProof = observed.google_workspace_groups?.["example.com"];
     expect(googleProof).toMatchObject({
+      evidence_kind: "google_workspace_group_configuration",
       operator_count: 2,
       operator_set_sha256: createHash("sha256")
         .update(JSON.stringify(["operator-a@example.com", "operator-b@example.com"]))
@@ -478,6 +482,7 @@ JSON
         role_aliases_wired: string;
         personal_aliases_wired: string;
         catch_all_wired: string;
+        inbound_proof: string;
       }>;
     };
     expect(googleReceipt.rows[0]).toMatchObject({
@@ -485,13 +490,21 @@ JSON
       role_aliases_wired: "not_checked",
       personal_aliases_wired: "not_checked",
       catch_all_wired: "not_applicable",
+      inbound_proof: "not_checked",
     });
     expect(googleReceipt.status.edge_ready).toBe(false);
 
     const mismatchedGoogleOut = join(dir, "google-evidence-mismatch.json");
     const mismatchedGoogleEvidence = JSON.parse(googleEvidenceText) as {
-      inbound_proofs: Record<string, { operator_set_sha256: string }>;
+      inbound_proofs?: Record<string, Record<string, unknown>>;
     };
+    // A historical membership-shaped receipt still cannot establish delivery.
+    const legacyProof = { ...googleProof!, status: "ok", route_kind: "role_alias", provider: "google_workspace", default_reply_identity: "founders@example.com", audit_event_at: googleProof!.observed_at };
+    mismatchedGoogleEvidence.inbound_proofs = { "example.com": legacyProof };
+    writeJson(mismatchedGoogleOut, mismatchedGoogleEvidence);
+    const legacyResult = spawnSync("bun", ["run", "scripts/verify-maildesk.ts", "--", "--policy", googlePolicyPath, "--desired-state", googleDesiredPath, "--evidence", mismatchedGoogleOut, "--json"], { cwd: root, encoding: "utf8" });
+    expect(legacyResult.status).toBe(0);
+    expect(JSON.parse(legacyResult.stdout).rows[0]?.inbound_proof).toBe("not_checked");
     mismatchedGoogleEvidence.inbound_proofs["example.com"]!.operator_set_sha256 = "0".repeat(64);
     writeJson(mismatchedGoogleOut, mismatchedGoogleEvidence);
     const mismatchedGoogleVerification = spawnSync(
@@ -749,10 +762,12 @@ printf '%s\n' '${JSON.stringify({ snapshot_captured_at: "2026-08-18T00:03:00.000
     expect(providerCalls).not.toContain(fixture.domains[1]!);
     expect(providerCalls).not.toContain(fixture.domains[2]!);
     const evidence = JSON.parse(readFileSync(out, "utf8")) as {
+      google_workspace_groups?: Record<string, unknown>;
       inbound_proofs?: Record<string, unknown>;
       outbound_proofs?: Record<string, unknown>;
     };
-    expect(Object.keys(evidence.inbound_proofs ?? {})).toEqual([fixture.domains[0]!]);
+    expect(Object.keys(evidence.google_workspace_groups ?? {})).toEqual([fixture.domains[0]!]);
+    expect(Object.keys(evidence.inbound_proofs ?? {})).toEqual([]);
     expect(Object.keys(evidence.outbound_proofs ?? {})).toEqual([]);
   }, 20_000);
 

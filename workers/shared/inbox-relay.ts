@@ -38,6 +38,38 @@ export interface OperatorDeliveryMessage {
   attachments?: MailAttachmentPayload[];
 }
 
+/** A delivery-only message has no reply-relay address or reply authority. */
+export interface DeliveryOnlyMessage {
+  from: EmailAddress;
+  to: string;
+  subject: string;
+  text: string;
+  html?: string;
+  headers: Record<string, string>;
+  attachments?: MailAttachmentPayload[];
+}
+
+export function buildDeliveryOnlyMessage(
+  parsed: ParsedRelayEmail,
+  input: { recipient: string; receivedAddress: string; deliveryMessageId: string },
+): DeliveryOnlyMessage {
+  const recipient = normalizeMailbox(input.recipient);
+  const receivedAddress = normalizeMailbox(input.receivedAddress);
+  if (!recipient || !receivedAddress) throw new Error("invalid delivery-only mailbox");
+  return {
+    from: { name: "Maildesk delivery", email: receivedAddress },
+    to: recipient,
+    subject: parsed.subject,
+    text: parsed.text,
+    ...(parsed.html ? { html: parsed.html } : {}),
+    headers: {
+      "X-Maildesk-Delivery-ID": boundedHeaderText(input.deliveryMessageId, 200),
+      "X-Maildesk-Original-To": receivedAddress,
+    },
+    ...(parsed.attachments.length ? { attachments: parsed.attachments } : {}),
+  };
+}
+
 export interface OperatorDeliveryInput {
   operator: string;
   receivedAddress: string;

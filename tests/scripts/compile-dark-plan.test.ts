@@ -20,6 +20,7 @@ describe("dark deployment blueprint", () => {
     expect(plan.plan_ready).toBe(false);
     expect(plan.activation.required_dark_state).toBe("disabled/disabled");
     expect(plan.plan_sets).toHaveLength(2);
+    expect(plan.router_recovery_trigger).toEqual({ cron: "*/10 * * * *", worker_role: "relay_router", execution_gate: "inbound_processing_mode_enabled", status: "configured_in_candidate_not_deployed" });
     expect(JSON.stringify(plan)).toContain("maildesk-cf-relay-db");
     expect(JSON.stringify(plan)).toContain("maildesk-cf-preview-db");
     expect(JSON.stringify(plan)).toContain("maildesk-cf.d1-preview-migrations-apply");

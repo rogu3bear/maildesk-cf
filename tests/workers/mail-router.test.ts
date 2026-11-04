@@ -135,7 +135,7 @@ test("routing policy v2 rejects fallback cycles before every Worker side effect"
 
 test("routing policy v2 rejects invalid closed shapes before every Worker side effect", async () => {
   const mutations: Array<[string, (policy: any) => void]> = [
-    ["unsupported version", (policy) => { policy.policy_version = 3; }],
+    ["unsupported version", (policy) => { policy.policy_version = 4; }],
     ["unknown accountable", (policy) => {
       policy.destinations["mailbox:security"].accountable_ref = "team:missing";
     }],
@@ -577,6 +577,8 @@ class D1Recorder {
     this.effects = Array.isArray(threadsOrEffects) ? threadsOrEffects : effects;
   }
 
+  withSession(_constraint?: string): D1Recorder { return this; }
+
   prepare(sql: string): D1PreparedStatement {
     const statements = this.statements;
     const failOnSql = this.failOnSql;
@@ -597,7 +599,9 @@ class D1Recorder {
         return { success: true };
       },
       async first() {
+        if (failOnSql && sql.includes(failOnSql)) throw new Error(`forced D1 failure for ${failOnSql}`);
         statements.push(record);
+        if (sql.includes("SELECT id FROM delivery_only_deliveries")) return null;
         if (sql.includes("SELECT m.thread_id")) {
           const threadId = threadsByHeader.get(record.binds.map(String).join("|"));
           return threadId ? { thread_id: threadId } : null;

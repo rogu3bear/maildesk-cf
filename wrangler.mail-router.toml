@@ -10,6 +10,9 @@ send_email = [
 [build]
 command = "bun run check:mail-worker-bundles"
 
+[triggers]
+crons = ["*/10 * * * *"]
+
 [vars]
 MAILDESK_ORDINARY_REPLY_MODE = "disabled"
 MAILDESK_OPERATOR_DELIVERY_MODE = "inbox_relay"

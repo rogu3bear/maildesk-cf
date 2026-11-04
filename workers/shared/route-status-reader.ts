@@ -14,7 +14,7 @@ const classes = ["current", "needs_attention", "unverified", "stale", "intention
 const outcomes = ["provider_accepted", "partial_delivery", "failed", "unknown", "unobserved", "not_applicable"];
 const proofs = ["fresh", "stale", "missing", "invalid", "not_applicable"];
 const actions = ["none", "refresh_projection", "review_enrollment", "review_processing_modes", "reconcile_provider_outcome",
-  "recover_dispatch_by_claim_id", "observe_queue", "review_quarantine", "review_route_activation", "record_inbox_receipt", "record_reply_receipt"];
+  "recover_dispatch_by_claim_id", "inspect_delivery_recovery", "observe_queue", "review_quarantine", "review_route_activation", "record_inbox_receipt", "record_reply_receipt"];
 const member = (value: unknown, values: readonly string[]): value is string => typeof value === "string" && values.includes(value);
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
@@ -63,6 +63,7 @@ export function operationalReadinessBlocker(read: RouteStatusRead): string | nul
   if (read.state !== "current" || !read.status) return read.reason ?? "operational_projection_unknown";
   const status = read.status;
   if (status.pending_dispatch) return "dispatch_unconfirmed";
+  if (status.next_action === "inspect_delivery_recovery" && status.unknown_provider_attempts === 0) return status.reason_codes[0] ?? "delivery_recovery_required";
   if (status.unknown_provider_attempts || [status.inbound_outcome, status.reply_outcome].some((outcome) =>
       ["partial_delivery", "failed", "unknown"].includes(outcome))) return "provider_outcome_requires_reconciliation";
   if (status.pending_queue) return "queue_processing_pending";

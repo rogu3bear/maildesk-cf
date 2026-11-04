@@ -64,8 +64,8 @@ test("a later accepted inbound delivery cannot hide recipients still awaiting a 
     f.db.run("UPDATE inbound_deliveries SET status='pending' WHERE id != 'inbound:one'");
     await f.ingress(inbound("accepted-after-pending"), "support@example.com", "sender@example.net");
     const read = await operationalStatus(f);
-    expect(read.status).toMatchObject({ classification: "needs_attention", inbound_outcome: "unknown", unknown_provider_attempts: 0, next_action: "reconcile_provider_outcome" });
-    expect(operationalReadinessBlocker(read)).toBe("provider_outcome_requires_reconciliation");
+    expect(read.status).toMatchObject({ classification: "needs_attention", inbound_outcome: "unknown", unknown_provider_attempts: 0, next_action: "inspect_delivery_recovery" });
+    expect(operationalReadinessBlocker(read)).toBe("delivery_recovery_required");
   } finally { f.db.close(); }
 });
 
@@ -226,5 +226,40 @@ test("route and identity substitutions invalidate the canonical operational cach
       await refreshRouteStatuses(f.env);
       expect(f.db.query("SELECT count(*) AS n FROM route_status_projection").get()).toEqual({n:0});
     } finally {f.db.close();}
+  }
+});
+
+test("delivery-only status never grants or requires reply authority", () => {
+  const status = projectRouteStatus({ ...input(), deliveryOnly: true }, now);
+  expect(status.classification).toBe("current");
+  expect(status.ordinary_authority_active).toBe(false);
+  expect(status.ordinary_reply_enabled).toBe(false);
+  expect(status.activation_id).toBeNull();
+  expect(status.reply_outcome).toBe("not_applicable");
+  expect(status.reply_proof).toBe("not_applicable");
+  const held = projectRouteStatus({ ...input(), deliveryOnly: true, inboundStatus: "recovery_required", unknownProviderAttempts: 0 }, now);
+  expect(held).toMatchObject({ classification: "needs_attention", reason_codes: ["delivery_recovery_required"], next_action: "inspect_delivery_recovery" });
+  const readHeld = readRouteStatusProjection(JSON.stringify(held), { policySha256: held.policy_sha256, sourceGeneration: held.source_generation, now });
+  expect(readHeld.state).toBe("current");
+  expect(operationalReadinessBlocker(readHeld)).toBe("delivery_recovery_required");
+  const modeChanged = projectRouteStatus({ ...input(), deliveryOnly: false, deliveryPending: 1 }, now);
+  expect(modeChanged).toMatchObject({ classification: "needs_attention", next_action: "inspect_delivery_recovery" });
+  const unknownAfterModeChange = projectRouteStatus({ ...input(), deliveryOnly: false, deliveryPending: 1, unknownProviderAttempts: 1 }, now);
+  expect(unknownAfterModeChange.next_action).toBe("reconcile_provider_outcome");
+  const unknown = projectRouteStatus({ ...input(), deliveryOnly: true, inboundStatus: "recovery_required", unknownProviderAttempts: 1 }, now);
+  expect(unknown.classification).toBe("needs_attention");
+  expect(unknown.next_action).toBe("reconcile_provider_outcome");
+});
+
+test("route changes cannot hide pending or uncertain delivery attempts", () => {
+  for (const routeKind of ["role_alias", "sink"]) {
+    const pending = projectRouteStatus({ ...input(), routeKind, deliveryPending: 1, unknownProviderAttempts: 0 }, now);
+    expect(pending).toMatchObject({ classification: "needs_attention", next_action: "inspect_delivery_recovery" });
+    const unknown = projectRouteStatus({ ...input(), routeKind, deliveryPending: 1, unknownProviderAttempts: 1 }, now);
+    expect(unknown).toMatchObject({ classification: "needs_attention", next_action: "reconcile_provider_outcome" });
+    if (routeKind === "role_alias") {
+      expect(pending.ordinary_reply_enabled).toBe(true);
+      expect(unknown.ordinary_reply_enabled).toBe(true);
+    }
   }
 });

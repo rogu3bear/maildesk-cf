@@ -3,6 +3,8 @@ import { proofMillis, proofFreshness, deliveryOutcome } from "../../shared/route
 export { proofMillis } from "../../shared/route-status";
 export interface RouteSnapshot {
   route_id: string;
+  delivery_only?: boolean;
+  unresolved_delivery_count?: number;
   status_generation?: number;
   operational_status?: unknown;
   decision_kind: string;
@@ -82,7 +84,7 @@ export function reportRoutes(
     issue("route_inventory_incomplete");
   }
   if (processing.inbound !== "enabled") issue("inbound_processing_disabled");
-  if (processing.reply !== "enabled") issue("reply_processing_disabled");
+  if (processing.reply !== "enabled" && snapshot.routes.some((route) => route.decision_kind !== "sink" && !route.delivery_only)) issue("reply_processing_disabled");
   for (const route of snapshot.routes) {
     const read = readRouteStatusProjection(route.operational_status, {
       policySha256: snapshot.policy_sha256, sourceGeneration: route.status_generation, now,
@@ -92,6 +94,11 @@ export function reportRoutes(
     if (blocker) issue(blocker);
     if (route.health_policy_sha256 !== snapshot.policy_sha256) {
       issue("route_health_revision_missing");
+      continue;
+    }
+    if ((route.unresolved_delivery_count ?? 0) > 0) {
+      failed = true;
+      issue("route_delivery_failed");
       continue;
     }
     if (route.decision_kind === "sink") {
@@ -107,7 +114,7 @@ export function reportRoutes(
       issue("route_kind_invalid");
       continue;
     }
-    if (FAILURES.has(deliveryOutcome(route.inbound_status)) || FAILURES.has(deliveryOutcome(route.reply_status))) {
+    if (FAILURES.has(deliveryOutcome(route.inbound_status)) || (!route.delivery_only && FAILURES.has(deliveryOutcome(route.reply_status)))) {
       failed = true;
       issue("route_delivery_failed");
       continue;
@@ -117,11 +124,11 @@ export function reportRoutes(
     const inbox = proofMillis(route.last_inbox_verified_at, now);
     const reply = proofMillis(route.last_reply_verified_at, now);
     if (inbox !== null) inboxRecorded++;
-    if (reply !== null) replyRecorded++;
+    if (!route.delivery_only && reply !== null) replyRecorded++;
     if (proofFreshness(route.last_inbox_verified_at, now, maxProofAgeMs) === "fresh") inboxFresh++;
-    if (proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh") replyFresh++;
+    if (!route.delivery_only && proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh") replyFresh++;
     if (proofFreshness(route.last_inbox_verified_at, now, maxProofAgeMs) === "fresh" &&
-        proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh") current++;
+        (route.delivery_only || proofFreshness(route.last_reply_verified_at, now, maxProofAgeMs) === "fresh")) current++;
   }
   const status = failed ? "failed"
     : Object.keys(issues).length ? "unverified"
@@ -155,10 +162,10 @@ export function selectProbeRotation(routes: RouteSnapshot[], now: number, batch:
     .map((route) => {
       const inbox = proofMillis(route.last_inbox_verified_at, now);
       const reply = proofMillis(route.last_reply_verified_at, now);
-      const complete = inbox !== null && reply !== null;
+      const complete = inbox !== null && (route.delivery_only || reply !== null);
       return {
         route_id: route.route_id,
-        oldest: complete ? Math.min(inbox, reply) : null,
+        oldest: complete ? (route.delivery_only ? inbox : Math.min(inbox!, reply!)) : null,
         reason: complete ? "oldest_proof" as const : "never_proven" as const,
       };
     })

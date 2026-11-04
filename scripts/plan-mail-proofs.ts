@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isSenderMode, senderModeOrDefault, type SenderMode } from "./sender-mode";
-import { roleProofTarget } from "./mail-proof-target";
+import { roleInboundTarget, roleProofTarget } from "./mail-proof-target";
+import { projectPolicy, type RouterPolicy } from "../workers/shared/router";
 import { admitGitCandidateBinding, type GitCandidate } from "./git-candidate";
 import {
   planLifecycle,
@@ -52,6 +53,7 @@ interface RoleAlias {
   operators: string[];
   reply_identity: string;
   sink?: boolean;
+  delivery_only?: boolean;
 }
 
 interface PersonalAlias {
@@ -132,6 +134,14 @@ if (requirePlanReady && senderDomainPlans.missing > 0) {
 function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
   const rowsByDomain = new Map(receipt.rows.map((row) => [row.domain, row]));
   const actions: ProofAction[] = [];
+  // The source-owned cleanup is held; missing or forged receipt fields cannot
+  // manufacture a cleanup capability for a delivery-only policy.
+  for (const [domain, config] of Object.entries(policy.domains)) {
+    if (Object.values(config.role_aliases).some((role) => role.delivery_only === true)) {
+      actions.push({ kind: "blocked", domain, blocked_by: "delivery_cleanup_unqualified",
+        description: "qualify exact-generation cleanup and retention before delivery-only release" });
+    }
+  }
 
   for (const gap of receipt.gaps.filter((gap) => gap.readiness === "mail")) {
     const row = rowsByDomain.get(gap.domain);
@@ -211,9 +221,9 @@ function buildActions(receipt: Receipt, policy: PolicyFile): ProofAction[] {
           ...senderRepairAction(senderMode, gap.domain),
         });
       } else {
-        const identity = outboundIdentity(gap.domain, policyDomain);
+        const identity = outboundIdentity(gap.domain, policyDomain, policy);
         if (!identity) {
-          actions.push({ kind: "blocked", domain: gap.domain, blocked_by: "inbound_proof", description: "no non-sink policy identity is available for a reply probe" });
+          actions.push({ kind: "blocked", domain: gap.domain, blocked_by: "reply_identity_unavailable", description: "no single Rust-authorized reply identity is available without selecting an operator" });
           continue;
         }
         actions.push({
@@ -247,19 +257,28 @@ function senderDomainPlanSummary(actions: ProofAction[]): SenderDomainPlanSummar
 }
 
 function inboundTarget(domain: string, policyDomain: PolicyDomain): string | null {
-  const role = roleProofTarget(domain, policyDomain.role_aliases);
-  if (role) return role.address;
+  const role = roleInboundTarget(domain, policyDomain.role_aliases);
+  if (role) return role;
   const personal = Object.keys(policyDomain.personal_aliases).sort()[0];
   return personal ? `${personal}@${domain}` : null;
 }
 
-function outboundIdentity(domain: string, policyDomain: PolicyDomain): string | null {
+function outboundIdentity(domain: string, policyDomain: PolicyDomain, policy: PolicyFile): string | null {
+  const projection = projectPolicy(policy as unknown as RouterPolicy);
+  if (!projection.ok) return null;
   const role = roleProofTarget(domain, policyDomain.role_aliases);
-  if (role) return role.replyIdentity;
-  const personal = Object.values(policyDomain.personal_aliases).sort((left, right) =>
-    left.reply_identity.localeCompare(right.reply_identity),
-  )[0];
-  return personal?.reply_identity ?? null;
+  const personal = Object.keys(policyDomain.personal_aliases).sort()[0];
+  const target = role?.address ?? (personal ? `${personal}@${domain}` : null);
+  if (!target) return null;
+  const route = projection.value.routes.find((entry) => `${entry.localPart}@${entry.domain}` === target);
+  if (!route || route.deliveryOnly || route.routeKind === "sink" || route.operators.length === 0) return null;
+  const mapping = route.operatorReplyIdentities ?? {};
+  const bindings = Object.values(mapping).map((entry) => entry.publicAddress);
+  if (bindings.length === 0) return route.allowedReplyIdentities.includes(route.defaultReplyIdentity) ? route.defaultReplyIdentity : null;
+  if (route.operators.some((operator) => !mapping[operator]) || Object.keys(mapping).length !== route.operators.length) return null;
+  const identities = [...new Set(bindings)];
+  // Without a selected operator, do not guess between personal identities.
+  return identities.length === 1 && route.allowedReplyIdentities.includes(identities[0]!) ? identities[0]! : null;
 }
 
 function isReservedExampleDomain(domain: string): boolean {
@@ -380,6 +399,8 @@ type ProofAction =
         | "inbound_mx"
         | "inbound_provider"
         | "inbound_proof"
+        | "reply_identity_unavailable"
+        | "delivery_cleanup_unqualified"
         | "sender_domain_not_verified"
         | "resend_sender_domain_not_verified"
         | "outbound_disabled"

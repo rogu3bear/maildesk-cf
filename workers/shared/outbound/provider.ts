@@ -10,6 +10,7 @@ import { outboundOpaqueTokenFailure,outboundPrivacyFailure } from "./privacy";
 import { cloudflareEmailServiceFailure } from "./provider-errors";
 import { claimOutboundProviderBoundary,hasInboxRelayTransactionBindings,outboundContainmentBlocker,verifyAuthorizedOutboundTransaction } from "./reply-authorization";
 import type { OutboundSendResult } from "./types";
+import { claimWebDeskProvider } from "./webdesk-claim";
 
 export const RESEND_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -123,6 +124,26 @@ export async function sendOutboundReply(
           ? `reply_containment_${boundaryContainmentBlocker}`
           : "controller admission is stale, consumed, or no longer authoritative",
       };
+    }
+  } else {
+    // Web-desk jobs must not inherit authority from a historical thread. The
+    // active Rust policy and its exact stored projection are rechecked by the
+    // provider-boundary claim, including the current recipient and operator.
+    const activePolicy = await loadActivePolicy(env).catch(() => null);
+    if (!activePolicy) return { ok: false, provider: mode, error: "active policy is unavailable" };
+    const authorization = authorizeReplyWithPolicy(activePolicy.policy, {
+      envelopeTo: job.envelopeTo, operator: job.operator, requestedIdentity: job.fromIdentity,
+    });
+    const route = activePolicy.projection.routes.find((candidate) => `${candidate.localPart}@${candidate.domain}` === job.envelopeTo);
+    if (!authorization.ok || authorization.value.fromIdentity !== job.fromIdentity || !route || route.deliveryOnly) {
+      return { ok: false, provider: mode, error: "web-desk reply is not authorized by the active policy" };
+    }
+    const claimed = await claimWebDeskProvider(env, job, route, activePolicy.sha256, mode);
+    if (!claimed) {
+      const existing = await env.DB.prepare("SELECT message_id FROM webdesk_provider_claims WHERE message_id = ?1 LIMIT 1")
+        .bind(job.messageId).first<{ message_id: string }>();
+      if (existing) return { ok: false, provider: mode, notClaimed: true, error: "web-desk provider attempt already claimed" };
+      return { ok: false, provider: mode, error: "web-desk policy or thread binding changed before send" };
     }
   }
 

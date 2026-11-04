@@ -106,6 +106,10 @@ pub struct RoleAliasPolicy {
     /// any operators it does list are ignored while `sink` is true.
     #[serde(default)]
     pub sink: bool,
+    /// Deliver to the configured recipients without granting reply authority.
+    /// This requires policy version 3 and cannot be combined with a sink.
+    #[serde(default)]
+    pub delivery_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +143,8 @@ pub struct RouteDecision {
     pub local_part: String,
     pub route_kind: RouteKind,
     pub operators: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivery_only: bool,
     pub default_reply_identity: String,
     pub allowed_reply_identities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,6 +229,8 @@ pub enum RouteError {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyError {
+    #[error("delivery-only routes require policy version 3, cannot be sinks, and cannot allow reply identities")]
+    InvalidDeliveryOnly,
     #[error("policy contains no domains")]
     EmptyPolicy,
     #[error("domain has no aliases: {0}")]
@@ -328,6 +336,9 @@ pub fn authorize_reply(
     requested_identity: Option<&str>,
 ) -> Result<ReplyAuthorization, RouteError> {
     let operator = normalize_mailbox(operator)?;
+    if decision.delivery_only {
+        return Err(RouteError::UnauthorizedOperator(operator));
+    }
     if !decision
         .operators
         .iter()
@@ -396,7 +407,7 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
     }
 
     if let Some(version) = policy.policy_version {
-        if version != 1 && version != 2 {
+        if version != 1 && version != 2 && version != 3 {
             return Err(PolicyError::UnsupportedPolicyVersion(version));
         }
     }
@@ -430,8 +441,16 @@ pub fn validate_policy(policy: &RouterPolicy) -> Result<usize, PolicyError> {
             }
         }
         for (local_part, role_policy) in &domain_policy.role_aliases {
+            if role_policy.delivery_only
+                && (policy.policy_version != Some(3)
+                    || role_policy.sink
+                    || !role_policy.allowed_reply_identities.is_empty())
+            {
+                return Err(PolicyError::InvalidDeliveryOnly);
+            }
             let decision = route_for_policy_check(policy, local_part, domain)?;
-            if role_policy.destination_ref.is_none()
+            if !role_policy.delivery_only
+                && role_policy.destination_ref.is_none()
                 && !decision
                     .allowed_reply_identities
                     .contains(&role_policy.reply_identity)
@@ -616,7 +635,11 @@ fn role_decision(
     let mut identities = BTreeSet::new();
     identities.insert(role_policy.reply_identity.clone());
     identities.extend(role_policy.allowed_reply_identities.iter().cloned());
-    let allowed_reply_identities: Vec<String> = identities.into_iter().collect();
+    let allowed_reply_identities: Vec<String> = if role_policy.delivery_only {
+        Vec::new()
+    } else {
+        identities.into_iter().collect()
+    };
 
     if role_policy.sink {
         return Ok(RouteDecision {
@@ -624,6 +647,7 @@ fn role_decision(
             local_part,
             route_kind: RouteKind::Sink,
             operators: Vec::new(),
+            delivery_only: false,
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
             identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
@@ -650,9 +674,14 @@ fn role_decision(
             local_part,
             route_kind: RouteKind::RoleAlias,
             operators,
+            delivery_only: role_policy.delivery_only,
             default_reply_identity: role_policy.reply_identity.clone(),
             allowed_reply_identities,
-            identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
+            identity_profile: if role_policy.delivery_only {
+                None
+            } else {
+                resolved_identity_profile(policy, &role_policy.reply_identity)?
+            },
             operator_reply_identities: BTreeMap::new(),
         });
     }
@@ -666,9 +695,14 @@ fn role_decision(
         local_part,
         route_kind: RouteKind::RoleAlias,
         operators: role_policy.operators.clone(),
+        delivery_only: role_policy.delivery_only,
         default_reply_identity: role_policy.reply_identity.clone(),
         allowed_reply_identities,
-        identity_profile: resolved_identity_profile(policy, &role_policy.reply_identity)?,
+        identity_profile: if role_policy.delivery_only {
+            None
+        } else {
+            resolved_identity_profile(policy, &role_policy.reply_identity)?
+        },
         operator_reply_identities: BTreeMap::new(),
         disposition: None,
     })
@@ -691,6 +725,7 @@ fn catch_all_decision(
             local_part,
             route_kind: RouteKind::Sink,
             operators: Vec::new(),
+            delivery_only: false,
             default_reply_identity: catch_all_policy.reply_identity.clone(),
             allowed_reply_identities,
             identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
@@ -708,6 +743,7 @@ fn catch_all_decision(
         local_part,
         route_kind: RouteKind::CatchAll,
         operators: catch_all_policy.operators.clone(),
+        delivery_only: false,
         default_reply_identity: catch_all_policy.reply_identity.clone(),
         allowed_reply_identities,
         identity_profile: resolved_identity_profile(policy, &catch_all_policy.reply_identity)?,
@@ -731,6 +767,7 @@ fn personal_decision(
         local_part,
         route_kind: RouteKind::PersonalAlias,
         operators: vec![personal_policy.operator.clone()],
+        delivery_only: false,
         default_reply_identity: personal_policy.reply_identity.clone(),
         allowed_reply_identities: vec![personal_policy.reply_identity.clone()],
         identity_profile: resolved_identity_profile(policy, &personal_policy.reply_identity)?,
@@ -1516,6 +1553,7 @@ mod tests {
                 reply_identity: "dmarc@example.com".to_string(),
                 allowed_reply_identities: vec![],
                 sink: true,
+                delivery_only: false,
             },
         );
 
@@ -1549,6 +1587,7 @@ mod tests {
                 reply_identity: "info@example.com".to_string(),
                 allowed_reply_identities: vec!["operator-a@example.com".to_string()],
                 sink: false,
+                delivery_only: false,
             },
         );
 
@@ -1593,6 +1632,7 @@ mod tests {
                     "operator-b@example.com".to_string(),
                 ],
                 sink: false,
+                delivery_only: false,
             },
         );
 

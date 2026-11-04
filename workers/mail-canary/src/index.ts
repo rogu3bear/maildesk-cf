@@ -1,5 +1,5 @@
 import { loadActivePolicy } from "../../shared/policy-store";
-import { replyIdentityBindingsSql } from "../../shared/policy-inventory";
+import { policyStorageId, replyIdentityBindingsSql } from "../../shared/policy-inventory";
 import { proofMillis, reportRoutes, selectProbeRotation, type CanaryReport } from "./report";
 import { assertPolicyRoutes, type RouteInventoryRow } from "./policy-routes";
 
@@ -27,6 +27,16 @@ export const ROUTES_SQL = `SELECT ar.id AS route_id, ar.decision_kind, ar.status
   ${replyIdentityBindingsSql("ar.id", "ar.policy_sha256")} AS reply_identity_bindings_json,
   rh.policy_sha256 AS health_policy_sha256, rh.inbound_status, rh.reply_status,
   rh.last_inbox_verified_at, rh.last_reply_verified_at,
+  ((SELECT count(*) FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries dl ON dl.id = rd.delivery_id
+    WHERE dl.route_id = ar.id AND rd.status IN ('pending','sending','recovery_required')) +
+   (SELECT count(*) FROM inbound_recipient_deliveries rd JOIN inbound_deliveries dl ON dl.id = rd.delivery_id
+    WHERE dl.route_id = ar.id AND rd.status IN ('pending','sending','recovery_required'))) AS unresolved_delivery_count,
+  COALESCE((SELECT CASE WHEN rd.status = 'pending' AND dl.status = 'pending' AND dl.policy_sha256 = ar.policy_sha256 THEN 'pending' ELSE 'recovery_required' END
+    FROM delivery_only_recipient_deliveries rd JOIN delivery_only_deliveries dl ON dl.id = rd.delivery_id
+    WHERE dl.route_id = ar.id AND rd.status IN ('pending','sending','recovery_required')
+    ORDER BY (rd.status != 'pending' OR dl.policy_sha256 != ar.policy_sha256 OR dl.status IN ('recovery_required','partial_delivery')) DESC, julianday(dl.received_at) DESC LIMIT 1),
+    (SELECT dl.status FROM delivery_only_deliveries dl WHERE dl.route_id = ar.id AND dl.policy_sha256 = ar.policy_sha256
+    ORDER BY julianday(dl.received_at) DESC LIMIT 1)) AS delivery_only_status,
   (SELECT MAX(rp.verified_at) FROM route_proofs rp
    WHERE rp.route_id = ar.id AND rp.policy_sha256 = ar.policy_sha256
      AND rp.proof_kind = 'edge_verified') AS edge_verified_at
@@ -64,15 +74,22 @@ export async function runCanary(env: CanaryEnv, now = Date.now()): Promise<Canar
     const routes = await env.DB.prepare(ROUTES_SQL).bind(active.sha256).all<RouteInventoryRow>();
     if (!routes.success || !routes.results || routes.results.length > 10000) throw new Error("route inventory unavailable");
     assertPolicyRoutes(active.policy, routes.results);
+    const projected = new Map(active.projection.routes.map((route) => [policyStorageId("route", route.domain, route.localPart), route]));
+    const enriched = routes.results.map((row) => {
+      const deliveryOnly = projected.get(row.route_id)?.deliveryOnly === true;
+      const unresolvedDeliveryOnly = row.delivery_only_status === "recovery_required" || row.delivery_only_status === "pending";
+      return { ...row, delivery_only: deliveryOnly,
+        inbound_status: deliveryOnly || unresolvedDeliveryOnly ? row.delivery_only_status ?? null : row.inbound_status };
+    });
     report = reportRoutes({
       policy_sha256: active.sha256,
       expected_routes: revision.expected_route_count,
-      routes: routes.results,
+      routes: enriched,
     }, now, hours * HOUR, {
       inbound: env.MAILDESK_CANARY_INBOUND_MODE ?? "disabled",
       reply: env.MAILDESK_CANARY_REPLY_MODE ?? "disabled",
     }, batch);
-    coverage = { sha256: active.sha256, routes: routes.results };
+    coverage = { sha256: active.sha256, routes: enriched };
   } catch {
     // Do not leak policy, addresses, provider payloads or exception text.
     report = {
@@ -157,7 +174,7 @@ export async function recordCoverage(env: CanaryEnv, policySha256: string, route
     rows.push(
       [route.route_id, "configuration", now],
       [route.route_id, "inbox", proofMillis(route.last_inbox_verified_at, now)],
-      [route.route_id, "reply", proofMillis(route.last_reply_verified_at, now)],
+      [route.route_id, "reply", route.delivery_only ? null : proofMillis(route.last_reply_verified_at, now)],
       [route.route_id, "edge", proofMillis(route.edge_verified_at, now)],
     );
   }

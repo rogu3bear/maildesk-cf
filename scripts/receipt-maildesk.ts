@@ -11,6 +11,7 @@ interface Receipt {
     edge_ready?: boolean;
     canary_receipts_verified?: boolean;
     operational_ready?: boolean;
+    delivery_cleanup?: "held_exact_generation_cleanup_unqualified" | "not_applicable";
     mail_ready?: boolean;
     live_evidence_present?: boolean;
   };
@@ -98,6 +99,7 @@ const summary = {
   edge_ready: receipt.status?.edge_ready ?? false,
   canary_receipts_verified: receipt.status?.canary_receipts_verified ?? false,
   operational_ready: receipt.status?.operational_ready ?? false,
+  delivery_cleanup: receipt.status?.delivery_cleanup ?? "not_checked",
   mail_ready: receipt.status?.mail_ready ?? false,
   domain_count: receipt.rows?.length ?? 0,
   gap_count: receipt.gaps?.length ?? 0,
@@ -126,6 +128,7 @@ if (jsonOutput) {
   console.log(`domains ${summary.domain_count}`);
   console.log(`local_truth_ok ${summary.local_truth_ok}`);
   console.log(`live_evidence_present ${summary.live_evidence_present}`);
+  console.log(`delivery_cleanup ${summary.delivery_cleanup}`);
   console.log(`edge_ready ${summary.edge_ready}`);
   console.log(`mail_ready ${summary.mail_ready}`);
   console.log(

@@ -11,6 +11,7 @@ export interface RouteInventoryRow extends RouteSnapshot {
   reply_identity: string;
   operators_json: string;
   reply_identity_bindings_json: string;
+  delivery_only_status?: string | null;
 }
 
 /** Full membership and operator parity are checked against Rust, never counts. */

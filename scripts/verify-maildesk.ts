@@ -111,6 +111,7 @@ interface ProofEvidence {
   alias?: string;
   envelope_to?: string;
   route_kind?: "role_alias" | "personal_alias" | "catch_all" | "sink";
+  delivery_only?: boolean;
   forwarded_to?: string[];
   forward_errors?: Array<{ recipient?: string; error?: string }>;
   default_reply_identity?: string;
@@ -182,8 +183,9 @@ interface RouteSummary {
   kind: RouteDecision["routeKind"];
   mailbox: string;
   operators: string[];
-  reply_identity: string;
+  reply_identity: string | null;
   allowed_reply_identities: string[];
+  delivery_only?: true;
   wired: Status;
 }
 
@@ -301,6 +303,11 @@ const readinessAuthorized = readbackAuthorizesReadiness(
   localProjection.desired_state_sha256,
   desiredState.domains.map((domain) => domain.name),
 );
+// Early cleanup is deliberately held until an exact-generation deletion or
+// independently qualified exclusive-writer contract exists. Do not let later
+// schema evidence accidentally turn a delivery-only candidate release-ready.
+const deliveryCleanup = canonicalPolicyRoutes(policy).some((route) => route.deliveryOnly)
+  ? "held_exact_generation_cleanup_unqualified" : "not_applicable";
 const receipt = {
   generated_at: new Date().toISOString(),
   policy_path: relativePath(policyPath),
@@ -313,7 +320,8 @@ const receipt = {
     edge_ready: edgeFailures.length === 0 && readinessAuthorized,
     canary_receipts_verified: mailFailures.length === 0 && readinessAuthorized,
     operational_ready: rows.length > 0 && rows.every((row) => row.operational_state === "ok"),
-    mail_ready: mailFailures.length === 0 && readinessAuthorized && rows.length > 0 && rows.every((row) => row.operational_state === "ok"),
+    delivery_cleanup: deliveryCleanup,
+    mail_ready: deliveryCleanup === "not_applicable" && mailFailures.length === 0 && readinessAuthorized && rows.length > 0 && rows.every((row) => row.operational_state === "ok"),
     live_evidence_present: liveEvidencePresent,
   },
   gaps,
@@ -329,6 +337,7 @@ if (jsonOutput) {
   console.log(`local_truth_ok ${receipt.status.local_truth_ok}`);
   console.log(`live_evidence_present ${receipt.status.live_evidence_present}`);
   console.log(`edge_ready ${receipt.status.edge_ready}`);
+  console.log(`delivery_cleanup ${receipt.status.delivery_cleanup}`);
   console.log(`mail_ready ${receipt.status.mail_ready}`);
 }
 
@@ -737,13 +746,19 @@ function checkWorkerBindings(live: LiveEvidence): Status {
 }
 
 function checkD1Queue(live: LiveEvidence): Status {
+  // This Worker reads migration 0018 tables even when the active policy is
+  // legacy. A storage-exists receipt or the older v1 table allowlist does not
+  // establish that schema. Missing coverage stays unverified, not "absent".
+  // The currently registered D1 evidence adapter has no 0018 ledger or DDL
+  // assertions. Even a list of table names cannot prove the required triggers.
+  // Keep this gate unverified until an owned, bound schema receipt exists.
   const storage = live.cfctl_maildesk?.storage;
   if (storage) {
     return storage.d1_database === "ok" &&
       storage.r2_spool_bucket === "ok" &&
       storage.queue === "ok" &&
       storage.dead_letter_queue === "ok"
-      ? "ok"
+      ? "not_checked"
       : "drift";
   }
   if (!live.readyz?.checks) return "not_checked";
@@ -751,7 +766,8 @@ function checkD1Queue(live: LiveEvidence): Status {
   if (!live.d1?.tables) return "not_checked";
 
   const requiredTables = APPROVED_RELAY_TABLES;
-  return requiredTables.every((table) => live.d1?.tables?.includes(table)) ? "ok" : "drift";
+  if (!requiredTables.every((table) => live.d1?.tables?.includes(table))) return "drift";
+  return "not_checked";
 }
 
 function requiredReadyzChecks(live: LiveEvidence, names: string[]): boolean {
@@ -778,12 +794,16 @@ function checkInboundProof(
   const result = routeInbound(policy, { envelopeTo: target, headerFrom: "operator@example.com" });
   if (!result.ok) return "drift";
   const route = canonicalPolicyRoutes(policy).find((entry) => entry.domain === result.value.domain && entry.localPart === result.value.localPart);
-  if (!route) return "drift";
+  if (!route || Boolean(proof.delivery_only) !== Boolean(route.deliveryOnly)) return "drift";
   const provider = desiredDomain?.inbound_mx_provider ?? "cloudflare_email_routing";
   if (route.routeKind === "sink") return proofMatchesSink(proof, false);
-  return provider === "cloudflare_email_routing"
-    ? proofMatchesInboxRelay(proof, route.routeKind, route.operators.length, route.defaultReplyIdentity, localPolicySha256)
-    : proofMatchesRoute(proof, route.routeKind, route.operators, route.defaultReplyIdentity, false);
+  if (provider === "cloudflare_email_routing") {
+    return proofMatchesInboxRelay(proof, route.routeKind, route.operators.length, route.deliveryOnly ? null : route.defaultReplyIdentity, localPolicySha256);
+  }
+  // Legacy external receipts establish at most group configuration, not a
+  // message's provider acceptance or independent recipient observation.
+  const configuration = proofMatchesRoute(proof, route.routeKind, route.operators, route.deliveryOnly ? null : route.defaultReplyIdentity, false);
+  return configuration === "ok" ? "not_checked" : configuration;
 
 }
 
@@ -791,13 +811,15 @@ function proofMatchesInboxRelay(
   proof: ProofEvidence,
   expectedRouteKind: RouteDecision["routeKind"],
   expectedOperatorCount: number,
-  expectedReplyIdentity: string,
+  expectedReplyIdentity: string | null,
   localPolicySha256: string,
 ): Status {
   if (proof.route_kind !== expectedRouteKind) return "drift";
   if (proof.operator_count !== expectedOperatorCount) return "drift";
   if (proof.policy_sha256 !== localPolicySha256) return "drift";
-  if (normalizeMailbox(proof.default_reply_identity ?? "") !== normalizeMailbox(expectedReplyIdentity)) {
+  if (expectedReplyIdentity === null
+      ? Boolean(proof.default_reply_identity)
+      : normalizeMailbox(proof.default_reply_identity ?? "") !== normalizeMailbox(expectedReplyIdentity)) {
     return "drift";
   }
   if (!proof.provider_accepted_at || !proof.inbox_verified_at) return "drift";
@@ -810,11 +832,13 @@ function proofMatchesRoute(
   proof: ProofEvidence,
   expectedRouteKind: RouteDecision["routeKind"],
   expectedOperators: string[],
-  expectedReplyIdentity: string,
+  expectedReplyIdentity: string | null,
   requireRawR2Key: boolean,
 ): Status {
   if (proof.route_kind && proof.route_kind !== expectedRouteKind) return "drift";
-  if (proof.default_reply_identity && normalizeMailbox(proof.default_reply_identity) !== normalizeMailbox(expectedReplyIdentity)) {
+  if (expectedReplyIdentity === null
+      ? Boolean(proof.default_reply_identity)
+      : Boolean(proof.default_reply_identity) && normalizeMailbox(proof.default_reply_identity!) !== normalizeMailbox(expectedReplyIdentity)) {
     return "drift";
   }
   if (proof.forward_errors && proof.forward_errors.length > 0) return "drift";
@@ -907,7 +931,8 @@ function replyIdentities(policy: PolicyFile, domain: string): string[] {
 function domainRoutes(policy: PolicyFile, domain: string, routingEvidence: RoutingEvidence | undefined): RouteSummary[] {
   return canonicalPolicyRoutes(policy).filter((route) => route.domain === domain).map((route) => ({
     kind: route.routeKind, mailbox: `${route.localPart}@${route.domain}`, operators: route.operators,
-    reply_identity: route.defaultReplyIdentity, allowed_reply_identities: route.allowedReplyIdentities,
+    reply_identity: route.deliveryOnly ? null : route.defaultReplyIdentity, allowed_reply_identities: route.allowedReplyIdentities,
+    ...(route.deliveryOnly ? { delivery_only: true as const } : {}),
     wired: route.localPart === "*" ? "not_checked" as const
       : checkRouting(route.routeKind === "personal_alias" ? routingEvidence?.personal_aliases : routingEvidence?.role_aliases, [route.localPart]),
   })).sort((left, right) => left.mailbox.localeCompare(right.mailbox));
@@ -1219,18 +1244,12 @@ function hasInboundProofEvidence(value: Record<string, ProofEvidence> | undefine
         proof.provider_message_ids.every((id) => typeof id === "string" && id.length > 0) &&
         typeof proof.provider_accepted_at === "string" &&
         typeof proof.inbox_verified_at === "string" &&
-        typeof proof.default_reply_identity === "string";
+        (proof.delivery_only === true
+          ? proof.route_kind === "role_alias" && !proof.default_reply_identity
+          : typeof proof.default_reply_identity === "string");
     }
-    return typeof proof.operator_count === "number" &&
-      Number.isInteger(proof.operator_count) &&
-      proof.operator_count >= 0 &&
-      typeof proof.operator_set_sha256 === "string" &&
-      /^[a-f0-9]{64}$/.test(proof.operator_set_sha256) &&
-      typeof proof.default_reply_identity === "string" &&
-      typeof proof.external_receipt_path === "string" &&
-      typeof proof.external_receipt_sha256 === "string" &&
-      /^[a-f0-9]{64}$/.test(proof.external_receipt_sha256) &&
-      typeof proof.audit_event_at === "string";
+    // No qualified external message-receipt contract is currently installed.
+    return false;
   });
 }
 

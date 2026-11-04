@@ -57,8 +57,9 @@ function checkRouter(desired: DesiredState): void {
   requireExactEmailBinding(config, path);
   requireExactTopLevelKeys(config, path, [
     "name", "main", "compatibility_date", "workers_dev", "send_email", "build", "vars",
-    "d1_databases", "r2_buckets", "queues",
+    "d1_databases", "r2_buckets", "queues", "triggers",
   ]);
+  requireRecoveryCron(config, path);
   forbid(config, path, /\[\[queues\.consumers\]\]/, "Queue consumer");
   forbid(config, path, /^routes\s*=/m, "public HTTP route");
   forbid(config, path, /^preview_database_id\s*=/m, "preview D1 binding");
@@ -200,6 +201,21 @@ function requireExactEmailBinding(config: string, path: string): void {
         (bindings[0] as Record<string, unknown>).name !== "EMAIL" ||
         Object.keys(bindings[0] as Record<string, unknown>).length !== 1) {
       failures.push(`${path} send_email must contain exactly the EMAIL binding`);
+    }
+  } catch (error) {
+    failures.push(`${path} must be valid TOML: ${detail(error)}`);
+  }
+}
+
+function requireRecoveryCron(config: string, path: string): void {
+  try {
+    const parsed = Bun.TOML.parse(config) as Record<string, unknown>;
+    const triggers = parsed.triggers;
+    if (!triggers || typeof triggers !== "object" || Array.isArray(triggers) ||
+        Object.keys(triggers).length !== 1 || !Array.isArray((triggers as Record<string, unknown>).crons) ||
+        ((triggers as Record<string, unknown>).crons as unknown[]).length !== 1 ||
+        ((triggers as Record<string, unknown>).crons as unknown[])[0] !== "*/10 * * * *") {
+      failures.push(`${path} must contain exactly the delivery recovery cron`);
     }
   } catch (error) {
     failures.push(`${path} must be valid TOML: ${detail(error)}`);

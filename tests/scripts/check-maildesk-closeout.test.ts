@@ -7,6 +7,34 @@ import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dir, "../..");
 
 describe("maildesk closeout gate", () => {
+  test("explicitly inapplicable delivery cleanup permits an otherwise ready summary", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-cleanup-"));
+    const summaryPath = join(dir, "summary.json");
+    writeJson(summaryPath, { local_truth_ok: true, live_evidence_present: true, edge_ready: true, mail_ready: true, delivery_cleanup: "not_applicable" });
+    const result = spawnSync("bun", ["run", "scripts/check-maildesk-closeout.ts", "--", "--summary", summaryPath, "--skip-ack-dry-run", "--preflight-command", fakePreflight(0, "", "preflight ok: production\n"), "--json"], { cwd: root, encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).blockers).not.toContainEqual({ kind: "delivery_cleanup_unqualified" });
+  });
+
+  test("missing delivery cleanup assessment blocks a stale ready summary", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-cleanup-"));
+    const summaryPath = join(dir, "summary.json");
+    writeJson(summaryPath, { local_truth_ok: true, live_evidence_present: true, edge_ready: true, mail_ready: true });
+    const result = spawnSync("bun", ["run", "scripts/check-maildesk-closeout.ts", "--", "--summary", summaryPath, "--skip-ack-dry-run", "--preflight-command", fakePreflight(0, "", "preflight ok: production\n"), "--json"], { cwd: root, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout).blockers).toContainEqual({ kind: "delivery_cleanup_unqualified" });
+  });
+
+  test("held delivery cleanup blocks closeout even if a summary claims mail readiness", () => {
+    const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-cleanup-"));
+    const summaryPath = join(dir, "summary.json");
+    writeJson(summaryPath, { local_truth_ok: true, live_evidence_present: true, edge_ready: true, mail_ready: true, delivery_cleanup: "held_exact_generation_cleanup_unqualified" });
+    const result = spawnSync("bun", ["run", "scripts/check-maildesk-closeout.ts", "--", "--summary", summaryPath, "--skip-ack-dry-run", "--preflight-command", fakePreflight(0, "", "preflight ok: production\n"), "--json"], { cwd: root, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    const closeout = JSON.parse(result.stdout) as { ready: boolean; blockers: Array<{ kind: string }> };
+    expect(closeout.ready).toBe(false);
+    expect(closeout.blockers).toContainEqual({ kind: "delivery_cleanup_unqualified" });
+  });
   test("reports protected sender-domain applies without applying them", () => {
     const dir = mkdtempSync(join(tmpdir(), "maildesk-closeout-"));
     const summaryPath = join(dir, "summary.json");
