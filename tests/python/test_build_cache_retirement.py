@@ -389,7 +389,10 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "SETTLED_CACHE_RETAINED")
         self.assertEqual(receipt["settlement_sha256"], cache.sha(output / "settlement.json"))
 
+    @mock.patch.dict(os.environ)
     def test_ordinary_full_ci_retained_completion_skips_retirement_and_r2(self):
+        # This disposable ordinary-mode fixture is not the enclosing R2 CI.
+        os.environ.pop("MAILDESK_SOURCE_QUALIFICATION", None)
         self.lifecycle_settings(include_qualification=False)
         self.assertFalse((self.repo / "scripts/source_qualification.py").exists())
         fixture_env = dict(os.environ); fixture_env.pop("PYTHONPATH", None)
@@ -426,7 +429,10 @@ class RetirementTests(unittest.TestCase):
         for name in ("retirement-plan.json", "retirement-receipt.json", "qualification-inputs.json", "qualification-capture.json", "qualification-lifecycle.json"):
             self.assertFalse((proof / name).exists(), name)
 
+    @mock.patch.dict(os.environ)
     def test_ordinary_retained_ci_requires_complete_exact_settlement(self):
+        # Restore the enclosing marker when this synthetic fixture returns.
+        os.environ.pop("MAILDESK_SOURCE_QUALIFICATION", None)
         self.lifecycle_settings()
         base = {"status": "SETTLED", "command_exit": 0, "stream_eof": ["stdout", "stderr"], "errors": [],
                 "live_generations": [], "exact_reservation_released": True, "launch_acknowledged": True,
@@ -454,6 +460,14 @@ class RetirementTests(unittest.TestCase):
             (self.repo / "var/request.json").read_text(), ["bash", "scripts/ci.sh"], (), policy=self.policy,
             supervise=failed, ci_completion="settled-retained"), 7)
         self.assertTrue(self.first.exists())
+
+    def test_ordinary_retained_ci_rejects_qualification_marker_before_launch(self):
+        self.lifecycle_settings()
+        with mock.patch.dict(os.environ, {"MAILDESK_SOURCE_QUALIFICATION": "1"}), \
+             self.assertRaisesRegex(RuntimeError, "no pin dispositions or qualification marker"):
+            operation(self.repo, self.repo / "var/proof/ordinary-marker", "fixture",
+                (self.repo / "var/request.json").read_text(), ["bash", "scripts/ci.sh"], (),
+                policy=self.policy, ci_completion="settled-retained", supervise=lambda *args, **kwargs: self.fail("launched"))
 
     def test_ordinary_retained_setting_is_ci_only_and_rejects_unknown_values(self):
         self.lifecycle_settings()
