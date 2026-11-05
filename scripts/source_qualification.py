@@ -305,7 +305,8 @@ def publication_environment_binding(environment, *, repo, remote_name, remote_ur
         raise ValueError("dispatcher result path is invalid")
     path = Path(result)
     if (not path.is_absolute() or path.name != "result.json" or not re.fullmatch(r"ops-hooks-[a-z0-9_]{8}", path.parent.name) or
-            path.parent.is_symlink() or path.parent.resolve(strict=True).parent != Path(tempfile.gettempdir()).resolve(strict=True) or
+            path.parent.parent != Path(tempfile.gettempdir()) or path.parent.is_symlink() or
+            path.parent.resolve(strict=True).parent != Path(tempfile.gettempdir()).resolve(strict=True) or
             path.exists() or path.is_symlink()):
         raise ValueError("dispatcher result path is outside the temporary result scope")
     info = path.parent.stat()

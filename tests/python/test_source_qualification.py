@@ -65,6 +65,22 @@ class EnvironmentBindingTests(unittest.TestCase):
                 expected = bind(env)
                 with tempfile.TemporaryDirectory(prefix="ops-hooks-") as other:
                     self.assertEqual(expected, bind({**env, "OPS_HOOK_JOB": json.dumps({**job, "result_path": str(Path(other) / "result.json")})}))
+                # A sibling alias may resolve to the same owner-only directory,
+                # but is not the directory allocated by the dispatcher.
+                with tempfile.TemporaryDirectory(prefix="ops-hooks-") as alias:
+                    alias_path = Path(alias)
+                    alias_path.rmdir()
+                    alias_path.symlink_to(Path(output), target_is_directory=True)
+                    try:
+                        linked = {**job, "result_path": str(alias_path / "result.json")}
+                        with self.assertRaisesRegex(ValueError, "result path"):
+                            bind({**env, "OPS_HOOK_JOB": json.dumps(linked)})
+                    finally:
+                        alias_path.unlink()
+                        alias_path.mkdir(mode=0o700)
+                noncanonical = {**job, "result_path": str(Path(output) / ".." / Path(output).name / "result.json")}
+                with self.assertRaisesRegex(ValueError, "result path"):
+                    bind({**env, "OPS_HOOK_JOB": json.dumps(noncanonical)})
                 for name in ("OPS_HOOK_PYTHON", "OPS_HOOK_WORKER", "LEFTHOOK_CONFIG", "LEFTHOOK_OUTPUT", "LEFTHOOK_EXCLUDE"):
                     with self.subTest(name=name), self.assertRaises(ValueError):
                         bind({**env, name: "unexpected"})
