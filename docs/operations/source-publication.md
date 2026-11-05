@@ -113,3 +113,15 @@ standalone `--print-publication-environment REMOTE URL` command requires the
 same validated dispatcher context and is not a substitute for the global chain.
 The actual global-chain route and independent pin must still be qualified after
 registration; a disposable dispatcher fixture is narrower evidence.
+
+For a deliberately refused environment diagnostic, an operator may set the
+local Git configuration `maildesk.sourcePublicationDiagnostic` to exactly
+`true` after reviewing this source and the pinned hook. After the normal chain
+and dispatcher validations, the diagnostic emits a bounded report containing
+only projected key names and SHA-256 value hashes, aggregate digest, exact
+candidate identity, hashes of remote arguments and hook input, and hashes of
+the selected controls and configured pins. It always refuses before any approval
+can authorize publication. No raw environment values are printed. The local
+setting must be removed through normal configuration before a later publication;
+invalid or repeated settings hold. A diagnostic observation does not recreate a
+previous process environment, create authority, or replace independent review.

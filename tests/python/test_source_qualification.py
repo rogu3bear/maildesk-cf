@@ -3,6 +3,8 @@ import sys
 import tempfile
 import unittest
 import copy
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -58,11 +60,17 @@ class EnvironmentBindingTests(unittest.TestCase):
                    "LEFTHOOK_OUTPUT": "failure,execution", "LEFTHOOK_EXCLUDE": "", "OPS_HOOK_WORKER": str(release / "hooks.py"),
                    "OPS_HOOK_PYTHON": "/opt/homebrew/opt/python@3.14/bin/python3.14", "PYTHONDONTWRITEBYTECODE": "1",
                    "OPS_HOOK_JOB": json.dumps(job)}
-            def bind(value):
-                return qualification.publication_environment_binding(value, repo=repo, remote_name="origin", remote_url="https://example.invalid/repo")
+            def bind(value, **kwargs):
+                return qualification.publication_environment_binding(value, repo=repo, remote_name="origin", remote_url="https://example.invalid/repo", **kwargs)
             with mock.patch.object(Path, "home", return_value=home), \
                  mock.patch.object(qualification, "DISPATCHER_FILES", contract):
                 expected = bind(env)
+                detailed = bind({**env, "SECRET_TEST": "private-value"}, include_components=True)
+                self.assertEqual(detailed["sha256"], bind({**env, "SECRET_TEST": "private-value"})["sha256"])
+                self.assertEqual(detailed["value_sha256"]["SECRET_TEST"], qualification.bytes_sha256(b"private-value"))
+                self.assertNotIn("private-value", json.dumps(detailed))
+                with self.assertRaisesRegex(ValueError, "diagnostic projection exceeds"):
+                    bind({**env, "BIG_TEST": "x" * 65537}, include_components=True)
                 with tempfile.TemporaryDirectory(prefix="ops-hooks-") as other:
                     self.assertEqual(expected, bind({**env, "OPS_HOOK_JOB": json.dumps({**job, "result_path": str(Path(other) / "result.json")})}))
                 # A sibling alias may resolve to the same owner-only directory,
@@ -490,9 +498,46 @@ class PublicationGateTests(unittest.TestCase):
             root = Path(directory).resolve()
             with mock.patch.object(qualification, "capture_current", side_effect=AssertionError("unexpected observation")), \
                  mock.patch.object(qualification, "publication_environment_binding", return_value={"sha256": "a" * 64}), \
+                 mock.patch.object(qualification, "diagnostic_requested", return_value=False), \
                  mock.patch.object(qualification, "_command", side_effect=AssertionError("unexpected command")):
                 with self.assertRaises((ValueError, FileNotFoundError)):
                     qualification.verify_publication(root, {}, "origin", "https://example.com/repo.git", "")
+
+    def test_diagnostic_always_refuses_before_approval_evaluation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            value = {"schema": "fixture", "secret": "never-print-this"}
+            binding = {"schema": "maildesk-publication-environment/v1", "sha256": "a" * 64,
+                       "value_sha256": {"SECRET_NAME": qualification.bytes_sha256(b"never-print-this")}}
+            output = io.StringIO()
+            with mock.patch.object(qualification, "diagnostic_requested", return_value=True), \
+                 mock.patch.object(qualification, "publication_environment_binding", return_value=binding) as collect, \
+                 mock.patch.object(qualification, "publication_source", return_value=("b" * 40, "c" * 40)), \
+                 mock.patch.object(qualification, "read_approval", return_value=value), \
+                 mock.patch.object(qualification, "_command", return_value=("d" * 64 + "\n").encode()), \
+                 mock.patch.object(qualification, "check_chain", side_effect=AssertionError("approval evaluated")), \
+                 contextlib.redirect_stderr(output):
+                with self.assertRaisesRegex(ValueError, "diagnostic only; publication always refused"):
+                    qualification.verify_publication(root, {"SECRET_NAME": "never-print-this"}, "origin", "https://example.invalid/repo", "row")
+            self.assertTrue(collect.call_args.kwargs["include_components"])
+            lines = output.getvalue().splitlines()
+            report = json.loads(lines[-1])
+            self.assertEqual(report["status"], "DIAGNOSTIC_REFUSED")
+            self.assertEqual(report["projection"], binding)
+            self.assertNotIn("never-print-this", output.getvalue())
+
+    def test_diagnostic_config_requires_one_exact_true_value(self):
+        with mock.patch.object(qualification, "_command", return_value=b""):
+            self.assertFalse(qualification.diagnostic_requested(Path("/fixture"), {}))
+        with mock.patch.object(qualification, "_command", return_value=b"true\n"):
+            self.assertTrue(qualification.diagnostic_requested(Path("/fixture"), {}))
+        missing = subprocess.CalledProcessError(1, ["git", "config"], output=b"")
+        with mock.patch.object(qualification, "_command", side_effect=missing):
+            self.assertFalse(qualification.diagnostic_requested(Path("/fixture"), {}))
+        for raw in (b"false\n", b"true\ntrue\n", b"TRUE\n"):
+            with self.subTest(raw=raw), mock.patch.object(qualification, "_command", return_value=raw):
+                with self.assertRaises(ValueError):
+                    qualification.diagnostic_requested(Path("/fixture"), {})
 
     def test_normal_gate_requires_separate_pins_and_exact_run_ref_and_incident(self):
         helper = QualificationBindingTests()
@@ -540,6 +585,7 @@ class PublicationGateTests(unittest.TestCase):
                 raise AssertionError(argv)
             row = f"{target} {head} {target} {remote}\n"
             with mock.patch.object(qualification, "_command", side_effect=command), \
+                 mock.patch.object(qualification, "diagnostic_requested", return_value=False), \
                  mock.patch.object(qualification, "publication_source", return_value=(head, bindings["tree"])), \
                  mock.patch.object(qualification, "publication_environment_binding", side_effect=lambda env, **kw: {"sha256": "a" * 64 if not env else "f" * 64}), \
                  mock.patch.object(qualification, "capture_current", side_effect=AssertionError("push must not read build products")):

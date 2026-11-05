@@ -16,7 +16,6 @@ import time
 
 import build_cache_retirement as retirement
 import build_settlement as settlement
-import source_qualification as qualification
 
 
 def profile_for(repo, command):
@@ -35,7 +34,7 @@ def profile_for(repo, command):
     return None
 
 
-def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run, pin_dispositions=(), retain_cache=False):
+def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run, pin_dispositions=(), retain_cache=False, ci_completion="retire"):
     """The production CLI fixes repo/policy; disposable fixtures inject their own."""
     if repo.resolve() != repo or output.resolve() != output or not output.is_relative_to(repo / "var/proof"):
         raise RuntimeError("Operation proof must remain in the canonical repository's ignored var/proof")
@@ -46,6 +45,10 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
     profile = profile_for(repo, command)
     if retain_cache and profile != "ci":
         raise RuntimeError("Retained qualification requires the complete CI consumer chain")
+    if ci_completion not in ("retire", "settled-retained") or (ci_completion == "settled-retained" and (profile != "ci" or retain_cache)):
+        raise RuntimeError("Ordinary retained completion requires full CI and no source qualification")
+    if ci_completion == "settled-retained" and (pin_dispositions or "MAILDESK_SOURCE_QUALIFICATION" in os.environ or before.get("status") != ""):
+        raise RuntimeError("Ordinary retained CI requires clean source and no pin dispositions or qualification marker")
     approved_pins = json.loads(json.dumps(list(pin_dispositions)))
     environment = dict(os.environ)
     component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
@@ -56,9 +59,10 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         "resource_request": json.loads(resource), "resource_request_sha256": hashlib.sha256(resource.encode()).hexdigest(),
         "authorization": authorization, "consumer_profile": profile, "approved_pin_dispositions": approved_pins,
         "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
-        "environment_names": sorted(environment), "retained_qualification": retain_cache,
+        "environment_names": sorted(environment), "retained_qualification": retain_cache, "ci_completion": ci_completion,
         "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
-            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py", "source_qualification.py")},
+            (("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py") +
+             (("source_qualification.py",) if retain_cache else ()))},
         "retained_obligations": ["source and dirty bytes", "sessions", "locks", "products and releases", "failure diagnostics", "proof", "unknowns"]})
     inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
     code, settled = supervise(["disk-guard", "run", "--resource-request", resource, "--", *inner],
@@ -73,7 +77,18 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         return 78
     if retirement.git_state(repo) != before:
         raise RuntimeError("Outer operation changed source; preserve outputs for reconciliation")
+    if ci_completion == "settled-retained":
+        recorded = retirement.read_plan(output / "settlement.json")
+        if (recorded != settled or recorded.get("command_exit") != 0 or
+                sorted(recorded.get("stream_eof", [])) != ["stderr", "stdout"] or
+                recorded.get("errors") != [] or recorded.get("live_generations") != [] or
+                recorded.get("exact_reservation_released") is not True or
+                recorded.get("launch_acknowledged") is not True or recorded.get("owner_outside_reservation") is not True):
+            raise RuntimeError("Ordinary retained CI requires the exact complete settled receipt")
+        print(json.dumps({"status": "CI_SETTLED_CACHE_RETAINED", "proof": str(output)}))
+        return 0
     if retain_cache:
+        import source_qualification as qualification
         recorded_settlement = retirement.read_plan(output / "settlement.json")
         if recorded_settlement != settled or recorded_settlement.get("command_exit") != 0:
             raise RuntimeError("Retained qualification requires the exact settled receipt")

@@ -186,7 +186,8 @@ local lifecycle in ignored `var/build-cache-retirement.json`:
 }
 ```
 
-The reference must identify real authorization to retire ordinary compiler cache.
+The reference must identify real authorization for the operation; when retirement
+is selected, it must authorize retirement of ordinary compiler cache.
 Use the existing complete resource request and its unchanged growth estimate.
 `pin_dispositions` contains only exact independently authorized dispositions for
 this target; an empty list preserves all pins. Never derive permission by copying
@@ -194,7 +195,13 @@ the live policy's pins. A new pin or changed pin identity holds cleanup instead
 of inheriting an older approval. The actual policy and dispositions are rechecked
 inside the held installed exclusion for every fresh transaction.
 Configured standalone package commands own admission and automatically qualify
-retirement after success; no additional cleanup arguments are needed. Each run
+retirement after success; no additional cleanup arguments are needed. A host may
+instead set `"ci_completion": "settled-retained"` in that local configuration
+to retain compiler cache after ordinary full CI. This mode succeeds only on the
+exact clean full-CI command with a complete, genuinely settled lifecycle; it does
+not adopt pin dispositions, invoke retirement, or create source-publication
+qualification evidence. Other package workflows keep their existing behavior.
+Do not use a retained-CI receipt as a source-publication or deployment approval. Each run
 keeps a fresh record under `var/proof/build-lifecycle-*`. Without local activation,
 template builds retain their original behavior and report that cleanup is not
 configured. Direct `bash scripts/ci.sh`, `bash scripts/build-ui-edge.sh` and

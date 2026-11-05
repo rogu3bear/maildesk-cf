@@ -289,9 +289,11 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual((cache.metadata(product), cache.sha(product)), (identity, digest))
 
-    def lifecycle_settings(self):
+    def lifecycle_settings(self, *, include_qualification=True):
         scripts = self.repo / "scripts"; scripts.mkdir(exist_ok=True)
-        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py", "source_qualification.py"]
+        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py"]
+        if include_qualification:
+            names.append("source_qualification.py")
         for name in names:
             (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         cache.run(["git", "add", *["scripts/" + n for n in names]], self.repo)
@@ -387,6 +389,83 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "SETTLED_CACHE_RETAINED")
         self.assertEqual(receipt["settlement_sha256"], cache.sha(output / "settlement.json"))
 
+    def test_ordinary_full_ci_retained_completion_skips_retirement_and_r2(self):
+        self.lifecycle_settings(include_qualification=False)
+        self.assertFalse((self.repo / "scripts/source_qualification.py").exists())
+        fixture_env = dict(os.environ); fixture_env.pop("PYTHONPATH", None)
+        help_result = subprocess.run([sys.executable, "-B", str(self.repo / "scripts/build-and-retire.py"), "--help"],
+                                     cwd=self.repo, env=fixture_env, capture_output=True, text=True)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        config = self.repo / "var/build-cache-retirement.json"
+        value = json.loads(config.read_text()); value["ci_completion"] = "settled-retained"; config.write_text(json.dumps(value))
+        def observed(argv, *, output, env, **kwargs):
+            self.assertEqual(argv[-2:], ["bash", "scripts/ci.sh"])
+            self.assertNotIn("MAILDESK_SOURCE_QUALIFICATION", env)
+            receipt = {"status": "SETTLED", "command_exit": 0, "stream_eof": ["stdout", "stderr"],
+                       "errors": [], "live_generations": [], "exact_reservation_released": True,
+                       "launch_acknowledged": True, "owner_outside_reservation": True}
+            (output / "settlement.json").write_text(json.dumps(receipt))
+            return 0, receipt
+        def outer(repo, output, authorization, resource, command, keep, **options):
+            self.assertEqual(options, {"pin_dispositions": [], "ci_completion": "settled-retained"})
+            return operation(repo, output, authorization, resource, command, keep, policy=self.policy, supervise=observed, **options)
+        native_fds = cache.inherited_fds
+        with mock.patch.object(cache, "inherited_fds", side_effect=lambda env: () if env is os.environ else native_fds(env)), \
+             mock.patch.object(cache, "prepare", side_effect=AssertionError("retirement must not run")), \
+             mock.patch.object(cache, "exclusion", side_effect=AssertionError("exclusion must not run")), \
+             mock.patch.object(cache, "apply", side_effect=AssertionError("retirement must not run")), \
+             mock.patch.dict(os.environ, {"MAILDESK_BUILD_LIFETIME_PROOF": ""}):
+            self.assertEqual(workflow["workflow"](self.repo, "ci", [], outer=outer), 0)
+        proof, = (self.repo / "var/proof").glob("build-lifecycle-*")
+        record = json.loads((proof / "operation.json").read_text())
+        self.assertEqual(record["approved_pin_dispositions"], [])
+        self.assertEqual(record["ci_completion"], "settled-retained")
+        self.assertNotIn("source_qualification.py", record["finalizer_sha256"])
+        self.assertFalse(record["retained_qualification"])
+        self.assertTrue(self.first.exists())
+        for name in ("retirement-plan.json", "retirement-receipt.json", "qualification-inputs.json", "qualification-capture.json", "qualification-lifecycle.json"):
+            self.assertFalse((proof / name).exists(), name)
+
+    def test_ordinary_retained_ci_requires_complete_exact_settlement(self):
+        self.lifecycle_settings()
+        base = {"status": "SETTLED", "command_exit": 0, "stream_eof": ["stdout", "stderr"], "errors": [],
+                "live_generations": [], "exact_reservation_released": True, "launch_acknowledged": True,
+                "owner_outside_reservation": True}
+        for index, (field, change) in enumerate((("stream_eof", ["stdout"]), ("errors", ["unknown"]),
+                ("live_generations", [{"pid": 1}]), ("exact_reservation_released", False),
+                ("launch_acknowledged", False), ("owner_outside_reservation", False))):
+            receipt = {**base, field: change}
+            def observed(argv, *, output, **kwargs):
+                (output / "settlement.json").write_text(json.dumps(receipt))
+                return 0, receipt
+            output = self.repo / "var/proof" / ("ordinary-unproved-" + str(index))
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, "complete settled receipt"):
+                operation(self.repo, output, "fixture", (self.repo / "var/request.json").read_text(),
+                          ["bash", "scripts/ci.sh"], (), policy=self.policy, supervise=observed, ci_completion="settled-retained")
+            self.assertFalse((output / "retirement-plan.json").exists())
+        def unknown(argv, *, output, **kwargs):
+            return 0, {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED"}
+        self.assertEqual(operation(self.repo, self.repo / "var/proof/ordinary-unknown", "fixture",
+            (self.repo / "var/request.json").read_text(), ["bash", "scripts/ci.sh"], (), policy=self.policy,
+            supervise=unknown, ci_completion="settled-retained"), 78)
+        def failed(argv, *, output, **kwargs):
+            return 7, {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED"}
+        self.assertEqual(operation(self.repo, self.repo / "var/proof/ordinary-failed", "fixture",
+            (self.repo / "var/request.json").read_text(), ["bash", "scripts/ci.sh"], (), policy=self.policy,
+            supervise=failed, ci_completion="settled-retained"), 7)
+        self.assertTrue(self.first.exists())
+
+    def test_ordinary_retained_setting_is_ci_only_and_rejects_unknown_values(self):
+        self.lifecycle_settings()
+        config = self.repo / "var/build-cache-retirement.json"
+        value = json.loads(config.read_text()); value["ci_completion"] = "invalid"; config.write_text(json.dumps(value))
+        with self.assertRaisesRegex(RuntimeError, "CI completion"):
+            workflow["settings"](self.repo)
+        with self.assertRaisesRegex(RuntimeError, "requires full CI"):
+            operation(self.repo, self.repo / "var/proof/non-ci-ordinary", "fixture",
+                (self.repo / "var/request.json").read_text(), ["bun", "scripts/preflight.ts"], (),
+                policy=self.policy, ci_completion="settled-retained", supervise=lambda *args, **kwargs: self.fail("launched"))
+
     def test_retained_qualification_never_accepts_unproved_settlement(self):
         self.lifecycle_settings()
         def unproved(argv, *, output, **kwargs):
@@ -437,6 +516,8 @@ class RetirementTests(unittest.TestCase):
 
     def test_nested_and_external_active_lifetimes_never_retire_between_consumers(self):
         self.lifecycle_settings()
+        config = self.repo / "var/build-cache-retirement.json"
+        settings = json.loads(config.read_text()); settings["ci_completion"] = "settled-retained"; config.write_text(json.dumps(settings))
         cache.save(self.proof / "operation.json", {"resource_request": {"working_directory": str(self.repo)}})
         def consumer(command, **kwargs):
             self.assertTrue(self.first.exists())

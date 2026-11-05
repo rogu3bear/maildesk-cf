@@ -274,7 +274,7 @@ def environment_binding(environment, *, ci_child=False):
     return {"schema": "maildesk-source-environment/v1", "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def publication_environment_binding(environment, *, repo, remote_name, remote_url):
+def publication_environment_binding(environment, *, repo, remote_name, remote_url, include_components=False):
     """Bind the admitted job and all controls, omitting only its output path.
 
     This validates a fixed installed dispatcher contract; it does not prove
@@ -316,7 +316,32 @@ def publication_environment_binding(environment, *, repo, remote_name, remote_ur
                  if key not in {"SHLVL", "_", "OLDPWD", "NO_COLOR", "OPS_HOOK_JOB"}}
     projected["OPS_HOOK_JOB"] = json.dumps({key: value for key, value in job.items() if key != "result_path"},
                                            sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return {"schema": "maildesk-publication-environment/v1", "sha256": environment_binding(projected)["sha256"]}
+    binding = {"schema": "maildesk-publication-environment/v1", "sha256": environment_binding(projected)["sha256"]}
+    if include_components:
+        if (len(projected) > 256 or any(not isinstance(key, str) or not isinstance(value, str) or
+                len(key.encode()) > 256 or len(value.encode()) > 65536 or
+                any(ord(ch) < 32 or ord(ch) == 127 for ch in key) for key, value in projected.items()) or
+                len(json.dumps(projected, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()) > 1_048_576):
+            raise ValueError("diagnostic projection exceeds its bounds")
+        binding["value_sha256"] = {key: bytes_sha256(value.encode()) for key, value in sorted(projected.items())}
+    return binding
+
+
+def diagnostic_requested(repo, environment):
+    """Read a local opt-in; any ambiguous setting holds rather than publishing."""
+    try:
+        raw = _command(["git", "config", "--local", "--get-all", "maildesk.sourcePublicationDiagnostic"],
+                       cwd=repo, environment=environment)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 1 and not error.stdout:
+            return False
+        raise ValueError("diagnostic setting unavailable") from error
+    values = raw.decode().splitlines()
+    if not values:
+        return False
+    if values != ["true"]:
+        raise ValueError("diagnostic setting must be exactly one true value")
+    return True
 
 
 def file_bindings(root, paths):
@@ -593,16 +618,30 @@ def verify_publication(repo, environment, remote_name, remote_url, stdin_text):
     repo = Path(repo)
     if not repo.is_absolute() or repo.resolve(strict=True) != repo:
         raise ValueError("repository path must be canonical")
-    # A no-network invocation of the installed global hook with empty ref input
-    # can expose this digest for independent approval; it grants no authority.
-    publication_environment = publication_environment_binding(environment, repo=repo, remote_name=remote_name, remote_url=remote_url)["sha256"]
-    print("source publication environment sha256: " + publication_environment, file=sys.stderr)
     config_env = {key: value for key, value in environment.items() if not key.startswith("GIT_")}
+    diagnostic = diagnostic_requested(repo, config_env)
+    binding = publication_environment_binding(environment, repo=repo, remote_name=remote_name,
+                                              remote_url=remote_url, include_components=diagnostic)
+    publication_environment = binding["sha256"]
+    print("source publication environment sha256: " + publication_environment, file=sys.stderr)
     def pin(name):
         values = _command(["git", "config", "--local", "--get-all", name], cwd=repo, environment=config_env).decode().splitlines()
         if len(values) != 1 or not re.fullmatch(r"[0-9a-f]{64}", values[0]):
             raise ValueError("required independent pin is unavailable")
         return values[0]
+    if diagnostic:
+        head, tree = publication_source(repo, environment)
+        controls = {name: object_sha256(read_approval(repo / "var/source-publication" / (name + ".json")))
+                    for name in ("selection", "approval", "review")}
+        pins = {name: pin("maildesk.sourcePublication" + name.capitalize() + "Sha256")
+                for name in ("selection", "approval", "review")}
+        report = {"schema": "maildesk-publication-environment-diagnostic/v1", "status": "DIAGNOSTIC_REFUSED",
+                  "head": head, "tree": tree, "remote_name_sha256": bytes_sha256(remote_name.encode()),
+                  "remote_url_sha256": bytes_sha256(remote_url.encode()), "stdin_sha256": bytes_sha256(stdin_text.encode()),
+                  "controls_canonical_sha256": controls, "configured_pins": pins,
+                  "projection": binding}
+        print(json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=True), file=sys.stderr)
+        raise ValueError("diagnostic only; publication always refused")
     selection = read_approval(repo / "var/source-publication/selection.json")
     approval = read_approval(repo / "var/source-publication/approval.json")
     review = read_approval(repo / "var/source-publication/review.json")
