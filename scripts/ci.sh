@@ -22,6 +22,11 @@ step() { printf '\n==> %s\n' "$1"; }
 step "bun install --frozen-lockfile"
 bun install --frozen-lockfile
 
+if [[ "${MAILDESK_SOURCE_QUALIFICATION:-}" == 1 ]]; then
+  step "capture qualification inputs before checks"
+  python3 -B scripts/source_qualification.py --capture-inputs
+fi
+
 step "cargo fmt --check"
 cargo fmt --check
 
@@ -55,5 +60,10 @@ python3 -B -m unittest discover -s tests/python -p 'test_*.py'
 
 step "scripts/check-template.sh"
 bash scripts/check-template.sh --reuse-worker-bundles
+
+if [[ "${MAILDESK_SOURCE_QUALIFICATION:-}" == 1 ]]; then
+  step "capture run-bound source qualification inputs"
+  python3 -B scripts/source_qualification.py --capture-results
+fi
 
 printf '\nlocal CI OK\n'

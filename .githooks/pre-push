@@ -19,9 +19,8 @@ else
 fi
 unset GIT_GUARDS_PUSH_STDIN
 # --- end global git guards chain ---
-# Local CI gate: run the full check suite before every push.
-# Activate once per clone:  git config core.hooksPath .githooks
-# Bypass a single push with: git push --no-verify
+# Source publication requires an independently reviewed, exact-candidate full
+# qualification. Missing or changed records hold; this hook does not rerun CI.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec bash "$ROOT_DIR/scripts/ci.sh"
+exec python3 -B "$ROOT_DIR/scripts/source_qualification.py" --verify-push "$@"

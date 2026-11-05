@@ -16,6 +16,7 @@ import time
 
 import build_cache_retirement as retirement
 import build_settlement as settlement
+import source_qualification as qualification
 
 
 def profile_for(repo, command):
@@ -34,7 +35,7 @@ def profile_for(repo, command):
     return None
 
 
-def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run, pin_dispositions=()):
+def operation(repo, output, authorization, resource, command, keep, *, policy=None, supervise=settlement.run, pin_dispositions=(), retain_cache=False):
     """The production CLI fixes repo/policy; disposable fixtures inject their own."""
     if repo.resolve() != repo or output.resolve() != output or not output.is_relative_to(repo / "var/proof"):
         raise RuntimeError("Operation proof must remain in the canonical repository's ignored var/proof")
@@ -43,17 +44,21 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
     output.mkdir(mode=0o700, exist_ok=False)
     before = retirement.git_state(repo)
     profile = profile_for(repo, command)
+    if retain_cache and profile != "ci":
+        raise RuntimeError("Retained qualification requires the complete CI consumer chain")
     approved_pins = json.loads(json.dumps(list(pin_dispositions)))
     environment = dict(os.environ)
     component = {"scripts/ci.sh": "ci", "scripts/build-ui-edge.sh": "build:ui", "scripts/check-template.sh": "template"}.get(command[1] if len(command) > 1 and command[0] == "bash" else "", "composition")
     environment.update(MAILDESK_BUILD_LIFETIME_PROOF=str(output), MAILDESK_BUILD_COMPONENT=component)
+    if retain_cache:
+        environment["MAILDESK_SOURCE_QUALIFICATION"] = "1"
     retirement.save(output / "operation.json", {"source": before, "command": command,
         "resource_request": json.loads(resource), "resource_request_sha256": hashlib.sha256(resource.encode()).hexdigest(),
         "authorization": authorization, "consumer_profile": profile, "approved_pin_dispositions": approved_pins,
         "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
-        "environment_names": sorted(environment),
+        "environment_names": sorted(environment), "retained_qualification": retain_cache,
         "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
-            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py")},
+            ("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py", "source_qualification.py")},
         "retained_obligations": ["source and dirty bytes", "sessions", "locks", "products and releases", "failure diagnostics", "proof", "unknowns"]})
     inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
     code, settled = supervise(["disk-guard", "run", "--resource-request", resource, "--", *inner],
@@ -68,6 +73,27 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         return 78
     if retirement.git_state(repo) != before:
         raise RuntimeError("Outer operation changed source; preserve outputs for reconciliation")
+    if retain_cache:
+        recorded_settlement = retirement.read_plan(output / "settlement.json")
+        if recorded_settlement != settled or recorded_settlement.get("command_exit") != 0:
+            raise RuntimeError("Retained qualification requires the exact settled receipt")
+        capture = retirement.read_plan(output / "qualification-capture.json")
+        bindings = capture.get("bindings")
+        inputs = retirement.read_plan(output / "qualification-inputs.json")
+        if (capture.get("schema") != "maildesk-source-capture/v1" or not qualification.same_bindings(bindings, bindings) or
+                capture.get("input_sha256") != retirement.sha(output / "qualification-inputs.json") or
+                inputs.get("schema") != "maildesk-source-inputs/v1" or
+                inputs.get("bindings") != {key: value for key, value in bindings.items() if key != "products"} or
+                bindings["head"] != before["head"] or bindings["tree"] != retirement.run(["git", "rev-parse", "HEAD^{tree}"], repo).decode().strip()):
+            raise RuntimeError("Retained qualification requires its run-bound capture")
+        retirement.save(output / "qualification-lifecycle.json", {"schema": "maildesk-source-lifecycle/v1", "status": "SETTLED_CACHE_RETAINED",
+            "head": bindings["head"], "tree": bindings["tree"],
+            "operation_sha256": retirement.sha(output / "operation.json"),
+            "settlement_sha256": retirement.sha(output / "settlement.json"),
+            "exit_sha256": retirement.sha(output / "operation-exit.json"),
+            "capture_sha256": qualification.object_sha256(capture)})
+        print(json.dumps({"status": "SETTLED_CACHE_RETAINED", "proof": str(output)}))
+        return 0
     plan = output / "retirement-plan.json"
     bound = retirement.prepare(repo, policy or Path.home() / ".config/disk-guard/policy.json", plan, authorization, keep,
                                released_pins=approved_pins)
@@ -118,6 +144,7 @@ def main():
     parser.add_argument("--authorization-ref", required=True)
     parser.add_argument("--protect", action="append", default=[])
     parser.add_argument("--pin-dispositions", help="Owned JSON array of independently authorized exact pin dispositions")
+    parser.add_argument("--retain-cache", action="store_true", help="Retain cache after a settled full CI qualification")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
@@ -130,7 +157,8 @@ def main():
     if not command:
         raise RuntimeError("An exact encompassing build/test/package command is required")
     return operation(repo, output, args.authorization_ref, Path(args.resource_request).read_text(), command, args.protect,
-                     pin_dispositions=retirement.read_plan(args.pin_dispositions) if args.pin_dispositions else [])
+                     pin_dispositions=retirement.read_plan(args.pin_dispositions) if args.pin_dispositions else [],
+                     retain_cache=args.retain_cache)
 
 
 if __name__ == "__main__":
