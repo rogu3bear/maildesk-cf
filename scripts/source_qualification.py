@@ -265,16 +265,12 @@ def environment_binding(environment, *, ci_child=False):
 
 
 def publication_environment_binding(environment):
-    """Bind push context, excluding only hook-dispatch bookkeeping.
+    """Bind push context; omit only nonoperative shell/display fields.
 
-    These names convey no admission: the global chain and pins remain required.
-    Their values differ when the same repository hook is delegated by the
-    installed dispatcher. Unknown variables, including Git configuration and
-    transport variables, remain bound. Lifecycle markers are forbidden.
+    Dispatcher controls and recursion markers remain bound: environment names
+    do not establish that the global chain ran. Lifecycle markers are forbidden.
     """
-    bookkeeping = {"GIT_GUARDS_CHAINED", "OPS_GIT_REPO_HOOK_ACTIVE", "OPS_HOOK_JOB", "OPS_HOOK_PYTHON",
-                   "OPS_HOOK_WORKER", "LEFTHOOK_CONFIG", "LEFTHOOK_OUTPUT", "LEFTHOOK_EXCLUDE",
-                   "PYTHONDONTWRITEBYTECODE", "SHLVL", "_", "OLDPWD", "NO_COLOR"}
+    bookkeeping = {"PYTHONDONTWRITEBYTECODE", "SHLVL", "_", "OLDPWD", "NO_COLOR"}
     projected = {key: value for key, value in environment.items() if key not in bookkeeping}
     digest = environment_binding(projected)["sha256"]
     return {"schema": "maildesk-publication-environment/v1", "sha256": digest}

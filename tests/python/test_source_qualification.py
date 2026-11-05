@@ -38,18 +38,16 @@ class EnvironmentBindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualification.environment_binding({"MAILDESK_BUILD_COMPONENT": "ci"}, ci_child=True)
 
-    def test_publication_projection_ignores_only_documented_dispatch_bookkeeping(self):
+    def test_publication_projection_binds_dispatcher_controls(self):
         outer = {"PATH": "/bin", "HOME": "/home", "GIT_CONFIG_COUNT": "0"}
-        nested = {**outer, "GIT_GUARDS_CHAINED": "1", "OPS_GIT_REPO_HOOK_ACTIVE": "repo:pre-push",
-                  "OPS_HOOK_JOB": "temporary-one", "OPS_HOOK_PYTHON": "/python", "OPS_HOOK_WORKER": "/worker",
-                  "LEFTHOOK_CONFIG": "/config", "LEFTHOOK_OUTPUT": "failure,execution", "LEFTHOOK_EXCLUDE": "",
-                  "PYTHONDONTWRITEBYTECODE": "1", "SHLVL": "5", "_": "/bash", "OLDPWD": "/old", "NO_COLOR": "1"}
         expected = qualification.publication_environment_binding(outer)
-        self.assertEqual(expected, qualification.publication_environment_binding(nested))
-        self.assertNotEqual(expected, qualification.publication_environment_binding({**nested, "GIT_CONFIG_COUNT": "1"}))
-        self.assertNotEqual(expected, qualification.publication_environment_binding({**nested, "OTHER_SWITCH": "1"}))
+        for name in ("GIT_GUARDS_CHAINED", "OPS_GIT_REPO_HOOK_ACTIVE", "OPS_HOOK_JOB", "OPS_HOOK_PYTHON",
+                     "OPS_HOOK_WORKER", "LEFTHOOK_CONFIG", "LEFTHOOK_OUTPUT", "LEFTHOOK_EXCLUDE"):
+            self.assertNotEqual(expected, qualification.publication_environment_binding({**outer, name: "unexpected"}), name)
+        self.assertEqual(expected, qualification.publication_environment_binding({**outer, "SHLVL": "5", "_": "/bash",
+                         "OLDPWD": "/old", "NO_COLOR": "1", "PYTHONDONTWRITEBYTECODE": "1"}))
         with self.assertRaises(ValueError):
-            qualification.publication_environment_binding({**nested, "DISK_GUARD_RESERVATION": "forged"})
+            qualification.publication_environment_binding({**outer, "DISK_GUARD_RESERVATION": "forged"})
 
     def test_environment_values_do_not_appear_in_binding(self):
         binding = qualification.environment_binding({"SECRET_TEST_VALUE": "do-not-emit"})
@@ -273,12 +271,21 @@ class PushBindingTests(unittest.TestCase):
             python = root / "bin/python3"
             python.write_text('#!/bin/bash\nprintf "ARG:%s\\n" "$@"\ncat\nexit 43\n')
             python.chmod(0o700)
-            env = {**os.environ, "PATH": str(root / "bin") + ":/usr/bin:/bin", "GIT_GUARDS_CHAINED": "1"}
+            delegate = root / "home/.config/git/guards/delegate-repo-hook.sh"
+            delegate.parent.mkdir(parents=True)
+            delegate.write_text('#!/bin/bash\n[ "$*" = "--verify-chain pre-push" ]\n')
+            delegate.chmod(0o700)
+            env = {**os.environ, "HOME": str(root / "home"), "PATH": str(root / "bin") + ":/usr/bin:/bin"}
             result = subprocess.run(["/bin/bash", str(hook), "origin", "https://example.com/repo.git"],
                                     input="ref-input\n", capture_output=True, text=True, env=env)
             self.assertEqual(result.returncode, 43)
             self.assertEqual(result.stdout.splitlines(), ["ARG:-B", f"ARG:{root}/scripts/source_qualification.py",
                 "ARG:--verify-push", "ARG:origin", "ARG:https://example.com/repo.git", "ref-input"])
+            delegate.write_text('#!/bin/bash\nexit 51\n')
+            denied = subprocess.run(["/bin/bash", str(hook), "origin", "https://example.com/repo.git"],
+                                    input="ref-input\n", capture_output=True, text=True, env=env)
+            self.assertEqual(denied.returncode, 51)
+            self.assertEqual(denied.stdout, "")
 
 
 class ApprovalRecordTests(unittest.TestCase):

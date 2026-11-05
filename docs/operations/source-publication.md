@@ -72,11 +72,15 @@ target and remote. The approval schema includes `publication_environment`: the
 SHA-256 of the canonical publication environment projection at the hook. Lifecycle
 markers are rejected there, not accepted as custody. The source owner and reviewer
 must review the guard and the precise operative environment binding; transient
-context variables can cause a safe hold. The projection excludes only the
-explicit hook-dispatch bookkeeping names listed in `publication_environment_binding`:
-these record recursion, shell nesting, dispatcher configuration/job paths, the shell previous directory, or color output preference and supply no authorization. The verifier runs Python with `-B` and invokes Git directly, so these fields do not alter its source/ref checks. All other environment
-variables, including Git and transport settings, remain bound. The normal
-pinned global chain independently enforces its own admission.
+context variables can cause a safe hold. The projection retains dispatcher
+configuration, worker selection, job data, and recursion markers; they are not
+proof of dispatch. It excludes only shell nesting, previous-directory and
+color preference, and Python bytecode suppression; the verifier uses `-B`
+and invokes Git directly. The repository hook requires the installed global
+chain's `--verify-chain pre-push` check, including effective hooks path and
+registered hook digest, before evaluating the qualification. A direct
+`.githooks` configuration or missing registration holds. This does not change
+that configuration or register a pin.
 
 Git-source publication consumes Git objects, not the live build outputs or
 installed dependencies. The guard therefore does not re-read mutable products,
@@ -98,5 +102,7 @@ not environment values. This command does not invoke a hook, authorize, or
 attempt a push. The digest is usable only if the eventual hook sees the same
 reviewed projection; an independently controlled approval must pin it. An
 ordinary shell or separate automation invocation can have different bound
-variables, in which case the later hook safely holds. Dispatcher bookkeeping
-is excluded for the documented reason above, not used as proof of dispatch.
+variables, in which case the later hook safely holds. Dynamic dispatcher job
+data remains bound, including the per-dispatch temporary result path. The
+standalone digest therefore cannot establish the future hook digest; a practical
+independently pinned preflight remains unqualified. Publication stays held.
