@@ -65,6 +65,17 @@ class EnvironmentBindingTests(unittest.TestCase):
             with mock.patch.object(Path, "home", return_value=home), \
                  mock.patch.object(qualification, "DISPATCHER_FILES", contract):
                 expected = bind(env)
+                first = bind({**env, "CODEX_TOOL_CALL_ID": "first-private-id"})
+                second = bind({**env, "CODEX_TOOL_CALL_ID": "second-private-id"})
+                self.assertEqual(first["sha256"], second["sha256"])
+                self.assertNotEqual(first["invocation_audit"], second["invocation_audit"])
+                self.assertNotIn("first-private-id", json.dumps(first))
+                self.assertFalse(expected["invocation_audit"]["present"])
+                for bad in ("", "x" * 257, "bad\nvalue"):
+                    with self.assertRaisesRegex(ValueError, "invocation audit"):
+                        bind({**env, "CODEX_TOOL_CALL_ID": bad})
+                for key in ("GIT_CONFIG_COUNT", "CODEX_OTHER", "CUSTOM_BUILD_SWITCH", "PATH"):
+                    self.assertNotEqual(first["sha256"], bind({**env, "CODEX_TOOL_CALL_ID": "first-private-id", key: "changed"})["sha256"])
                 detailed = bind({**env, "SECRET_TEST": "private-value"}, include_components=True)
                 self.assertEqual(detailed["sha256"], bind({**env, "SECRET_TEST": "private-value"})["sha256"])
                 self.assertEqual(detailed["value_sha256"]["SECRET_TEST"], qualification.bytes_sha256(b"private-value"))
@@ -252,17 +263,28 @@ class QualificationBindingTests(unittest.TestCase):
         review = {"schema": "maildesk-source-review/v1", "verdict": "ACCEPT", "scope": "source_publication_only", "reviewer": "independent-owner",
                   "head": bindings["head"], "tree": bindings["tree"], "capture_sha256": qualification.object_sha256(capture),
                   "lifecycle_sha256": qualification.object_sha256(run)}
-        approval = {"schema": "maildesk-source-publication-approval/v1", "incident_status": "UNKNOWN_CACHE_RETAINED",
+        approval = {"schema": "maildesk-source-publication-approval/v2", "incident_status": "UNKNOWN_CACHE_RETAINED",
                     "incident_sha256": "3" * 64, "head": bindings["head"], "tree": bindings["tree"],
                     "target_ref": "refs/heads/task/inbound-recovery-ui-runtime",
                     "capture_sha256": qualification.object_sha256(capture), "lifecycle_sha256": qualification.object_sha256(run),
                     "review_sha256": qualification.object_sha256(review), "operator_ref": "explicit-approval", "source_writer": "writer-owner",
-                    "publication_environment": "a" * 64}
+                    "publication_environment": {"schema": "maildesk-publication-environment/v2", "sha256": "a" * 64}}
         return capture, run, review, approval
 
     def test_authorization_requires_all_bound_evidence_and_independent_review(self):
         capture, run, review, approval = self.authorization()
         self.assertTrue(qualification.check_evidence(capture, run, review, approval, self.snapshot(),
+            "refs/heads/task/inbound-recovery-ui-runtime", "3" * 64))
+        for bad in (None, "a" * 64, {}, {"schema": "maildesk-publication-environment/v1", "sha256": "a" * 64},
+                    {"schema": "maildesk-publication-environment/v2", "sha256": "bad"},
+                    {"schema": "maildesk-publication-environment/v2", "sha256": "a" * 64, "extra": True}):
+            self.assertFalse(qualification.check_evidence(capture, run, review, {**approval, "publication_environment": bad},
+                self.snapshot(), "refs/heads/task/inbound-recovery-ui-runtime", "3" * 64))
+        self.assertFalse(qualification.check_evidence(capture, run, review,
+            {**approval, "schema": "maildesk-source-publication-approval/v1"}, self.snapshot(),
+            "refs/heads/task/inbound-recovery-ui-runtime", "3" * 64))
+        missing = dict(approval); del missing["publication_environment"]
+        self.assertFalse(qualification.check_evidence(capture, run, review, missing, self.snapshot(),
             "refs/heads/task/inbound-recovery-ui-runtime", "3" * 64))
         for index, field in ((0, "bindings"), (1, "status"), (2, "verdict"), (3, "incident_status"),
                              (3, "operator_ref"), (3, "review_sha256")):
@@ -497,7 +519,7 @@ class PublicationGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             with mock.patch.object(qualification, "capture_current", side_effect=AssertionError("unexpected observation")), \
-                 mock.patch.object(qualification, "publication_environment_binding", return_value={"sha256": "a" * 64}), \
+                 mock.patch.object(qualification, "publication_environment_binding", return_value={"schema": "maildesk-publication-environment/v2", "sha256": "a" * 64, "invocation_audit": {"present": False}}), \
                  mock.patch.object(qualification, "diagnostic_requested", return_value=False), \
                  mock.patch.object(qualification, "_command", side_effect=AssertionError("unexpected command")):
                 with self.assertRaises((ValueError, FileNotFoundError)):
@@ -507,7 +529,7 @@ class PublicationGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             value = {"schema": "fixture", "secret": "never-print-this"}
-            binding = {"schema": "maildesk-publication-environment/v1", "sha256": "a" * 64,
+            binding = {"schema": "maildesk-publication-environment/v2", "sha256": "a" * 64, "invocation_audit": {"present": False},
                        "value_sha256": {"SECRET_NAME": qualification.bytes_sha256(b"never-print-this")}}
             output = io.StringIO()
             with mock.patch.object(qualification, "diagnostic_requested", return_value=True), \
@@ -587,9 +609,20 @@ class PublicationGateTests(unittest.TestCase):
             with mock.patch.object(qualification, "_command", side_effect=command), \
                  mock.patch.object(qualification, "diagnostic_requested", return_value=False), \
                  mock.patch.object(qualification, "publication_source", return_value=(head, bindings["tree"])), \
-                 mock.patch.object(qualification, "publication_environment_binding", side_effect=lambda env, **kw: {"sha256": "a" * 64 if not env else "f" * 64}), \
+                 mock.patch.object(qualification, "publication_environment_binding", side_effect=lambda env, **kw: {"schema": "maildesk-publication-environment/v2", "sha256": "a" * 64 if not env else "f" * 64, "invocation_audit": {"present": False}}), \
                  mock.patch.object(qualification, "capture_current", side_effect=AssertionError("push must not read build products")):
                 qualification.verify_publication(root, {}, "origin", url, row)
+                approval_path = root / "var/source-publication/approval.json"
+                for bad in ({**approval, "schema": "maildesk-source-publication-approval/v1"},
+                            {**approval, "publication_environment": "a" * 64},
+                            {**approval, "publication_environment": {"schema": "maildesk-publication-environment/v2", "sha256": "bad"}},
+                            {key: value for key, value in approval.items() if key != "publication_environment"}):
+                    approval_path.write_text(json.dumps(bad))
+                    pins["maildesk.sourcePublicationApprovalSha256"] = qualification.object_sha256(bad)
+                    with self.assertRaises(ValueError):
+                        qualification.verify_publication(root, {}, "origin", url, row)
+                approval_path.write_text(json.dumps(approval))
+                pins["maildesk.sourcePublicationApprovalSha256"] = qualification.object_sha256(approval)
                 with mock.patch.object(qualification, "publication_source", return_value=("d" * 40, bindings["tree"])):
                     with self.assertRaises(ValueError):
                         qualification.verify_publication(root, {}, "origin", url, row)

@@ -98,8 +98,13 @@ def check_evidence(capture, lifecycle, review, approval, observed, target_ref, i
     if (capture["schema"] != "maildesk-source-capture/v1" or
         lifecycle["schema"] != "maildesk-source-lifecycle/v1" or lifecycle["status"] != "SETTLED_CACHE_RETAINED" or
         review["schema"] != "maildesk-source-review/v1" or review["verdict"] != "ACCEPT" or review["scope"] != "source_publication_only" or
-        approval["schema"] != "maildesk-source-publication-approval/v1" or
+        approval["schema"] != "maildesk-source-publication-approval/v2" or
         approval["incident_status"] != "UNKNOWN_CACHE_RETAINED"):
+        return False
+    publication = approval["publication_environment"]
+    if (not isinstance(publication, dict) or set(publication) != {"schema", "sha256"} or
+            publication["schema"] != "maildesk-publication-environment/v2" or
+            not isinstance(publication["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", publication["sha256"])):
         return False
     if not same_bindings(capture["bindings"], observed):
         return False
@@ -275,7 +280,7 @@ def environment_binding(environment, *, ci_child=False):
 
 
 def publication_environment_binding(environment, *, repo, remote_name, remote_url, include_components=False):
-    """Bind the admitted job and all controls, omitting only its output path.
+    """Bind the admitted job and controls; record the invocation ID separately.
 
     This validates a fixed installed dispatcher contract; it does not prove
     dispatch. The independent global hook-chain check supplies that boundary.
@@ -312,11 +317,19 @@ def publication_environment_binding(environment, *, repo, remote_name, remote_ur
     info = path.parent.stat()
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("dispatcher result directory is not owner-only")
+    invocation_id = environment.get("CODEX_TOOL_CALL_ID")
+    if "CODEX_TOOL_CALL_ID" in environment and (not isinstance(invocation_id, str) or not invocation_id or
+            len(invocation_id.encode()) > 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in invocation_id)):
+        raise ValueError("publication invocation audit identifier is invalid")
+    audit = {"schema": "maildesk-publication-invocation-audit/v1", "present": invocation_id is not None}
+    if invocation_id is not None:
+        audit["sha256"] = bytes_sha256(invocation_id.encode())
     projected = {key: value for key, value in environment.items()
-                 if key not in {"SHLVL", "_", "OLDPWD", "NO_COLOR", "OPS_HOOK_JOB"}}
+                 if key not in {"SHLVL", "_", "OLDPWD", "NO_COLOR", "OPS_HOOK_JOB", "CODEX_TOOL_CALL_ID"}}
     projected["OPS_HOOK_JOB"] = json.dumps({key: value for key, value in job.items() if key != "result_path"},
                                            sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    binding = {"schema": "maildesk-publication-environment/v1", "sha256": environment_binding(projected)["sha256"]}
+    binding = {"schema": "maildesk-publication-environment/v2", "sha256": environment_binding(projected)["sha256"],
+               "invocation_audit": audit}
     if include_components:
         if (len(projected) > 256 or any(not isinstance(key, str) or not isinstance(value, str) or
                 len(key.encode()) > 256 or len(value.encode()) > 65536 or
@@ -622,8 +635,9 @@ def verify_publication(repo, environment, remote_name, remote_url, stdin_text):
     diagnostic = diagnostic_requested(repo, config_env)
     binding = publication_environment_binding(environment, repo=repo, remote_name=remote_name,
                                               remote_url=remote_url, include_components=diagnostic)
-    publication_environment = binding["sha256"]
-    print("source publication environment sha256: " + publication_environment, file=sys.stderr)
+    publication_environment = {"schema": binding["schema"], "sha256": binding["sha256"]}
+    print("source publication environment: " + json.dumps(publication_environment, sort_keys=True), file=sys.stderr)
+    print("source publication invocation audit: " + json.dumps(binding["invocation_audit"], sort_keys=True), file=sys.stderr)
     def pin(name):
         values = _command(["git", "config", "--local", "--get-all", name], cwd=repo, environment=config_env).decode().splitlines()
         if len(values) != 1 or not re.fullmatch(r"[0-9a-f]{64}", values[0]):

@@ -68,8 +68,12 @@ The guard rereads the original incident and requires its exact pinned digest and
 input, lifecycle, operation, exit and settlement records, separately pinned review
 and operator approval, current Git HEAD and tree, the separately approved full
 push environment, and one non-deletion fast-forward ref update to the pinned
-target and remote. The approval schema includes `publication_environment`: the
-SHA-256 of the canonical publication environment projection at the hook. Lifecycle
+target and remote. Approval `maildesk-source-publication-approval/v2` includes
+`publication_environment` as an exact object with `schema` set to
+`maildesk-publication-environment/v2` and `sha256` set to the canonical
+publication environment projection digest at the hook. Legacy v1 approvals,
+unversioned digests, and malformed binding objects hold; they are not upgraded
+or interpreted under the new algorithm. Lifecycle
 markers are rejected there, not accepted as custody. The source owner and reviewer
 must review the guard and the precise operative environment binding; transient
 context variables can cause a safe hold. The projection validates the installed
@@ -82,8 +86,20 @@ that it names an absent `result.json` in an owner-only, non-symlink
 is allocated by the installed dispatcher and is not an input to the source
 verifier. The result directory and its owner are trusted only for this narrow
 classification; neither the job nor its environment establishes dispatch.
-All other variables remain bound except shell nesting, previous-directory and
-color preference; the verifier uses `-B` and invokes Git directly. The repository
+All other variables remain bound except shell nesting, previous-directory,
+color preference, and `CODEX_TOOL_CALL_ID`. The latter is validated as an
+optional, nonempty, at-most-256-byte identifier without control characters and
+reported separately as presence plus a SHA-256 hash; its raw value is never
+printed or included in approval equality. In three deliberately refused real
+Git observations at candidate `f7018e3` (one dry run and two normal-form pushes),
+all 71 projected key names matched and only that identifier's value hash changed
+between observations. Scoped source searches found no consumer in the reviewed
+dispatcher, global hooks, Disk Guard, Maildesk scripts/hooks, or Python crash
+reporter. This evidence classifies that one identifier as invocation audit context;
+it does not reconstruct the uncaptured environment of the earlier failed push
+or establish future stability. The owner-only observation receipt is
+`var/source-publication/diagnostic-f7018e/receipt.txt`. The verifier uses `-B`
+and invokes Git directly. The repository
 hook separately requires the installed global chain's `--verify-chain pre-push`
 check, including effective hooks path and registered hook digest. A direct
 `.githooks` configuration or missing registration holds. This code does not
@@ -105,10 +121,11 @@ supported pin registration before it can execute.
 After independent hook review and supported registration, an operator can obtain
 the projected digest without a push by invoking the installed global pre-push
 hook with the exact remote name and URL and **empty stdin**. The global chain
-runs its normal pinned delegate; the verifier prints only the environment
-digest, then rejects empty ref input even if all records already exist. This
-inspection does not send refs or authorize publication. The operator binds that
-digest into the separate approval; changes to any operative value hold. The
+runs its normal pinned delegate; the verifier prints the versioned environment
+binding and redacted invocation audit, then rejects empty ref input even if all
+records already exist. This inspection does not send refs or authorize
+publication. The operator binds the schema and digest into the separate
+approval; changes to any operative value hold. The
 standalone `--print-publication-environment REMOTE URL` command requires the
 same validated dispatcher context and is not a substitute for the global chain.
 The actual global-chain route and independent pin must still be qualified after
@@ -118,7 +135,8 @@ For a deliberately refused environment diagnostic, an operator may set the
 local Git configuration `maildesk.sourcePublicationDiagnostic` to exactly
 `true` after reviewing this source and the pinned hook. After the normal chain
 and dispatcher validations, the diagnostic emits a bounded report containing
-only projected key names and SHA-256 value hashes, aggregate digest, exact
+only operative projected key names and SHA-256 value hashes, aggregate digest,
+the separate redacted invocation audit, exact
 candidate identity, hashes of remote arguments and hook input, and hashes of
 the selected controls and configured pins. It always refuses before any approval
 can authorize publication. No raw environment values are printed. The local
