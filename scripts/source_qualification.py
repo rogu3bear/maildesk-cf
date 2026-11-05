@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -264,16 +265,53 @@ def environment_binding(environment, *, ci_child=False):
     return {"schema": "maildesk-source-environment/v1", "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def publication_environment_binding(environment):
-    """Bind push context; omit only nonoperative shell/display fields.
+def publication_environment_binding(environment, *, repo, remote_name, remote_url):
+    """Bind the admitted job and all controls, omitting only its output path.
 
-    Dispatcher controls and recursion markers remain bound: environment names
-    do not establish that the global chain ran. Lifecycle markers are forbidden.
+    This validates a fixed installed dispatcher contract; it does not prove
+    dispatch. The independent global hook-chain check supplies that boundary.
     """
-    bookkeeping = {"PYTHONDONTWRITEBYTECODE", "SHLVL", "_", "OLDPWD", "NO_COLOR"}
-    projected = {key: value for key, value in environment.items() if key not in bookkeeping}
-    digest = environment_binding(projected)["sha256"]
-    return {"schema": "maildesk-publication-environment/v1", "sha256": digest}
+    repo = Path(repo)
+    release = Path.home() / ".codex/hooks/releases/1.0.3"
+    expected_files = {"hooks.py": "995c3fd35af52fbd25d38646f1ab8c91965d1c9b5ee75d435f5ea54a4f6035b9",
+                      "runner.py": "b003189b8fa74eea51eb3531f9ef116296b6e03f9e0012e3fad542538ae062c0",
+                      "lefthook.yml": "53af7cd5b8ba54bbfda33272fb6ed380129ee6bff8c400591d84a1f2369a3661",
+                      "core.py": "921539bd780e43d1f8053de3da58fd30618ceb3007a828ec58edb03763599d53",
+                      "vendor/lefthook": "22881605cdf99b3d7da67005d6a08d4bb90fed4730dde6e2d39e316750be1afe"}
+    if file_bindings(release, list(expected_files)) != expected_files:
+        raise ValueError("installed dispatcher contract changed")
+    controls = {"LEFTHOOK_CONFIG": str(release / "lefthook.yml"), "LEFTHOOK_OUTPUT": "failure,execution",
+                "LEFTHOOK_EXCLUDE": "", "OPS_HOOK_WORKER": str(release / "hooks.py"),
+                "OPS_HOOK_PYTHON": "/opt/homebrew/opt/python@3.14/bin/python3.14", "PYTHONDONTWRITEBYTECODE": "1"}
+    if any(environment.get(name) != expected for name, expected in controls.items()):
+        raise ValueError("installed dispatcher controls do not match the reviewed contract")
+    job_text = environment.get("OPS_HOOK_JOB")
+    if not isinstance(job_text, str) or len(job_text.encode()) > 65536:
+        raise ValueError("dispatcher job is unavailable or too large")
+    job = strict_object(job_text)
+    if set(job) != {"kind", "path", "digest", "args", "result_path"}:
+        raise ValueError("dispatcher job schema changed")
+    hook = repo / ".githooks/pre-push"
+    hook_digest = file_bindings(repo, [".githooks/pre-push"])[".githooks/pre-push"]
+    if (job["kind"] != "gate" or job["path"] != str(hook) or job["digest"] != hook_digest or
+            job["args"] != [remote_name, remote_url]):
+        raise ValueError("dispatcher job does not match the selected hook and push")
+    result = job["result_path"]
+    if not isinstance(result, str):
+        raise ValueError("dispatcher result path is invalid")
+    path = Path(result)
+    if (not path.is_absolute() or path.name != "result.json" or not re.fullmatch(r"ops-hooks-[a-z0-9_]{8}", path.parent.name) or
+            path.parent.is_symlink() or path.parent.resolve(strict=True).parent != Path(tempfile.gettempdir()).resolve(strict=True) or
+            path.exists() or path.is_symlink()):
+        raise ValueError("dispatcher result path is outside the temporary result scope")
+    info = path.parent.stat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("dispatcher result directory is not owner-only")
+    projected = {key: value for key, value in environment.items()
+                 if key not in {"SHLVL", "_", "OLDPWD", "NO_COLOR", "OPS_HOOK_JOB"}}
+    projected["OPS_HOOK_JOB"] = json.dumps({key: value for key, value in job.items() if key != "result_path"},
+                                           sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {"schema": "maildesk-publication-environment/v1", "sha256": environment_binding(projected)["sha256"]}
 
 
 def file_bindings(root, paths):
@@ -550,6 +588,10 @@ def verify_publication(repo, environment, remote_name, remote_url, stdin_text):
     repo = Path(repo)
     if not repo.is_absolute() or repo.resolve(strict=True) != repo:
         raise ValueError("repository path must be canonical")
+    # A no-network invocation of the installed global hook with empty ref input
+    # can expose this digest for independent approval; it grants no authority.
+    publication_environment = publication_environment_binding(environment, repo=repo, remote_name=remote_name, remote_url=remote_url)["sha256"]
+    print("source publication environment sha256: " + publication_environment, file=sys.stderr)
     config_env = {key: value for key, value in environment.items() if not key.startswith("GIT_")}
     def pin(name):
         values = _command(["git", "config", "--local", "--get-all", name], cwd=repo, environment=config_env).decode().splitlines()
@@ -584,8 +626,8 @@ def verify_publication(repo, environment, remote_name, remote_url, stdin_text):
     if incident.get("status") != "CACHE_RETAINED_SETTLEMENT_UNPROVED":
         raise ValueError("historical incident status changed")
     # The separately approved push projection is not equated to the CI child.
-    # Hook-dispatch bookkeeping supplies no authority and is excluded explicitly.
-    if approval.get("publication_environment") != publication_environment_binding(environment)["sha256"]:
+    # Only the validated result-output location is projected out of the job.
+    if approval.get("publication_environment") != publication_environment:
         raise ValueError("publication environment is unavailable or changed")
     head, tree = publication_source(repo, environment)
     if not isinstance(capture.get("bindings"), dict):
@@ -610,8 +652,8 @@ def main(argv):
     repo = Path(__file__).resolve().parents[1]
     if argv == ["--capture-inputs"] or argv == ["--capture-results"]:
         capture_in_lifecycle(repo, os.environ, phase="inputs" if argv[0] == "--capture-inputs" else "results")
-    elif argv == ["--print-publication-environment"]:
-        print(json.dumps(publication_environment_binding(os.environ), sort_keys=True))
+    elif len(argv) == 3 and argv[0] == "--print-publication-environment":
+        print(json.dumps(publication_environment_binding(os.environ, repo=repo, remote_name=argv[1], remote_url=argv[2]), sort_keys=True))
     elif len(argv) == 3 and argv[0] == "--verify-push":
         data = sys.stdin.read(65537)
         if len(data) > 65536:

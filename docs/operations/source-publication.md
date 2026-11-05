@@ -72,15 +72,22 @@ target and remote. The approval schema includes `publication_environment`: the
 SHA-256 of the canonical publication environment projection at the hook. Lifecycle
 markers are rejected there, not accepted as custody. The source owner and reviewer
 must review the guard and the precise operative environment binding; transient
-context variables can cause a safe hold. The projection retains dispatcher
-configuration, worker selection, job data, and recursion markers; they are not
-proof of dispatch. It excludes only shell nesting, previous-directory and
-color preference, and Python bytecode suppression; the verifier uses `-B`
-and invokes Git directly. The repository hook requires the installed global
-chain's `--verify-chain pre-push` check, including effective hooks path and
-registered hook digest, before evaluating the qualification. A direct
-`.githooks` configuration or missing registration holds. This does not change
-that configuration or register a pin.
+context variables can cause a safe hold. The projection validates the installed
+1.0.3 dispatcher contract: exact worker, runner, core, dispatcher binary and configuration digests,
+selected interpreter and fixed control values. It strictly parses the bounded
+job, binds its kind, exact repository hook path and digest, and push arguments,
+and rejects extra fields. Only the result filename is removed after checking
+that it names an absent `result.json` in an owner-only, non-symlink
+`ops-hooks-` directory under the system temporary root. This output location
+is allocated by the installed dispatcher and is not an input to the source
+verifier. The result directory and its owner are trusted only for this narrow
+classification; neither the job nor its environment establishes dispatch.
+All other variables remain bound except shell nesting, previous-directory and
+color preference; the verifier uses `-B` and invokes Git directly. The repository
+hook separately requires the installed global chain's `--verify-chain pre-push`
+check, including effective hooks path and registered hook digest. A direct
+`.githooks` configuration or missing registration holds. This code does not
+change that configuration or register a pin.
 
 Git-source publication consumes Git objects, not the live build outputs or
 installed dependencies. The guard therefore does not re-read mutable products,
@@ -95,14 +102,14 @@ processes ended, or send mail. Normal global Git guards and repository hook
 content pinning remain required; a modified hook needs independent review and
 supported pin registration before it can execute.
 
-For a no-network preparation check, invoke
-`python3 -B scripts/source_qualification.py --print-publication-environment`
-from the intended push context; it prints only the projection schema and digest,
-not environment values. This command does not invoke a hook, authorize, or
-attempt a push. The digest is usable only if the eventual hook sees the same
-reviewed projection; an independently controlled approval must pin it. An
-ordinary shell or separate automation invocation can have different bound
-variables, in which case the later hook safely holds. Dynamic dispatcher job
-data remains bound, including the per-dispatch temporary result path. The
-standalone digest therefore cannot establish the future hook digest; a practical
-independently pinned preflight remains unqualified. Publication stays held.
+After independent hook review and supported registration, an operator can obtain
+the projected digest without a push by invoking the installed global pre-push
+hook with the exact remote name and URL and **empty stdin**. The global chain
+runs its normal pinned delegate; the verifier prints only the environment
+digest, then rejects empty ref input even if all records already exist. This
+inspection does not send refs or authorize publication. The operator binds that
+digest into the separate approval; changes to any operative value hold. The
+standalone `--print-publication-environment REMOTE URL` command requires the
+same validated dispatcher context and is not a substitute for the global chain.
+The actual global-chain route and independent pin must still be qualified after
+registration; a disposable dispatcher fixture is narrower evidence.
