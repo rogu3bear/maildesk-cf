@@ -44,42 +44,70 @@ class EnvironmentBindingTests(unittest.TestCase):
             (repo / ".githooks").mkdir()
             hook = repo / ".githooks/pre-push"
             hook.write_text("fixture hook")
-            release = Path.home() / ".codex/hooks/releases/1.0.3"
+            home = repo / "fixture-home"
+            release = home / ".codex/hooks/releases/1.0.3"
+            contract = {}
+            for name in ("hooks.py", "runner.py", "lefthook.yml", "core.py", "vendor/lefthook"):
+                path = release / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture " + name)
+                contract[name] = qualification.bytes_sha256(path.read_bytes())
             job = {"kind": "gate", "path": str(hook), "digest": qualification.bytes_sha256(hook.read_bytes()),
                    "args": ["origin", "https://example.invalid/repo"], "result_path": str(Path(output) / "result.json")}
-            env = {"PATH": "/bin", "HOME": str(Path.home()), "LEFTHOOK_CONFIG": str(release / "lefthook.yml"),
+            env = {"PATH": "/bin", "HOME": str(home), "LEFTHOOK_CONFIG": str(release / "lefthook.yml"),
                    "LEFTHOOK_OUTPUT": "failure,execution", "LEFTHOOK_EXCLUDE": "", "OPS_HOOK_WORKER": str(release / "hooks.py"),
                    "OPS_HOOK_PYTHON": "/opt/homebrew/opt/python@3.14/bin/python3.14", "PYTHONDONTWRITEBYTECODE": "1",
                    "OPS_HOOK_JOB": json.dumps(job)}
             def bind(value):
                 return qualification.publication_environment_binding(value, repo=repo, remote_name="origin", remote_url="https://example.invalid/repo")
-            expected = bind(env)
-            with tempfile.TemporaryDirectory(prefix="ops-hooks-") as other:
-                self.assertEqual(expected, bind({**env, "OPS_HOOK_JOB": json.dumps({**job, "result_path": str(Path(other) / "result.json")})}))
-            for name in ("OPS_HOOK_PYTHON", "OPS_HOOK_WORKER", "LEFTHOOK_CONFIG", "LEFTHOOK_OUTPUT", "LEFTHOOK_EXCLUDE"):
-                with self.subTest(name=name), self.assertRaises(ValueError):
-                    bind({**env, name: "unexpected"})
-            for change in ({"kind": "check"}, {"path": "/wrong"}, {"digest": "0" * 64}, {"args": ["other"]},
-                           {"extra": True}, {"result_path": "/tmp/other/result.json"}):
-                with self.subTest(change=change), self.assertRaises(ValueError):
-                    bind({**env, "OPS_HOOK_JOB": json.dumps({**job, **change})})
-            for invalid in ('{"kind":"gate","kind":"gate"}', "{" + " " * 65536):
-                with self.assertRaises(ValueError):
-                    bind({**env, "OPS_HOOK_JOB": invalid})
-            with mock.patch.object(qualification, "file_bindings", return_value={}):
+            with mock.patch.object(Path, "home", return_value=home), \
+                 mock.patch.object(qualification, "DISPATCHER_FILES", contract):
+                expected = bind(env)
+                with tempfile.TemporaryDirectory(prefix="ops-hooks-") as other:
+                    self.assertEqual(expected, bind({**env, "OPS_HOOK_JOB": json.dumps({**job, "result_path": str(Path(other) / "result.json")})}))
+                for name in ("OPS_HOOK_PYTHON", "OPS_HOOK_WORKER", "LEFTHOOK_CONFIG", "LEFTHOOK_OUTPUT", "LEFTHOOK_EXCLUDE"):
+                    with self.subTest(name=name), self.assertRaises(ValueError):
+                        bind({**env, name: "unexpected"})
+                for change in ({"kind": "check"}, {"path": "/wrong"}, {"digest": "0" * 64}, {"args": ["other"]},
+                               {"extra": True}, {"result_path": "/tmp/other/result.json"}):
+                    with self.subTest(change=change), self.assertRaises(ValueError):
+                        bind({**env, "OPS_HOOK_JOB": json.dumps({**job, **change})})
+                for invalid in ('{"kind":"gate","kind":"gate"}', "{" + " " * 65536):
+                    with self.assertRaises(ValueError):
+                        bind({**env, "OPS_HOOK_JOB": invalid})
+                installed = release / "runner.py"
+                installed.write_text("changed fixture")
                 with self.assertRaisesRegex(ValueError, "dispatcher contract"):
                     bind(env)
-            Path(output).chmod(0o755)
-            with self.assertRaisesRegex(ValueError, "owner-only"):
-                bind(env)
-            Path(output).chmod(0o700)
-            (Path(output) / "result.json").write_text("already used")
-            with self.assertRaisesRegex(ValueError, "result path"):
-                bind(env)
-            (Path(output) / "result.json").unlink()
-            self.assertNotEqual(expected, bind({**env, "GIT_CONFIG_COUNT": "1"}))
-            with self.assertRaises(ValueError):
-                bind({**env, "DISK_GUARD_RESERVATION": "forged"})
+                installed.unlink()
+                with self.assertRaises(ValueError):
+                    bind(env)
+                installed.write_text("fixture runner.py")
+                Path(output).chmod(0o755)
+                with self.assertRaisesRegex(ValueError, "owner-only"):
+                    bind(env)
+                Path(output).chmod(0o700)
+                (Path(output) / "result.json").write_text("already used")
+                with self.assertRaisesRegex(ValueError, "result path"):
+                    bind(env)
+                (Path(output) / "result.json").unlink()
+                self.assertNotEqual(expected, bind({**env, "GIT_CONFIG_COUNT": "1"}))
+                with self.assertRaises(ValueError):
+                    bind({**env, "DISK_GUARD_RESERVATION": "forged"})
+
+    def test_publication_projection_refuses_missing_or_mismatched_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            release = home / ".codex/hooks/releases/1.0.3"
+            with mock.patch.object(Path, "home", return_value=home):
+                with self.assertRaises((ValueError, FileNotFoundError)):
+                    qualification.publication_environment_binding({}, repo=home, remote_name="origin", remote_url="url")
+                for name in qualification.DISPATCHER_FILES:
+                    path = release / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("untrusted content")
+                with self.assertRaisesRegex(ValueError, "dispatcher contract changed"):
+                    qualification.publication_environment_binding({}, repo=home, remote_name="origin", remote_url="url")
 
     def test_environment_values_do_not_appear_in_binding(self):
         binding = qualification.environment_binding({"SECRET_TEST_VALUE": "do-not-emit"})
@@ -445,6 +473,7 @@ class PublicationGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             with mock.patch.object(qualification, "capture_current", side_effect=AssertionError("unexpected observation")), \
+                 mock.patch.object(qualification, "publication_environment_binding", return_value={"sha256": "a" * 64}), \
                  mock.patch.object(qualification, "_command", side_effect=AssertionError("unexpected command")):
                 with self.assertRaises((ValueError, FileNotFoundError)):
                     qualification.verify_publication(root, {}, "origin", "https://example.com/repo.git", "")

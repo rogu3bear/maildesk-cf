@@ -21,6 +21,15 @@ REQUIRED_PRODUCTS = frozenset(("mail_router", "mail_outbound", "mail_canary", "m
                                "router_wasm", "ui_worker", "ui_site"))
 
 
+DISPATCHER_FILES = {
+    "hooks.py": "995c3fd35af52fbd25d38646f1ab8c91965d1c9b5ee75d435f5ea54a4f6035b9",
+    "runner.py": "b003189b8fa74eea51eb3531f9ef116296b6e03f9e0012e3fad542538ae062c0",
+    "lefthook.yml": "53af7cd5b8ba54bbfda33272fb6ed380129ee6bff8c400591d84a1f2369a3661",
+    "core.py": "921539bd780e43d1f8053de3da58fd30618ceb3007a828ec58edb03763599d53",
+    "vendor/lefthook": "22881605cdf99b3d7da67005d6a08d4bb90fed4730dde6e2d39e316750be1afe",
+}
+
+
 def same_bindings(expected, observed):
     """Compare complete binding shapes; this does not authenticate a receipt.
 
@@ -273,12 +282,7 @@ def publication_environment_binding(environment, *, repo, remote_name, remote_ur
     """
     repo = Path(repo)
     release = Path.home() / ".codex/hooks/releases/1.0.3"
-    expected_files = {"hooks.py": "995c3fd35af52fbd25d38646f1ab8c91965d1c9b5ee75d435f5ea54a4f6035b9",
-                      "runner.py": "b003189b8fa74eea51eb3531f9ef116296b6e03f9e0012e3fad542538ae062c0",
-                      "lefthook.yml": "53af7cd5b8ba54bbfda33272fb6ed380129ee6bff8c400591d84a1f2369a3661",
-                      "core.py": "921539bd780e43d1f8053de3da58fd30618ceb3007a828ec58edb03763599d53",
-                      "vendor/lefthook": "22881605cdf99b3d7da67005d6a08d4bb90fed4730dde6e2d39e316750be1afe"}
-    if file_bindings(release, list(expected_files)) != expected_files:
+    if file_bindings(release, list(DISPATCHER_FILES)) != DISPATCHER_FILES:
         raise ValueError("installed dispatcher contract changed")
     controls = {"LEFTHOOK_CONFIG": str(release / "lefthook.yml"), "LEFTHOOK_OUTPUT": "failure,execution",
                 "LEFTHOOK_EXCLUDE": "", "OPS_HOOK_WORKER": str(release / "hooks.py"),
