@@ -24,6 +24,27 @@ exit, no unknown process generations, and observed natural reservation release.
 An unproved settlement remains held and cannot issue a qualifying lifecycle
 record. No enclosing-lifetime marker substitutes for genuine admission.
 
+Native settlement records population coverage, independent known-birth reads,
+and exact reservation observations separately. A population or registration
+error does not suppress lease polling. Current unknown process scope is recorded
+as `live_generations: null`; current unknown lease state is
+`exact_reservation_released: null`. Last successful values and their observation
+times are retained separately, never presented as fresh liveness or release.
+Known-birth entries identify the expected birth and the time and result of that
+individual read. Any observation error remains sticky for the operation, even
+if later reads succeed. Exact release, direct exit and stream EOF cannot repair
+unknown producer coverage or qualify an old failed operation.
+
+The native population reader still requires full same-UID identity coverage;
+it does not exclude an unreadable peer using only session or process-group
+membership. The SDK's child-list interfaces describe current relationships,
+not a retained birth-bound ancestry history. A relationship-first exclusion
+needs a separately qualified complete relationship/identity contract covering
+session changes, reparenting and PID reuse; none is enabled here. Denied known,
+same-session, descendant, unrelated or unresolved identities therefore retain
+the hold. This observer supports bounded synchronous producer chains, not
+universal observation of forks between samples.
+
 The CI child records inputs after frozen Bun installation and before the checks,
 then captures them again with products after all checks. Both captures must match
 for source, complete environment projection, CI script, dependency-resolution

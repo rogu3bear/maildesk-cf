@@ -3,6 +3,7 @@ import fcntl
 import ctypes
 import errno
 import json
+import itertools
 import os
 from pathlib import Path
 import subprocess
@@ -93,6 +94,26 @@ class NativeIdentityTests(unittest.TestCase):
         self.assertEqual(self.population([observer, 0, observer + 1], {observer: identity}).table(),
                          {observer: identity})
 
+    def test_partial_truncated_and_denied_population_never_establish_coverage(self):
+        for size in (0, -1, 1, 16384 * ctypes.sizeof(ctypes.c_int)):
+            with self.subTest(size=size):
+                reader = self.population([], {})
+                reader.lib.proc_listpids = lambda *args: size
+                with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
+                    reader.table()
+                reader.get.assert_not_called()
+
+    def test_unreadable_peer_is_not_excluded_without_qualified_relationship_evidence(self):
+        observer = os.getpid()
+        reader = self.population([observer, observer + 1], {})
+        def get(pid):
+            if pid == observer:
+                return {"pid": observer}
+            raise RuntimeError("full identity denied; relationship unknown")
+        reader.get.side_effect = get
+        with self.assertRaisesRegex(RuntimeError, "full identity denied"):
+            reader.table()
+
 
 class GenerationTrackingTests(unittest.TestCase):
     def setUp(self):
@@ -107,7 +128,7 @@ class GenerationTrackingTests(unittest.TestCase):
         self.tracker.scan()
         self.current.pop(11)
         self.tracker.scan()
-        self.native.get.assert_called_once_with(11)
+        self.native.get.assert_any_call(11)
         replacement = {**self.child, "birth": [3, 0]}
         self.current[11] = replacement
         self.assertEqual(self.tracker.scan(), [self.root, replacement])
@@ -153,6 +174,136 @@ class GenerationTrackingTests(unittest.TestCase):
         self.current[11] = {**self.child, "birth": [3, 0]}
         with self.assertRaisesRegex(RuntimeError, "generation drift"):
             self.tracker.scan()
+
+    def test_population_failure_still_observes_each_known_birth(self):
+        self.tracker.scan()
+        self.native.table = mock.Mock(side_effect=RuntimeError("population unknown"))
+        self.current.pop(11)
+        with self.assertRaisesRegex(RuntimeError, "population unknown"):
+            self.tracker.scan()
+        self.assertEqual(self.tracker.population_observation["state"], "unknown")
+        self.assertEqual([r["state"] for r in self.tracker.birth_observations], ["alive", "ended"])
+
+    def test_denied_known_identity_does_not_suppress_other_birth_observations(self):
+        self.tracker.scan()
+        def get(pid):
+            if pid == 10:
+                raise RuntimeError("known identity denied")
+            return self.current.get(pid)
+        self.native.get.side_effect = get
+        with self.assertRaisesRegex(RuntimeError, "known identity denied"):
+            self.tracker.scan()
+        self.assertEqual(self.tracker.population_observation["state"], "complete")
+        self.assertEqual([r["state"] for r in self.tracker.birth_observations], ["unknown", "alive"])
+        self.assertIsNone(self.tracker.birth_observations[0]["observed_at"])
+        self.assertEqual(self.tracker.birth_observations[0]["last_successful_observation"]["state"], "alive")
+
+    def test_changed_session_and_process_group_child_remains_in_scope(self):
+        self.current[11] = {**self.child, "session": 11, "pgid": 11}
+        grandchild = {"pid": 12, "birth": [3, 0], "ppid": 11, "session": 12, "pgid": 12}
+        self.current[12] = grandchild
+        self.assertEqual({r["pid"] for r in self.tracker.scan()}, {10, 11, 12})
+        self.current[11] = {**self.current[11], "ppid": 1}
+        self.current[12] = {**grandchild, "ppid": 1}
+        self.assertEqual({r["pid"] for r in self.tracker.scan()}, {10, 11, 12})
+
+
+class IndependentObservationTests(unittest.TestCase):
+    """Only disposable pipes/files and injected observations; no native PID queries."""
+    def observe(self, scans, leases, *, acknowledge=lambda: True):
+        with tempfile.TemporaryDirectory(prefix="maildesk-observation-fixture-") as directory:
+            pipes = []
+            for _ in range(2):
+                read, write = os.pipe()
+                os.close(write)
+                pipes.append(os.fdopen(read, "rb"))
+            child = types.SimpleNamespace(stdout=pipes[0], stderr=pipes[1],
+                                          poll=mock.Mock(side_effect=[None, 0]))
+            tracker = types.SimpleNamespace(history={}, scan=mock.Mock(side_effect=scans))
+            lease = mock.Mock(side_effect=leases)
+            try:
+                with mock.patch.object(settlement.time, "monotonic", side_effect=itertools.count(1, .1)):
+                    _, result = settlement.observe(child, Path(directory), tracker, lease, acknowledge=acknowledge)
+            finally:
+                for stream in pipes:
+                    stream.close()
+            return result, lease
+
+    def test_process_failure_does_not_suppress_exact_lease_release(self):
+        stale = [{"pid": 10, "birth": [1, 0]}]
+        result, lease = self.observe([stale, RuntimeError("population denied")], [False, True])
+        self.assertEqual(lease.call_count, 2)
+        self.assertIsNone(result["live_generations"])
+        self.assertEqual(result["last_successful_live_generations"], stale)
+        self.assertEqual(result["process_scope_observation"]["state"], "unknown")
+        self.assertLess(result["process_scope_observation"]["last_successful_elapsed_seconds"],
+                        result["process_scope_observation"]["attempted_elapsed_seconds"])
+        self.assertIs(result["exact_reservation_released"], True)
+        self.assertEqual(result["lease_observation"]["state"], "released")
+        self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
+
+    def test_lease_failure_does_not_turn_last_held_state_into_current_fact(self):
+        result, _ = self.observe([[], []], [False, RuntimeError("lease identity changed")])
+        self.assertEqual(result["live_generations"], [])
+        self.assertIsNone(result["exact_reservation_released"])
+        self.assertEqual(result["lease_observation"]["state"], "unknown")
+        self.assertIs(result["lease_observation"]["last_successful_released"], False)
+        self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
+
+    def test_acknowledgement_failure_still_polls_lease(self):
+        def denied():
+            raise RuntimeError("registration identity unknown")
+        result, lease = self.observe([[], []], [True, True], acknowledge=denied)
+        self.assertEqual(lease.call_count, 2)
+        self.assertIs(result["exact_reservation_released"], True)
+        self.assertFalse(result["launch_acknowledged"])
+        self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
+
+    def test_unobservable_lease_stays_unknown(self):
+        result, _ = self.observe([[], []], [None, RuntimeError("binding unavailable")])
+        self.assertIsNone(result["exact_reservation_released"])
+        self.assertIsNone(result["lease_observation"]["last_successful_elapsed_seconds"])
+
+    def test_later_complete_observations_do_not_clear_prior_uncertainty(self):
+        result, _ = self.observe([RuntimeError("population denied"), []], [False, True])
+        self.assertEqual(result["live_generations"], [])
+        self.assertEqual(result["process_scope_observation"]["state"], "complete")
+        self.assertEqual(result["errors"], ["population denied"])
+        self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
+
+    def test_run_opens_exact_fixture_lease_even_without_launch_acknowledgement(self):
+        with tempfile.TemporaryDirectory(prefix="maildesk-binding-fixture-") as directory:
+            output = Path(directory).resolve()
+            reservation = output / "reservation-fixture.json"
+            reservation.write_text('{"id":"fixture"}')
+            value = reservation.stat()
+            root = {"pid": 10, "birth": [1, 0], "ppid": 1, "session": 10, "pgid": 10}
+            binding = {"capability": {"reservation_id": "fixture", "descriptors": [[value.st_dev, value.st_ino]]},
+                "inner_generation": root, "reservation_path": str(reservation),
+                "reservation_record_sha256": settlement.hashlib.sha256(reservation.read_bytes()).hexdigest()}
+            (output / "reservation-binding.json").write_text(json.dumps(binding))
+            native = types.SimpleNamespace(get=mock.Mock(return_value=root),
+                table=mock.Mock(side_effect=RuntimeError("population denied")))
+            pipes = []
+            for _ in range(2):
+                read, write = os.pipe(); os.close(write)
+                pipes.append(os.fdopen(read, "rb"))
+            child = types.SimpleNamespace(pid=10, stdout=pipes[0], stderr=pipes[1], poll=lambda: 0)
+            try:
+                with mock.patch.object(settlement, "Processes", return_value=native), \
+                        mock.patch.object(settlement.subprocess, "Popen", return_value=child), \
+                        mock.patch.object(settlement.signal, "signal"):
+                    _, result = settlement.run(["fixture"], cwd=output, env={}, output=output,
+                                              read_record=lambda p: json.loads(p.read_text()))
+            finally:
+                for stream in pipes:
+                    stream.close()
+            self.assertFalse(result["launch_acknowledged"])
+            self.assertFalse((output / "launch-acknowledgement.json").exists())
+            self.assertIs(result["exact_reservation_released"], True)
+            self.assertTrue(result["reservation_observations"]["natural_release_lock_observed"])
+            self.assertEqual(result["known_birth_observations"][0]["state"], "alive")
+            self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")
