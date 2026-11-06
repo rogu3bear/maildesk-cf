@@ -271,7 +271,7 @@ class IndependentObservationTests(unittest.TestCase):
         self.assertEqual(result["errors"], ["population denied"])
         self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
 
-    def test_run_opens_exact_fixture_lease_even_without_launch_acknowledgement(self):
+    def binding_case(self, *, initially_held):
         with tempfile.TemporaryDirectory(prefix="maildesk-binding-fixture-") as directory:
             output = Path(directory).resolve()
             reservation = output / "reservation-fixture.json"
@@ -282,28 +282,51 @@ class IndependentObservationTests(unittest.TestCase):
                 "inner_generation": root, "reservation_path": str(reservation),
                 "reservation_record_sha256": settlement.hashlib.sha256(reservation.read_bytes()).hexdigest()}
             (output / "reservation-binding.json").write_text(json.dumps(binding))
-            native = types.SimpleNamespace(get=mock.Mock(return_value=root),
-                table=mock.Mock(side_effect=RuntimeError("population denied")))
+            held = reservation.open("r+b")
+            if initially_held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+            scans = 0
+            def denied_population():
+                nonlocal scans
+                scans += 1
+                if scans == 2 and initially_held:
+                    fcntl.flock(held, fcntl.LOCK_UN)
+                raise RuntimeError("population denied")
+            native = types.SimpleNamespace(get=mock.Mock(return_value=root), table=denied_population)
             pipes = []
             for _ in range(2):
                 read, write = os.pipe(); os.close(write)
                 pipes.append(os.fdopen(read, "rb"))
-            child = types.SimpleNamespace(pid=10, stdout=pipes[0], stderr=pipes[1], poll=lambda: 0)
+            child = types.SimpleNamespace(pid=10, stdout=pipes[0], stderr=pipes[1],
+                                          poll=mock.Mock(side_effect=[None, 0]))
             try:
                 with mock.patch.object(settlement, "Processes", return_value=native), \
                         mock.patch.object(settlement.subprocess, "Popen", return_value=child), \
+                        mock.patch.object(settlement.time, "monotonic", side_effect=itertools.count(1, .1)), \
                         mock.patch.object(settlement.signal, "signal"):
                     _, result = settlement.run(["fixture"], cwd=output, env={}, output=output,
                                               read_record=lambda p: json.loads(p.read_text()))
             finally:
                 for stream in pipes:
                     stream.close()
+                held.close()
             self.assertFalse(result["launch_acknowledged"])
             self.assertFalse((output / "launch-acknowledgement.json").exists())
             self.assertIs(result["exact_reservation_released"], True)
-            self.assertTrue(result["reservation_observations"]["natural_release_lock_observed"])
             self.assertEqual(result["known_birth_observations"][0]["state"], "alive")
             self.assertEqual(result["status"], "CACHE_RETAINED_SETTLEMENT_UNPROVED")
+            return result
+
+    def test_initially_unheld_exact_fixture_lease_is_not_an_observed_release_transition(self):
+        result = self.binding_case(initially_held=False)
+        self.assertEqual(result["lease_observation"]["state"], "released")
+        self.assertFalse(result["reservation_observations"].get("held_lock_observed", False))
+        self.assertFalse(result["reservation_observations"].get("natural_release_lock_observed", False))
+
+    def test_held_then_released_exact_fixture_is_observed_without_launch_acknowledgement(self):
+        result = self.binding_case(initially_held=True)
+        self.assertTrue(result["reservation_observations"]["held_lock_observed"])
+        self.assertTrue(result["reservation_observations"]["natural_release_lock_observed"])
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")

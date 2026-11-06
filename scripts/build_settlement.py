@@ -381,7 +381,9 @@ def run(argv, *, cwd, env, output, read_record, timeout=30):
         if [value.st_dev, value.st_ino] != binding["capability"]["descriptors"][0]:
             raise RuntimeError("Reservation namespace drift; never infer natural release")
         value = released(fd)
-        if value:
+        if not value:
+            evidence["held_lock_observed"] = True
+        elif evidence.get("held_lock_observed"):
             evidence["natural_release_lock_observed"] = True
         return value
     try:

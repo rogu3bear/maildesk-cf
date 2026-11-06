@@ -34,6 +34,9 @@ Known-birth entries identify the expected birth and the time and result of that
 individual read. Any observation error remains sticky for the operation, even
 if later reads succeed. Exact release, direct exit and stream EOF cannot repair
 unknown producer coverage or qualify an old failed operation.
+An initially unlocked exact descriptor establishes current release state only.
+The natural-release flag requires an observed held-then-released transition on
+that same descriptor; it does not require or substitute for launch acknowledgement.
 
 The native population reader still requires full same-UID identity coverage;
 it does not exclude an unreadable peer using only session or process-group
