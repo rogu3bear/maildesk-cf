@@ -99,7 +99,11 @@ export async function relayRuntime(through = 99, policy = testPolicy, actor = "o
   const spools = new Map<string, ArrayBuffer>();
   const jobs: MailJob[] = [];
   const sends: EmailMessageBuilder[] = [];
-  const faults = { spoolWrite: false, queueBefore: false, queueAfter: false, cleanup: false, providerAfter: false };
+  const faults: {
+    spoolWrite: boolean; queueBefore: boolean; queueAfter: boolean; cleanup: boolean; providerAfter: boolean;
+    beforeSpoolRead?: () => Promise<void>;
+    beforeProviderResult?: () => Promise<void>;
+  } = { spoolWrite: false, queueBefore: false, queueAfter: false, cleanup: false, providerAfter: false };
   const env: MaildeskEnv = {
     DB: d1 as unknown as D1Database,
     POLICY_STORE: { get: async (key: string) => key === `config/policy/${policySha}.json`
@@ -110,6 +114,7 @@ export async function relayRuntime(through = 99, policy = testPolicy, actor = "o
         spools.set(key, typeof value === "string" ? new TextEncoder().encode(value).buffer : value.slice(0));
       },
       async get(key: string) {
+        if (faults.beforeSpoolRead) await faults.beforeSpoolRead();
         const value = spools.get(key);
         return value ? { size: value.byteLength, arrayBuffer: async () => value.slice(0),
           text: async () => new TextDecoder().decode(value) } : null;
@@ -123,6 +128,7 @@ export async function relayRuntime(through = 99, policy = testPolicy, actor = "o
     } } as unknown as Queue<MailJob>,
     EMAIL: { async send(message: EmailMessageBuilder) {
       sends.push(message);
+      if (faults.beforeProviderResult) await faults.beforeProviderResult();
       if (faults.providerAfter) throw new Error("provider acknowledgement lost");
       return { messageId: `provider:${sends.length}` };
     } } as SendEmail,

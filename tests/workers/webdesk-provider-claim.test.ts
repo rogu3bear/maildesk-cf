@@ -108,7 +108,7 @@ test("a legacy thread cannot send after its route becomes delivery-only", async 
   } finally { f.db.close(); }
 });
 
-test("queue redelivery after an uncertain web-desk claim records recovery without sending", async () => {
+test("queue redelivery retains an uncertain web-desk claim without sending or inventing a result", async () => {
   const { processQueueBatch } = await import("../../workers/shared/outbound/queue");
   const f = await relayRuntime();
   try {
@@ -118,10 +118,13 @@ test("queue redelivery after an uncertain web-desk claim records recovery withou
     const batch = (attempts: number) => ({ messages: [{ body: job, attempts, ack() { acknowledgements++; }, retry() { retries++; } }] }) as unknown as MessageBatch<import("../../workers/shared/contracts").MailJob>;
     await expect(processQueueBatch(batch(1), f.env)).rejects.toThrow();
     expect(acknowledgements).toBe(0); expect(f.sends).toHaveLength(0);
+    const originalClaim = f.db.query("SELECT * FROM webdesk_provider_claims").get();
     f.d1.after = undefined;
     await processQueueBatch(batch(2), f.env);
     expect(acknowledgements).toBe(1); expect(retries).toBe(0); expect(f.sends).toHaveLength(0);
     expect(f.db.query("SELECT count(*) AS n FROM webdesk_provider_claims").get()).toEqual({ n: 1 });
-    expect(f.db.query("SELECT action FROM audit_events WHERE action='outbound_reply_recovery_required'").get()).toEqual({ action: "outbound_reply_recovery_required" });
+    expect(f.db.query("SELECT * FROM webdesk_provider_claims").get()).toEqual(originalClaim);
+    expect(f.db.query("SELECT action FROM audit_events WHERE dedupe_key=?").get(`${job.messageId}:outbound_reply_result`)).toBeNull();
+    expect(f.db.query("SELECT action FROM audit_events WHERE action='outbound_reply_duplicate_suppressed'").get()).toEqual({ action: "outbound_reply_duplicate_suppressed" });
   } finally { f.db.close(); }
 });

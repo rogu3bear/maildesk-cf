@@ -1658,7 +1658,8 @@ describe("mail API outbound sender modes", () => {
 
     expect(email.messages).toHaveLength(0);
     expect(batch.ackCount).toBe(1);
-    expect(db.hasAuditAction("outbound_reply_recovery_required")).toBe(true);
+    expect(db.hasAuditAction("outbound_reply_recovery_required")).toBe(false);
+    expect(db.auditDetail("outbound_reply_requested")).toEqual({ outboundMode: "cloudflare_email_service" });
     expect(db.hasAuditAction("outbound_reply_duplicate_suppressed")).toBe(true);
   });
 
@@ -1707,7 +1708,8 @@ describe("mail API outbound sender modes", () => {
 
     expect(providerCalls).toBe(0);
     expect(batch.ackCount).toBe(1);
-    expect(db.hasAuditAction("outbound_reply_recovery_required")).toBe(true);
+    expect(db.hasAuditAction("outbound_reply_recovery_required")).toBe(false);
+    expect(db.auditDetail("outbound_reply_duplicate_suppressed")).toMatchObject({ observedState: "non_resumable_claim", providerReplay: false });
   });
 
   test("an ambiguous Cloudflare provider failure is surfaced for recovery without automatic replay", async () => {
@@ -2299,11 +2301,10 @@ describe("mail API outbound sender modes", () => {
       expect(db.hasAuditAction("outbound_reply_requested")).toBe(false);
       expect(db.hasAuditAction("outbound_reply_authorized")).toBe(false);
       expect(db.hasAuditAction("outbound_reply_send_attempted")).toBe(false);
-      expect(db.auditDetail("outbound_reply_failed")).toMatchObject({
-        result: {
-          provider: "cloudflare_email_service",
-          error: "operator delivery mode is invalid",
-        },
+      expect(db.hasAuditAction("outbound_reply_failed")).toBe(false);
+      expect(db.auditDetail("outbound_reply_configuration_rejected")).toMatchObject({
+        provider: "cloudflare_email_service",
+        error: "operator delivery mode is invalid", providerReplay: false,
       });
     }
   });

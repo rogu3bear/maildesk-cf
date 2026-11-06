@@ -339,11 +339,12 @@ async function recordQueueEvent(
     return ACK;
   }
   if (job.kind === "outbound_reply_requested" && operatorDeliveryConfig(env).mode === "invalid") {
-    await recordTerminalSendEvent(job, env, "outbound_reply_failed", {
-      ok: false,
-      provider: configuredOutboundMode(env),
-      error: "operator delivery mode is invalid",
-    });
+    // This consumer owns no dispatch claim. Reject its configuration without
+    // publishing a provider outcome for another consumer of the same job.
+    await recordAuditEvent(env, "system", "outbound_reply_configuration_rejected", {
+      messageIdSha256: await sha256Hex(job.messageId), provider: configuredOutboundMode(env),
+      error: "operator delivery mode is invalid", providerReplay: false,
+    }, `${job.messageId}:outbound_reply_configuration_rejected`, job.threadId);
     return ACK;
   }
   const base = dedupeBase(job);
@@ -385,15 +386,9 @@ async function recordQueueEvent(
     const knownUnsent = journal?.admission_status === "claimed" && journal.status === "authorized";
     if (!knownUnsent && (claimedMode !== "resend" || currentMode !== claimedMode || !await resendClaimCanResume(job, env))) {
       await recordOutboundDuplicateSuppressed(job, env, "non_resumable_claim");
-      await recordTerminalSendEvent(job, env, "outbound_reply_recovery_required", {
-        ok: false,
-        provider: claimedMode ?? "unknown",
-        ambiguous: true,
-        error:
-          claimedMode && claimedMode !== currentMode
-            ? `outbound provider mode changed before recovery: ${claimedMode} -> ${currentMode}`
-            : "outbound transition lacks a matching request within the provider idempotency window",
-      });
+      // A duplicate has no provider result and cannot tell an active owner
+      // from a lost acknowledgement. Leave the shared terminal key to the
+      // sender; an existing unknown stays unknown and cannot be replayed.
       return ACK;
     }
   }

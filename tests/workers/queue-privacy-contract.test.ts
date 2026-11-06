@@ -64,13 +64,16 @@ test("Resend recovery requires the original provider, request digest and unexpir
         claimObservedAt: scenario === "missing_time" ? undefined : new Date(Date.now() - (scenario === "expired" ? 24 * 3_600_000 : 1000)).toISOString(),
         resendRequestSha256: await sha256Hex(resendRequestBody(original)) };
       f.db.run("INSERT INTO audit_events(id,dedupe_key,thread_id,actor,action,detail_json) VALUES ('seed',?,'thread:one','system','outbound_reply_requested',?)", [`${original.messageId}:outbound_reply_requested`,JSON.stringify(detail)]);
+      const originalClaim = f.db.query("SELECT * FROM audit_events WHERE id='seed'").get();
       f.env.MAILDESK_OPERATOR_DELIVERY_MODE = "web_desk"; f.env.MAILDESK_OUTBOUND_MODE = "resend"; f.env.RESEND_API_KEY = "offline-fixture";
       globalThis.fetch = async (_url, init) => { calls++; expect(new Headers(init?.headers).get("idempotency-key")).toBe(original.messageId); return Response.json({ id: "fixture-accepted" }); };
       if (scenario === "changed_payload") original.text = "Changed payload";
       await processQueueBatch({ messages: [{ body: original, attempts: 2, ack() {}, retry() {} }] } as unknown as MessageBatch<MailJob>, f.env);
       expect(calls).toBe(scenario === "matching" ? 1 : 0);
-      const event = f.db.query("SELECT action FROM audit_events WHERE dedupe_key=?").get(`${original.messageId}:outbound_reply_result`) as { action: string };
-      expect(event.action).toBe(scenario === "matching" ? "outbound_reply_delivered" : "outbound_reply_recovery_required");
+      const event = f.db.query("SELECT action FROM audit_events WHERE dedupe_key=?").get(`${original.messageId}:outbound_reply_result`);
+      expect(event).toEqual(scenario === "matching" ? { action: "outbound_reply_delivered" } : null);
+      expect(f.db.query("SELECT * FROM audit_events WHERE id='seed'").get()).toEqual(originalClaim);
+      if (scenario !== "matching") expect(f.db.query("SELECT json_extract(detail_json,'$.providerReplay') AS replay FROM audit_events WHERE action='outbound_reply_duplicate_suppressed'").get()).toEqual({ replay: 0 });
     } finally { globalThis.fetch = prior; f.db.close(); }
   }
 });

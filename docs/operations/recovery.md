@@ -51,7 +51,7 @@ establish the state or authorize a send.
 | Recipients accepted, route-health/audit projection failed | Provider acceptance can be durable even though aggregate/UI state is stale | Restore D1/Queue availability. Normal exact inbound redelivery or the already accepted result Queue job can finish projection. The consumer verifies the full claim before cleanup and never sends from a result job. | Complete aggregate projection plus idempotent spool cleanup; no extra provider call. |
 | Reply `receiving` or `queued`, no outbound send claim | Authenticated bytes were accepted locally; Queue acceptance may be the remaining step | Identical authenticated operator redelivery may resume Queue admission under the same attempt ID/digest. Consumer rechecks active operator authorization and the exact spool. | Queue job consumed and an explicit terminal result recorded. Queue acceptance alone is not send proof. |
 | Reply spool unavailable or policy unavailable | Consumer cannot safely authorize/construct the reply | `recovery_required` is terminal for this consumption attempt. Repair the dependency, preserve its identity and use only a supported approved recovery operation. Never copy arbitrary body bytes into the claim. Missing/expired content may be unrecoverable. | Exact recovery result or explicit unresolved/content-unavailable outcome. |
-| Outbound Cloudflare claim exists with no terminal result | The transition may have crossed the provider boundary | Redelivery records recovery-required and acknowledges without another send. Reconcile provider/recipient evidence under the same identity. No automatic replay, including switching to another provider. | Proven terminal result or explicit `outcome_unknown`. |
+| Non-resumable outbound Cloudflare claim, no terminal result | The owner may still be in flight; the provider outcome is unresolved | Redelivery records only nonterminal duplicate suppression and acknowledges without another send or an invented terminal result. Preserve the claim and reconcile provider/recipient evidence under the same identity. No automatic replay, including switching to another provider. | Owner-recorded terminal result or explicit incident `outcome_unknown`. Missing terminal evidence does not establish acceptance or an unsent transition. |
 | Outbound terminal result exists, D1 projection or cleanup failed | The recorded provider outcome survives the local failure | Normal Queue redelivery repeats only idempotent projection and cleanup. It does not call the provider again. | Projection and cleanup finish; provider call count remains unchanged. |
 | Retryable idempotent Resend failure in an explicitly configured legacy integration | Provider contract supports the stable message-ID idempotency key | Existing bounded retries may proceed only while the provider matches the original claim. Exhaustion reaches the configured DLQ; an ambiguous/non-idempotent claim is never converted into a retry. | Terminal audit, or a DLQ incident with retained evidence. |
 
@@ -59,6 +59,10 @@ establish the state or authorize a send.
 It must not be interpreted as `provider_outcome_unknown`. The aggregate may
 still require recovery. Missing retained content does not justify recreating or
 resending an already accepted recipient.
+
+An invalid consumer configuration is rejected before any send claim or provider
+call. Its `outbound_reply_configuration_rejected` audit is a local observation;
+it does not record a provider failure or settle another consumer's claim.
 
 ## Resolve or keep explicitly unresolved
 
