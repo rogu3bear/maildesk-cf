@@ -83,6 +83,13 @@ including `build`. Full CI places Python fixture temporary files beneath its
 fresh proof so nested compilers inherit that coverage. Capacity/write-path
 coverage alone does not grant an output lease; missing parent coverage holds.
 The growth estimate and inherited reservation descriptors remain unchanged.
+The ordinary workflow's pure `operation_resource(repo, output, original)` planner
+adds only missing `build` and exact fresh proof lanes already covered by the
+caller's write paths. It preserves a fully declared request byte-for-byte and
+records the original request's SHA-256 in a derivative's estimate basis. The
+effective request and digest are retained in `operation.json`; the seed file is
+never edited. A required output outside the original write scope fails before
+admission. Manual qualification requests must declare these same exact outputs.
 
 This is a platform-bound macOS build diagnostic. Both libproc and `kern.proc`
 records are SDK-declared private/SPI interfaces, with no general future-platform

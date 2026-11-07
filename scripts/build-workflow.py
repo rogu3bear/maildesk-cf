@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ordinary package workflows share one admitted compiler-cache lifetime."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -64,6 +65,35 @@ def enclosing_operation(repo, proof, inherited):
     return path
 
 
+def operation_resource(repo, output, original):
+    """Plan exact operation outputs inside the caller's existing write scope.
+
+    This pure planner neither admits work nor changes the source request file.
+    A fully declared request is returned byte-for-byte unchanged.
+    """
+    if (repo.resolve() != repo or output.resolve() != output or
+            not output.is_relative_to(repo / "var/proof")):
+        raise RuntimeError("Operation output must remain in the canonical proof namespace")
+    request = json.loads(original)
+    writes = request.get("write_paths")
+    lanes = request.get("output_roots", [])
+    if (request.get("working_directory") != str(repo) or not isinstance(writes, list) or not writes or
+            not isinstance(lanes, list) or any(not isinstance(p, str) or not Path(p).is_absolute() for p in [*writes, *lanes])):
+        raise RuntimeError("Operation resource paths are invalid")
+    required = [repo / "build", output]
+    if any(path.resolve() != path or not any(path.is_relative_to(Path(p).resolve()) for p in writes) for path in required):
+        raise RuntimeError("Operation outputs exceed the caller's authorized write paths")
+    missing = [str(path) for path in required if not any(path.is_relative_to(Path(p).resolve()) for p in lanes)]
+    if not missing:
+        return original
+    request["output_roots"] = [*lanes, *missing]
+    basis = hashlib.sha256(original.encode()).hexdigest()
+    request["estimate_basis"] = (request.get("estimate_basis", "Caller-supplied estimate") +
+        "; exact operation output declaration derived from request SHA256 " + basis +
+        "; growth and write paths unchanged; add only required build/proof outputs")
+    return json.dumps(request, indent=2) + "\n"
+
+
 def workflow(repo, name, extra, *, execute=subprocess.run, outer=None):
     command = command_for(name, extra)
     inherited = retirement.inherited_fds(os.environ)
@@ -91,12 +121,13 @@ def workflow(repo, name, extra, *, execute=subprocess.run, outer=None):
         if not any(destination.is_relative_to(Path(p).resolve()) for p in request["write_paths"]):
             raise RuntimeError("Router output is outside the admitted write paths")
     output = repo / "var/proof" / ("build-lifecycle-" + uuid.uuid4().hex)
+    effective_resource = operation_resource(repo, output, resource.read_text())
     if outer is None:
         outer = runpy.run_path(str(repo / "scripts/build-and-retire.py"))["operation"]
     if name == "ci" and value.get("ci_completion", "retire") == "settled-retained":
-        return outer(repo, output, value["authorization_ref"], resource.read_text(), command, (),
+        return outer(repo, output, value["authorization_ref"], effective_resource, command, (),
                      pin_dispositions=[], ci_completion="settled-retained")
-    return outer(repo, output, value["authorization_ref"], resource.read_text(), command, (),
+    return outer(repo, output, value["authorization_ref"], effective_resource, command, (),
                  pin_dispositions=value.get("pin_dispositions", []))
 
 
