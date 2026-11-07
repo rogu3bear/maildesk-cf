@@ -38,6 +38,8 @@ class Processes:
         self.lib.proc_listpids.restype = ctypes.c_int
 
     def get(self, pid):
+        if type(pid) is not int or not 0 < pid < 2 ** 31:
+            raise RuntimeError("Native process identity target must be a positive pid_t")
         row = BSDInfo(); ctypes.set_errno(0)
         size = self.lib.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
         if size != ctypes.sizeof(row):
@@ -45,11 +47,12 @@ class Processes:
             if size == 0 and error in (errno.ESRCH, errno.ENOENT):
                 return None
             # An enumerated process can exit before libproc supplies a record.
-            # An empty/errorless read alone proves nothing. Only independent
-            # kernel absence qualifies this case; denial, partial data, a live
-            # or reused PID, and any other probe failure remain unknown.
+            # Neither an empty/errorless read nor EPERM proves exit. For these
+            # zero-byte results only, independent kernel ESRCH can establish
+            # absence. A live/reused PID, probe denial or other probe failure
+            # stays unknown; partial records never take this path.
             absence = "not probed"
-            if size == 0 and error == 0:
+            if size == 0 and error in (0, errno.EPERM):
                 try:
                     os.kill(pid, 0)
                     absence = "PID exists"
@@ -59,7 +62,7 @@ class Processes:
                     absence = "probe errno=" + str(probe.errno)
             raise RuntimeError("Unknown native process identity for PID " + str(pid) +
                                " (bytes=" + str(size) + ", errno=" + str(error) + ", " + absence + ")")
-        if row.pid != pid or row.uid != os.getuid() or not row.seconds:
+        if row.pid != pid or row.uid != os.getuid() or not row.seconds or row.microseconds >= 1_000_000:
             raise RuntimeError("Native process identity/owner drift")
         if row.status == 5:  # Kernel zombie: no executable writer remains.
             return None

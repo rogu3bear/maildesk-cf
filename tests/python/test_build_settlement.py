@@ -29,33 +29,88 @@ class NativeIdentityTests(unittest.TestCase):
         reader.lib = types.SimpleNamespace(proc_pidinfo=query)
         return reader
 
+    def complete_reader(self, **changes):
+        row = settlement.BSDInfo()
+        row.pid, row.uid, row.seconds, row.microseconds, row.status = 12345, os.getuid(), 100, 500, 2
+        row.ppid, row.pgid = 1, 12345
+        for field, value in changes.items():
+            setattr(row, field, value)
+        def query(_pid, _flavor, _arg, output, _size):
+            ctypes.memmove(output, ctypes.byref(row), ctypes.sizeof(row))
+            ctypes.set_errno(0)
+            return ctypes.sizeof(row)
+        reader = settlement.Processes.__new__(settlement.Processes)
+        reader.lib = types.SimpleNamespace(proc_pidinfo=query)
+        return reader
+
     def test_empty_errorless_query_requires_independent_kernel_absence(self):
         reader = self.reader(0, 0)
         with mock.patch.object(settlement.os, "kill", side_effect=ProcessLookupError(errno.ESRCH, "ended")) as probe:
             self.assertIsNone(reader.get(12345))
         probe.assert_called_once_with(12345, 0)
 
+    def test_empty_denied_query_requires_independent_kernel_absence(self):
+        with mock.patch.object(settlement.os, "kill", side_effect=ProcessLookupError(errno.ESRCH, "ended")) as probe:
+            self.assertIsNone(self.reader(0, errno.EPERM).get(12345))
+        probe.assert_called_once_with(12345, 0)
+
     def test_live_or_reused_pid_never_becomes_an_empty_population(self):
-        with mock.patch.object(settlement.os, "kill", return_value=None):
-            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=0, PID exists"):
-                self.reader(0, 0).get(12345)
+        for error in (0, errno.EPERM):
+            with self.subTest(error=error), mock.patch.object(settlement.os, "kill", return_value=None) as probe:
+                with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, PID exists"):
+                    self.reader(0, error).get(12345)
+                probe.assert_called_once_with(12345, 0)
 
     def test_denied_absence_probe_preserves_unknown(self):
-        with mock.patch.object(settlement.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
-            with self.assertRaisesRegex(RuntimeError, "probe errno=1"):
-                self.reader(0, 0).get(12345)
+        for error in (0, errno.EPERM):
+            with self.subTest(error=error), mock.patch.object(settlement.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
+                with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, probe errno=1"):
+                    self.reader(0, error).get(12345)
 
     def test_native_denial_is_not_relabelled_as_exit(self):
-        with mock.patch.object(settlement.os, "kill") as probe:
-            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=1, not probed"):
+        with mock.patch.object(settlement.os, "kill", return_value=None) as probe:
+            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=1, PID exists"):
                 self.reader(0, errno.EPERM).get(12345)
-        probe.assert_not_called()
+        probe.assert_called_once_with(12345, 0)
+
+    def test_only_esrch_from_independent_probe_can_establish_absence(self):
+        for error in (0, errno.EPERM):
+            for probe_error in (errno.ENOENT, errno.EIO, errno.EACCES):
+                with self.subTest(error=error, probe_error=probe_error), mock.patch.object(settlement.os, "kill", side_effect=OSError(probe_error, "unknown")):
+                    with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, probe errno={probe_error}"):
+                        self.reader(0, error).get(12345)
 
     def test_partial_native_record_remains_unknown(self):
-        for error in (0, errno.ESRCH, errno.ENOENT, errno.EPERM):
-            with self.subTest(error=error), mock.patch.object(settlement.os, "kill") as probe:
-                with self.assertRaisesRegex(RuntimeError, "not probed"):
-                    self.reader(ctypes.sizeof(settlement.BSDInfo) - 1, error).get(12345)
+        for size in (-1, ctypes.sizeof(settlement.BSDInfo) - 1, ctypes.sizeof(settlement.BSDInfo) + 1):
+            for error in (0, errno.ESRCH, errno.ENOENT, errno.EPERM):
+                with self.subTest(size=size, error=error), mock.patch.object(settlement.os, "kill") as probe:
+                    with self.assertRaisesRegex(RuntimeError, "not probed"):
+                        self.reader(size, error).get(12345)
+                    probe.assert_not_called()
+
+    def test_malformed_complete_identity_is_unknown_without_an_absence_probe(self):
+        for field, value in (("pid", 12346), ("uid", os.getuid() + 1), ("seconds", 0), ("microseconds", 1_000_000)):
+            reader = self.complete_reader(**{field: value})
+            with self.subTest(field=field), mock.patch.object(settlement.os, "kill") as probe, mock.patch.object(settlement.os, "getsid") as session:
+                with self.assertRaisesRegex(RuntimeError, "identity/owner drift"):
+                    reader.get(12345)
+                probe.assert_not_called()
+                session.assert_not_called()
+
+    def test_valid_complete_identity_retains_its_birth_without_an_absence_probe(self):
+        with mock.patch.object(settlement.os, "kill") as probe, mock.patch.object(settlement.os, "getsid", return_value=12345):
+            self.assertEqual(self.complete_reader().get(12345),
+                             {"pid": 12345, "birth": [100, 500], "ppid": 1, "session": 12345, "pgid": 12345})
+            probe.assert_not_called()
+
+    def test_nonprocess_pid_never_reaches_native_or_independent_probe(self):
+        for pid in (0, -1, True, 1.5, 2 ** 31):
+            reader = settlement.Processes.__new__(settlement.Processes)
+            reader.lib = types.SimpleNamespace(proc_pidinfo=mock.Mock())
+            with self.subTest(pid=pid), mock.patch.object(settlement.os, "kill") as probe:
+                with self.assertRaisesRegex(RuntimeError, "positive pid_t"):
+                    reader.get(pid)
+                reader.lib.proc_pidinfo.assert_not_called()
                 probe.assert_not_called()
 
     def test_explicit_native_absence_needs_no_fallback(self):

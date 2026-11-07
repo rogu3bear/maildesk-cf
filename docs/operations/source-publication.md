@@ -31,7 +31,7 @@ as `live_generations: null`; current unknown lease state is
 `exact_reservation_released: null`. Last successful values and their observation
 times are retained separately, never presented as fresh liveness or release.
 Known-birth entries identify the expected birth and the time and result of that
-individual read. Any observation error remains sticky for the operation, even
+individual read. Any unresolved observation error remains sticky for the operation, even
 if later reads succeed. Exact release, direct exit and stream EOF cannot repair
 unknown producer coverage or qualify an old failed operation.
 An initially unlocked exact descriptor establishes current release state only.
@@ -43,10 +43,19 @@ it does not exclude an unreadable peer using only session or process-group
 membership. The SDK's child-list interfaces describe current relationships,
 not a retained birth-bound ancestry history. A relationship-first exclusion
 needs a separately qualified complete relationship/identity contract covering
-session changes, reparenting and PID reuse; none is enabled here. Denied known,
-same-session, descendant, unrelated or unresolved identities therefore retain
+session changes, reparenting and PID reuse; none is enabled here. Unresolved known,
+same-session, descendant or unrelated identities therefore retain
 the hold. This observer supports bounded synchronous producer chains, not
 universal observation of forks between samples.
+
+A zero-byte errorless or `EPERM` identity read permits one independent
+`kill(pid, 0)` check of that exact positive process ID. Only the probe's `ESRCH`
+establishes absence at that observation; `EPERM` itself never proves exit.
+A successful probe may refer to a live or reused PID and leaves identity unknown,
+as do denied or unexpected probe failures. Partial or malformed records never
+qualify through this check. Signal zero sends no signal; see Apple's
+[`kill(2)` contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kill.2.html).
+This prospective method does not reclassify any historical failed receipt.
 
 The CI child records inputs after frozen Bun installation and before the checks,
 then captures them again with products after all checks. Both captures must match
