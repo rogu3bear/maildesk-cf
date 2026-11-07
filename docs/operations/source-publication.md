@@ -76,6 +76,14 @@ must remain unchanged. There is no shared mutable helper cache or environment
 override for backend selection. Production proof retains its backend namespace;
 disposable tests own and close their temporary namespaces.
 
+Each compiler admission declares its unique backend directory as its output
+lane. The enclosing resource request must lease the operation's proof directory
+(including Python fixture temporary directories), as well as every product root
+including `build`. Full CI places Python fixture temporary files beneath its
+fresh proof so nested compilers inherit that coverage. Capacity/write-path
+coverage alone does not grant an output lease; missing parent coverage holds.
+The growth estimate and inherited reservation descriptors remain unchanged.
+
 This is a platform-bound macOS build diagnostic. Both libproc and `kern.proc`
 records are SDK-declared private/SPI interfaces, with no general future-platform
 stability promise. See Apple's [`sysctl(3)` contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sysctl.3.html)

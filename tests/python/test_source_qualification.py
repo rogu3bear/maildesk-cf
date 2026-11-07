@@ -522,7 +522,7 @@ class LifecycleCaptureTests(unittest.TestCase):
                    "MAILDESK_SOURCE_QUALIFICATION": "1", "DISK_GUARD_RESERVATION": "fixture"}
             with mock.patch.object(qualification, "_command", side_effect=command), \
                  mock.patch.object(qualification, "tree_binding", side_effect=lambda path: qualification.object_sha256(str(path))), \
-                 mock.patch.object(qualification, "file_bindings", return_value={"scripts/ci.sh": "d" * 64}), \
+                 mock.patch.object(qualification, "file_bindings", side_effect=lambda _root, paths: {path: "d" * 64 for path in paths}), \
                  mock.patch.object(qualification, "_executable_binding", return_value="e" * 64), \
                  mock.patch.object(qualification.shutil, "which", return_value="/fixture/tool"):
                 before = qualification.capture_current(repo, env, ci_child=True, include_products=False)

@@ -161,7 +161,9 @@ class NativeKernelContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="maildesk-kernel-contract-") as folder:
             binary = Path(folder)/"contract"
             environment = dict(os.environ)
-            guard = ["disk-guard", "run", "--budget-gb", "0.05", "--volume", folder, "--volume", "/private/tmp", "--"]
+            environment["TMPDIR"] = folder
+            guard = ["disk-guard", "run", "--budget-gb", "0.05", "--volume", folder, "--volume", "/private/tmp",
+                     "--build-lane", folder, "--"]
             native.command([*guard, "/usr/bin/xcrun", "clang", "-Wall", "-Wextra", "-Werror",
                             str(Path(__file__).with_name("native_processes_contract.c")), "-o", str(binary)], environment)
             output = native.command([*guard, str(binary)], environment)

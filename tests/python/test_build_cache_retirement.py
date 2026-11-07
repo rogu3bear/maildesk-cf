@@ -37,7 +37,8 @@ class RetirementTests(unittest.TestCase):
         self.proof = self.repo / "var/proof/run"; self.proof.mkdir(parents=True)
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn fixture() {}\n")
-        (self.repo / "Cargo.toml").write_text('[package]\nname="retirement-fixture"\nversion="0.1.0"\n')
+        # This fixture is an independent workspace even beneath a host checkout.
+        (self.repo / "Cargo.toml").write_text('[workspace]\n[package]\nname="retirement-fixture"\nversion="0.1.0"\n')
         (self.repo / ".gitignore").write_text("/target/\n/var/\n/build/\n/generated/\n")
         cache.run(["git", "init"], self.repo)
         cache.run(["git", "config", "user.name", "Retirement Fixture"], self.repo)

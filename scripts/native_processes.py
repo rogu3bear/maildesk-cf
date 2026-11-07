@@ -99,7 +99,8 @@ def prepare(directory=None):
         raise RuntimeError("Native reader SDK or compiler unavailable")
     target = root / "reader.dylib"
     base = [str(clang), "-isysroot", str(sdk), "-Wall", "-Wextra", "-Werror"]
-    guard = ["disk-guard", "run", "--budget-gb", "0.05", "--volume", str(root), "--volume", "/private/tmp", "--"]
+    guard = ["disk-guard", "run", "--budget-gb", "0.05", "--volume", str(root), "--volume", "/private/tmp",
+             "--build-lane", str(root), "--"]
     def selections(text):
         return sorted({(str(Path(name).absolute()), str(Path(name).resolve(strict=True)))
                        for name in shlex.split(text.replace("\\\n", " "))[1:]})

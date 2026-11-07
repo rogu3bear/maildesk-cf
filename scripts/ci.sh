@@ -56,7 +56,14 @@ step "bun run test:scripts"
 bun test ./tests/scripts
 
 step "selective compiler-retirement preservation fixtures"
-python3 -B -m unittest discover -s tests/python -p 'test_*.py'
+if [[ -n "${MAILDESK_BUILD_LIFETIME_PROOF:-}" ]]; then
+  # Native fixture compilers must remain inside the outer proof's leased lane.
+  fixture_tmp="$MAILDESK_BUILD_LIFETIME_PROOF/python-fixtures"
+  mkdir -m 700 "$fixture_tmp"
+  TMPDIR="$fixture_tmp" python3 -B -m unittest discover -s tests/python -p 'test_*.py'
+else
+  python3 -B -m unittest discover -s tests/python -p 'test_*.py'
+fi
 
 step "scripts/check-template.sh"
 bash scripts/check-template.sh --reuse-worker-bundles
