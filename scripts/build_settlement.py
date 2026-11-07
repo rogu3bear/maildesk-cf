@@ -4,6 +4,7 @@ This is an attended, synchronous owner. It never cancels descendants, releases
 their leases, runs a detached finalizer or claims universal fork observation.
 """
 import fcntl
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from native_processes import Processes
+from native_processes import Processes, relationship_evidence_valid, relationship_changed
 
 
 def atomic_save(path, value):
@@ -49,14 +50,18 @@ class Tracker:
         self.exiting = set()
         self.exit_history = []
         self.pending_exits = []
+        self.relationship_members = set()
+        self.relationship_history = []
+        self.relationship_last = {}
+        self.pending_relationships = []
         self.population_observation = {"state": "unknown", "observed_at": None, "last_successful_observed_at": None}
         self.birth_observations = []
 
     def register(self, expected):
         if not self.active_launch(expected):
             raise RuntimeError("Recorded launch registration requires a complete active identity")
-        if self.pending_exits:
-            raise RuntimeError("Pending exit identities prevent launch acknowledgement")
+        if self.pending_exits != [] or self.pending_relationships != []:
+            raise RuntimeError("Pending exit or relationship identities prevent launch acknowledgement")
         actual = self.processes.get(expected["pid"])
         if actual is None or actual["birth"] != expected["birth"]:
             raise RuntimeError("Registered generation changed before launch acknowledgement")
@@ -77,13 +82,22 @@ class Tracker:
         if observe_state:
             key = (pid, tuple(row["birth"]))
             state = row.get("state", "active")
+            if key in self.ended:
+                raise RuntimeError("Ended native identity reappeared")
             if state == "exiting":
                 evidence = row.get("native_evidence")
                 flag = getattr(self.processes, "exiting_flag", 0)
                 if (not flag or not isinstance(evidence, dict) or type(evidence.get("flags")) is not int or
                         not evidence["flags"] & flag or any(row[key] is not None for key in ("session", "ppid", "pgid"))):
                     raise RuntimeError("Unqualified native exit identity")
-            if state not in ("active", "exiting") or key in self.exiting and state != "exiting":
+            if state == "relationship_transition":
+                evidence = row.get("native_evidence")
+                flag = getattr(self.processes, "exiting_flag", 0)
+                if (not flag or not relationship_evidence_valid(evidence, pid, row["birth"], flag) or
+                        not relationship_changed(evidence) or any(row[k] is not None for k in ("ppid", "pgid", "session"))):
+                    raise RuntimeError("Unqualified native relationship transition")
+                self.relationship_members.add(key)
+            if state not in ("active", "exiting", "relationship_transition") or key in self.exiting and state != "exiting":
                 raise RuntimeError("Native exiting identity regressed or has an unsupported state")
             if state == "exiting" and key not in self.exiting:
                 if len(self.exit_history) >= 16384:
@@ -91,12 +105,24 @@ class Tracker:
                 self.exiting.add(key)
                 self.exit_history.append({"observed_at": time.time(), **row, "birth": list(row["birth"]),
                                           "native_evidence": dict(row["native_evidence"])})
+            if key in self.relationship_members:
+                self.record_relationship(row)
+
+    def record_relationship(self, row):
+        key = (row["pid"], tuple(row["birth"]))
+        if self.relationship_last.get(key) != row:
+            if len(self.relationship_history) >= 16384:
+                raise RuntimeError("Native relationship history exceeds qualified bound")
+            snapshot = deepcopy(row)
+            self.relationship_history.append({"observed_at": time.time(), **snapshot})
+            self.relationship_last[key] = deepcopy(snapshot)
 
     def scan(self):
         # Population coverage and known births are independent observations.
         # A denied peer must not prevent reads of already owned generations.
         errors = []
         self.pending_exits = None
+        self.pending_relationships = None
         table = None
         self.population_observation["attempted_at"] = time.time()
         try:
@@ -111,6 +137,9 @@ class Tracker:
             for row in table.values():
                 try:
                     self.validate_generation(row)
+                    if row.get("state") == "relationship_transition":
+                        self.known[row["pid"]] = row
+                        self.history[(row["pid"], tuple(row["birth"]))] = row
                 except Exception as error:
                     errors.append(str(error))
         current = {}
@@ -129,11 +158,16 @@ class Tracker:
                 observation["state"] = "alive" if actual is not None and actual["birth"] == expected["birth"] else "ended"
                 if observation["state"] == "alive" and actual.get("state") == "exiting":
                     observation["state"] = "exiting"
+                if observation["state"] == "alive" and actual.get("state") == "relationship_transition":
+                    observation["state"] = "relationship_transition"
                 observation["observed_at"] = time.time()
                 observation["last_successful_observation"] = {"state": observation["state"],
                     "observed_at": observation["observed_at"], "observed_birth": actual["birth"] if actual is not None else None}
                 if observation["state"] == "ended":
                     self.ended.add((pid, tuple(expected["birth"])))
+                    if key in self.relationship_members:
+                        self.record_relationship({"pid": pid, "birth": list(expected["birth"]), "state": "ended",
+                                                  "source": "independent_identity_read"})
             except Exception as error:
                 observation["error"] = str(error)
                 errors.append(str(error))
@@ -141,12 +175,12 @@ class Tracker:
         if table is None:
             raise RuntimeError("; ".join(dict.fromkeys(errors)))
         live = {pid: row for pid, row in table.items() if
-                row.get("state") == "exiting" or
+                row.get("state") in ("exiting", "relationship_transition") or
                 pid in self.known and row["birth"] == self.known[pid]["birth"] or row["session"] == self.session}
         # Independent known-birth reads occur after the population snapshot.
         # Keep their newer exit state; an older active snapshot is not regression.
         for pid, actual in current.items():
-            if pid in live and actual is not None and actual.get("state") == "exiting":
+            if pid in live and actual is not None and actual["birth"] == live[pid]["birth"]:
                 live[pid] = actual
         while True:
             children = {pid: row for pid, row in table.items() if row["ppid"] in live and pid not in live}
@@ -177,6 +211,7 @@ class Tracker:
         self.ended, self.live = ended, live
         self.known.update(live)
         self.pending_exits = [row for row in live.values() if row.get("state") == "exiting"]
+        self.pending_relationships = [row for row in live.values() if (row["pid"], tuple(row["birth"])) in self.relationship_members]
         return list(live.values())
 
 
@@ -202,7 +237,7 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
     for stream in streams:
         os.set_blocking(stream.fileno(), False); selector.register(stream, selectors.EVENT_READ)
     started = time.monotonic()
-    result = {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "native_state_schema": "maildesk-native-state/v1", "stream_eof": [],
+    result = {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "native_state_schema": "maildesk-native-state/v2", "stream_eof": [],
               "stream_eof_elapsed_seconds": {}, "reservation_observations": lease_evidence if lease_evidence is not None else {},
               "errors": control_errors if control_errors is not None else []}
     if native_reader is not None:
@@ -217,7 +252,8 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
             result["errors"].append(text)
 
     def closure_observed():
-        return live == [] and getattr(tracker, "pending_exits", []) == [] and lease_released is True and not selector.get_map()
+        return (live == [] and getattr(tracker, "pending_exits", []) == [] and
+                getattr(tracker, "pending_relationships", []) == [] and lease_released is True and not selector.get_map())
     with (output / "operation.log").open("xb") as combined, (output / "stdout.log").open("xb") as stdout, (output / "stderr.log").open("xb") as stderr:
         logs = {"stdout": stdout, "stderr": stderr}
         while True:
@@ -242,7 +278,8 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
                     live = None
                     process_observation.update(state="unknown", error=str(error))
                     error_record(error)
-                if not acknowledged and not result["errors"] and getattr(tracker, "pending_exits", []) == []:
+                if (not acknowledged and not result["errors"] and getattr(tracker, "pending_exits", []) == [] and
+                        getattr(tracker, "pending_relationships", []) == []):
                     try:
                         acknowledged = acknowledge()
                     except Exception as error:
@@ -277,6 +314,8 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
                         "native_population_observation": getattr(tracker, "population_observation", {"state": "unknown"}),
                         "known_birth_observations": getattr(tracker, "birth_observations", []),
                         "pending_exits": getattr(tracker, "pending_exits", None),
+                        "pending_relationships": getattr(tracker, "pending_relationships", None),
+                        "relationship_transition_history": getattr(tracker, "relationship_history", []),
                         "exit_transition_history": getattr(tracker, "exit_history", []),
                         "exact_reservation_released": lease_released, "lease_observation": lease_observation})
             if code is not None and not selector.get_map() and (closure_observed() or result["errors"]):
@@ -286,12 +325,14 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
     selector.close()
     result.update(command_exit=code, known_generations=list(tracker.history.values()), live_generations=live,
                   pending_exits=getattr(tracker, "pending_exits", None), exit_transition_history=getattr(tracker, "exit_history", []),
+                  pending_relationships=getattr(tracker, "pending_relationships", None),
+                  relationship_transition_history=getattr(tracker, "relationship_history", []),
                   last_successful_live_generations=last_live, process_scope_observation=process_observation,
                   native_population_observation=getattr(tracker, "population_observation", {"state": "unknown", "observed_at": None}),
                   known_birth_observations=getattr(tracker, "birth_observations", []), lease_observation=lease_observation,
                   exact_reservation_released=lease_released, launch_acknowledged=acknowledged,
                   owner_outside_reservation=not any(k in os.environ for k in ("DISK_GUARD_RESERVATION", "DISK_GUARD_CUSTODY")))
-    if acknowledged and code == 0 and live == [] and lease_released is True and not result["errors"] and result["owner_outside_reservation"]:
+    if acknowledged and code == 0 and closure_observed() and not result["errors"] and result["owner_outside_reservation"]:
         result["status"] = "SETTLED"
     atomic_save(output / "settlement.json", result)
     return code, result

@@ -18,11 +18,19 @@ from build_cache_retirement import inherited_fds
 LIMIT = 16384
 
 
+class Relationship(ctypes.Structure):
+    _fields_ = [("seconds", ctypes.c_int64), ("microseconds", ctypes.c_int64)]
+    _fields_ += [(name, ctypes.c_int32) for name in ("pid", "ppid", "pgid")]
+    _fields_ += [(name, ctypes.c_uint32) for name in ("uid", "status", "flags")]
+
+
 class Record(ctypes.Structure):
     _fields_ = [("seconds", ctypes.c_int64), ("microseconds", ctypes.c_int64)]
     _fields_ += [(name, ctypes.c_int32) for name in ("pid", "ppid", "pgid", "session")]
     _fields_ += [(name, ctypes.c_uint32) for name in ("uid", "status", "flags")]
     _fields_ += [("session_error", ctypes.c_int32)]
+    _fields_ += [("relationships", Relationship * 3), ("session_after", ctypes.c_int32),
+                ("session_after_error", ctypes.c_int32), ("relationship_transition", ctypes.c_uint32)]
 
 
 class Diagnostic(ctypes.Structure):
@@ -37,16 +45,22 @@ def diagnostic_value(detail):
     stages = {1: "input", 2: "pid_read", 3: "empty_pid_presence", 5: "initial_identity", 6: "owner",
               7: "initial_relationship", 8: "after_session_pid_read", 9: "session", 11: "observed_identity",
               12: "identity_or_relationship_drift", 13: "allocation", 14: "population_read", 15: "population_length",
-              16: "population_pid", 17: "duplicate_pid"}
+              16: "population_pid", 17: "duplicate_pid", 18: "final_pid_read", 19: "second_session"}
     value = {key: getattr(detail, key) for key in ("code", "syscall_result", "native_errno", "pid", "reported_bytes", "input_capacity")}
     value["stage"] = stages.get(detail.stage, "unreported")
     for name, flag in (("expected", 1), ("observed", 2)):
         row = getattr(detail, name)
-        value[name] = {key: getattr(row, key) for key, _ in Record._fields_ if key not in ("session", "session_error")} if detail.fields & flag else None
+        value[name] = {key: getattr(row, key) for key in ("seconds", "microseconds", "pid", "ppid", "pgid", "uid", "status", "flags")} if detail.fields & flag else None
     value["session_result"] = detail.session_result if detail.fields & 4 else None
     value["session_errno"] = detail.session_errno if detail.fields & 4 else None
     value["presence_result"] = detail.signal_result if detail.fields & 8 else None
     value["presence_errno"] = detail.presence_errno if detail.fields & 8 else None
+    value["session_samples"] = [
+        {"result": detail.expected.session, "errno": detail.expected.session_error} if detail.fields & 4 else None,
+        {"result": detail.expected.session_after, "errno": detail.expected.session_after_error} if detail.fields & 16 else None]
+    value["identity_bracket"] = [
+        {key: getattr(detail.expected.relationships[index], key) for key, _ in Relationship._fields_}
+        if detail.fields & flag else None for index, flag in enumerate((1, 32, 64))]
     return value
 
 
@@ -132,15 +146,39 @@ def prepare(directory=None):
     library.md_table.argtypes = [ctypes.POINTER(Record), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(Diagnostic)]
     library.md_table.restype = ctypes.c_int
     exit_flag = library.md_exit_flag()
-    if (library.md_version() != 4 or exit_flag == 0 or exit_flag & (exit_flag-1) or library.md_record_size() != ctypes.sizeof(Record) or
+    if (library.md_version() != 5 or exit_flag == 0 or exit_flag & (exit_flag-1) or library.md_record_size() != ctypes.sizeof(Record) or
             library.md_diagnostic_size() != ctypes.sizeof(Diagnostic) or library.md_kernel_record_size() <= 0):
         raise RuntimeError("Native reader ABI is unsupported")
-    binding["ABI"] = {"version": 4, "exiting_flag": exit_flag, "record_bytes": library.md_record_size(), "diagnostic_bytes": library.md_diagnostic_size(),
+    binding["ABI"] = {"version": 5, "exiting_flag": exit_flag, "record_bytes": library.md_record_size(), "diagnostic_bytes": library.md_diagnostic_size(),
                       "kernel_record_bytes": library.md_kernel_record_size()}
     (root / "binding.json").write_text(json.dumps(binding, indent=2) + "\n")
     (root / "binding.json").chmod(0o600)
     # Production proof persists; only automatically owned temporary fixtures retire at exit.
     return library, binding, temporary
+
+
+def relationship_evidence_valid(evidence, pid, birth, exiting_flag):
+    if (not exiting_flag or type(pid) is not int or pid <= 0 or not isinstance(birth, list) or len(birth) != 2 or
+            any(type(v) is not int for v in birth) or birth[0] <= 0 or not 0 <= birth[1] < 1_000_000):
+        return False
+    if not isinstance(evidence, dict) or evidence.get("schema") != "maildesk-relationship-bracket/v1":
+        return False
+    rows, sessions = evidence.get("identities"), evidence.get("sessions")
+    if not isinstance(rows, list) or len(rows) != 3 or not isinstance(sessions, list) or len(sessions) != 2:
+        return False
+    for row in rows:
+        if (not isinstance(row, dict) or any(type(row.get(k)) is not int for k, _ in Relationship._fields_) or
+                row["pid"] != pid or [row["seconds"], row["microseconds"]] != birth or row["uid"] != os.getuid() or
+                row["ppid"] < 0 or row["pgid"] <= 0 or row["status"] not in (2, 3, 4, 6, 7) or
+                row["flags"] < 0 or row["flags"] & exiting_flag):
+            return False
+    return all(isinstance(s, dict) and type(s.get("result")) is int and s["result"] > 0 and
+               type(s.get("errno")) is int and s["errno"] == 0 for s in sessions)
+
+
+def relationship_changed(evidence):
+    return (len({(row["ppid"], row["pgid"]) for row in evidence["identities"]}) > 1 or
+            evidence["sessions"][0]["result"] != evidence["sessions"][1]["result"])
 
 
 class Processes:
@@ -162,16 +200,30 @@ class Processes:
         if (record.pid <= 0 or expected is not None and record.pid != expected or record.uid != os.getuid() or
                 record.seconds <= 0 or not 0 <= record.microseconds < 1_000_000 or record.status not in (2, 3, 4, 6, 7)):
             raise RuntimeError("Native process identity/owner drift or malformed record")
+        if record.relationship_transition not in (0, 1):
+            raise RuntimeError("Unsupported native relationship observation")
         if (record.flags & self.exiting_flag and
                 (record.session > 0 and record.session_error == 0 or record.session == -1 and record.session_error in (0, errno.ESRCH)) and
                 record.ppid >= 0 and record.pgid >= 0):
+            if record.relationship_transition:
+                raise RuntimeError("Mixed exiting and relationship transition record")
             attempted = record.session != -1 or record.session_error != 0
             return {"pid": record.pid, "birth": [record.seconds, record.microseconds], "ppid": None, "session": None,
                     "pgid": None, "state": "exiting", "native_evidence": {"flags": record.flags,
                     "session_result": record.session if attempted else None,
                     "session_errno": record.session_error if attempted else None, "ppid": record.ppid, "pgid": record.pgid}}
-        if record.ppid < 0 or record.pgid <= 0 or record.session <= 0 or record.session_error != 0:
+        evidence = {"schema": "maildesk-relationship-bracket/v1",
+                    "identities": [{key: getattr(row, key) for key, _ in Relationship._fields_} for row in record.relationships],
+                    "sessions": [{"result": record.session, "errno": record.session_error},
+                                 {"result": record.session_after, "errno": record.session_after_error}]}
+        final = evidence["identities"][-1]
+        if (not relationship_evidence_valid(evidence, record.pid, [record.seconds, record.microseconds], self.exiting_flag) or
+                any(final[key] != getattr(record, key) for key, _ in Relationship._fields_) or
+                relationship_changed(evidence) != bool(record.relationship_transition)):
             raise RuntimeError("Native process identity/owner drift or malformed record")
+        if record.relationship_transition:
+            return {"pid": record.pid, "birth": [record.seconds, record.microseconds], "ppid": None, "pgid": None,
+                    "session": None, "state": "relationship_transition", "native_evidence": evidence}
         return {"pid": record.pid, "birth": [record.seconds, record.microseconds], "ppid": record.ppid,
                 "session": record.session, "pgid": record.pgid}
 

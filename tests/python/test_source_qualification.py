@@ -336,6 +336,19 @@ class QualificationBindingTests(unittest.TestCase):
                            ('native_reader', {'ABI': {'version': 4}, 'source': {'sha256': None}})]:
             with self.subTest(key=key, value=value):
                 self.assertFalse(qualification.check_run_receipts(operation, {**settled, key: value}, {'exit': 0}, head))
+        abi = {"version": 5, "exiting_flag": 8192, "record_bytes": 184,
+               "diagnostic_bytes": 424, "kernel_record_bytes": 648}
+        modern = {**settled, "native_state_schema": "maildesk-native-state/v2", "pending_relationships": [],
+                  "relationship_transition_history": [], "native_reader": {"ABI": abi, "source": {"sha256": "c" * 64}}}
+        self.assertTrue(qualification.check_run_receipts(operation, modern, {"exit": 0}, head))
+        for key in ("pending_relationships", "relationship_transition_history", "native_state_schema"):
+            bad = dict(modern); del bad[key]
+            self.assertFalse(qualification.check_run_receipts(operation, bad, {"exit": 0}, head))
+        for key in abi:
+            incomplete = dict(abi); del incomplete[key]
+            bad = {**modern, "native_reader": {"ABI": incomplete, "source": {"sha256": "c" * 64}}}
+            self.assertFalse(qualification.check_run_receipts(operation, bad, {"exit": 0}, head))
+        self.assertFalse(qualification.check_run_receipts(operation, {**modern, "pending_relationships": [{"pid": 9}]}, {"exit": 0}, head))
 
     def test_evidence_chain_rejects_forged_or_changed_receipts(self):
         capture, run, review, approval = self.authorization()

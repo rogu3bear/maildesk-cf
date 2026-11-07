@@ -165,7 +165,7 @@ class GenerationTrackingTests(unittest.TestCase):
 
 class IndependentObservationTests(unittest.TestCase):
     """Only disposable pipes/files and injected observations; no native PID queries."""
-    def observe(self, scans, leases, *, acknowledge=lambda: True, pending=None):
+    def observe(self, scans, leases, *, acknowledge=lambda: True, pending=None, relationships=None):
         with tempfile.TemporaryDirectory(prefix="maildesk-observation-fixture-") as directory:
             pipes = []
             for _ in range(2):
@@ -174,11 +174,13 @@ class IndependentObservationTests(unittest.TestCase):
                 pipes.append(os.fdopen(read, "rb"))
             child = types.SimpleNamespace(stdout=pipes[0], stderr=pipes[1],
                                           poll=mock.Mock(side_effect=[None, 0]))
-            tracker = types.SimpleNamespace(history={}, pending_exits=[])
+            tracker = types.SimpleNamespace(history={}, pending_exits=[], pending_relationships=[])
             scan_values = iter(scans); pending_values = iter(pending) if pending is not None else None
+            relationship_values = iter(relationships) if relationships is not None else None
             def scan():
                 value = next(scan_values)
                 if pending_values is not None: tracker.pending_exits = next(pending_values)
+                if relationship_values is not None: tracker.pending_relationships = next(relationship_values)
                 if isinstance(value, Exception): raise value
                 return value
             tracker.scan = mock.Mock(side_effect=scan)
@@ -199,6 +201,15 @@ class IndependentObservationTests(unittest.TestCase):
         acknowledge.assert_called_once()
         self.assertEqual(result['pending_exits'], [])
         self.assertEqual(result['errors'], [])
+
+    def test_relationship_pending_blocks_ack_and_closure_even_with_empty_live_projection(self):
+        pending = [{"pid": 99, "birth": [3, 0]}]
+        acknowledge = mock.Mock(return_value=True)
+        result, lease = self.observe([[], []], [True, True], acknowledge=acknowledge, relationships=[pending, []])
+        self.assertEqual(lease.call_count, 2)
+        acknowledge.assert_called_once()
+        self.assertEqual(result["pending_relationships"], [])
+        self.assertEqual(result["errors"], [])
 
     def test_process_failure_does_not_suppress_exact_lease_release(self):
         stale = [{"pid": 10, "birth": [1, 0]}]

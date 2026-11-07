@@ -17,6 +17,10 @@ class NativeIdentityTests(unittest.TestCase):
     def row(self, **changes):
         row = native.Record(100, 500, os.getpid(), 1, 42, 42, os.getuid(), 2)
         for key, value in changes.items(): setattr(row, key, value)
+        row.session_after = row.session
+        for relation in row.relationships:
+            for key, _ in native.Relationship._fields_:
+                setattr(relation, key, getattr(row, key))
         return row
 
     def reader(self, result=1, row=None):

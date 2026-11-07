@@ -57,9 +57,11 @@ unsupported ABI and a missing observer preserve UNKNOWN. A successful zero-lengt
 PID response requires independent `kill(pid, 0)` `ESRCH` to establish absence;
 an existing PID or denied probe stays UNKNOWN. A denied PID response never probes
 another interface. Birth tuples
-remain kernel start-time seconds and microseconds. A numeric session ID comes
-from `getsid`, bracketed by records with matching birth, UID, parent and process
-group. Drift refuses the sample. This remains sampled coverage, not an atomic
+remain kernel start-time seconds and microseconds. Two numeric session samples
+come from `getsid` in a B1→S1→B2→S2→B3 bracket. All three complete kernel records
+must match PID, birth and UID. A stable relationship requires valid unchanged
+parent/group fields and equal positive session samples. Immutable drift refuses
+the sample. This remains sampled coverage, not an atomic
 whole-host history or universal fork observation.
 The published kernel iterator omits still-being-forked (`SIDL`) processes and
 internal shadow records before exposing runnable entries; this limitation is
@@ -108,7 +110,7 @@ and identity/session fields already read, with explicit known-field flags.
 Python retains these in sticky operation errors without further diagnostic
 probes. Missing data stays unknown; receipts contain no process names or arguments.
 
-Native ABI v4 exports the installed SDK's `P_WEXIT` bit. Complete matching birth
+Native ABI v4 introduced the installed SDK's `P_WEXIT` bit. Complete matching birth
 and owner records with an affirmative exit flag can project an explicit `exiting`
 identity, with session/parent/group set to null rather than invented. The backend
 retains each generation's raw flags and any session result/errno already observed.
@@ -119,12 +121,28 @@ exiting-to-active regression remain fatal.
 Every same-UID exiting identity is conservatively live, regardless of relationship.
 Independent known-birth reads continue until validated zombie or kernel absence;
 the flag itself never proves exit. Launch registration and acknowledgement require
-complete active identity and no pending exits. `maildesk-native-state/v1` receipts
-retain current `pending_exits` and immutable `exit_transition_history`; settlement
-requires an empty current pending set. Existing deadlines, sticky failures, stream
+complete active identity and no pending exits. Historical `maildesk-native-state/v1`
+receipts retain current `pending_exits` and immutable `exit_transition_history`;
+settlement requires an empty current pending set. Existing deadlines, sticky failures, stream
 EOF and exact reservation release requirements remain unchanged. Publication
 validates this state schema and backend source binding for new native-reader runs;
 older receipts retain their original source-bound meaning.
+
+ABI v5 additionally represents complete, valid but differing parent/group/session
+samples as `relationship_transition`. It retains all three immutable identity and
+relationship records plus both positive session samples; the projected stable
+relationship fields are null. Denied calls, partial or malformed records,
+unexplained session errors, birth/owner drift and exit regression remain fatal.
+Every same-UID transitional birth is enrolled conservatively, even an unrelated
+peer. It stays known and pending until an independent validated terminal/absence
+read; a later stable sample outside the original session does not release it.
+Transition-to-stable-to-exiting-to-terminal observations remain in a bounded,
+immutable chronological history. A transition cannot qualify launch/ACK, and
+neither pending set can be present at acknowledgement or closure.
+New `maildesk-native-state/v2` receipts require `pending_relationships` and
+`relationship_transition_history` alongside the exit fields. Publication checks
+ABI v5 sizes and both empty pending sets; v1/ABI v4 receipts retain their original
+meaning. No old failed receipt is retrospectively settled.
 
 The CI child records inputs after frozen Bun installation and before the checks,
 then captures them again with products after all checks. Both captures must match

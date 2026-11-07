@@ -8,12 +8,16 @@
 #include <stdio.h>
 #include <string.h>
 
-static struct kinfo_proc first, second, population[2];
+static struct kinfo_proc first, second, third, population[2];
 static int calls, fail_call, failure, absent_call, short_call, extra_call, session, session_errno;
 static int table_error, table_count, table_extra;
-static int presence, presence_errno, session_calls;
+static int presence, presence_errno, session_calls, session_last, session_last_errno;
 uid_t fixture_getuid(void) { return 501; }
-pid_t fixture_getsid(pid_t pid) { assert(pid == 1234); ++session_calls; errno = session_errno; return session; }
+pid_t fixture_getsid(pid_t pid) {
+    assert(pid == 1234); ++session_calls;
+    errno = session_calls==1 ? session_errno : session_last_errno;
+    return session_calls==1 ? session : session_last;
+}
 int fixture_kill(pid_t pid, int number) { assert(pid == 1234 && number == 0); errno = presence_errno; return presence; }
 int fixture_sysctl(int *mib, u_int length, void *output, size_t *size, void *input, size_t input_size) {
     assert(!input && !input_size);
@@ -28,7 +32,7 @@ int fixture_sysctl(int *mib, u_int length, void *output, size_t *size, void *inp
     ++calls;
     if (calls == fail_call) { errno = failure; return -1; }
     if (calls == absent_call) { *size = 0; return 0; }
-    memcpy(output, calls == 1 ? &first : &second, sizeof(first));
+    memcpy(output, calls == 1 ? &first : calls == 2 ? &second : &third, sizeof(first));
     *size = sizeof(first) - (calls == short_call ? 1 : 0) + (calls == extra_call ? 1 : 0);
     return 0;
 }
@@ -37,11 +41,12 @@ static void reset(void) {
     first.kp_proc.p_pid = 1234; first.kp_proc.p_stat = 2;
     first.kp_proc.p_starttime.tv_sec = 100; first.kp_proc.p_starttime.tv_usec = 500;
     first.kp_eproc.e_ucred.cr_uid = 501; first.kp_eproc.e_ppid = 1; first.kp_eproc.e_pgid = 1234;
-    second = first; population[0] = first; population[1] = first;
+    second = third = first; population[0] = first; population[1] = first;
     calls = fail_call = absent_call = short_call = extra_call = table_error = table_extra = session_errno = 0;
     failure = EPERM; session = 1234; table_count = 1;
     presence = -1; presence_errno = ESRCH;
     session_calls = 0;
+    session_last = 1234; session_last_errno = 0;
 }
 int main(void) {
     struct md_process row, rows[MD_LIMIT]; size_t count; struct md_diagnostic detail;
@@ -75,9 +80,9 @@ int main(void) {
     reset(); absent_call = 1; presence = 0; assert(md_get(1234, &row, &detail) == -EAGAIN);
     reset(); absent_call = 1; presence_errno = EPERM; assert(md_get(1234, &row, &detail) == -EPERM);
     reset(); absent_call = 2; assert(md_get(1234, &row, &detail) == 0);
-    for (int call = 1; call <= 2; ++call) {
+    for (int call = 1; call <= 3; ++call) {
         reset(); fail_call = call; assert(md_get(1234, &row, &detail) == -EPERM);
-        assert(detail.stage == (call == 1 ? 2 : 8) && detail.native_errno == EPERM && detail.syscall_result == -1 && detail.pid == 1234 && detail.input_capacity == sizeof(first));
+        assert(detail.stage == (call == 1 ? 2 : call == 2 ? 8 : 18) && detail.native_errno == EPERM && detail.syscall_result == -1 && detail.pid == 1234 && detail.input_capacity == sizeof(first));
         reset(); short_call = call; assert(md_get(1234, &row, &detail) == -EPROTO);
         assert(detail.reported_bytes == sizeof(first)-1 && detail.native_errno == 0 && detail.syscall_result == 0);
         reset(); extra_call = call; assert(md_get(1234, &row, &detail) == -EPROTO);
@@ -89,11 +94,24 @@ int main(void) {
     reset(); second.kp_proc.p_starttime.tv_sec++; assert(md_get(1234, &row, &detail) == -ESTALE);
     assert(detail.stage == 12 && detail.pid == 1234 && detail.expected.seconds == 100 && detail.observed.seconds == 101 && (detail.fields & 7) == 7);
     reset(); second.kp_eproc.e_ucred.cr_uid++; assert(md_get(1234, &row, &detail) == -ESTALE);
-    reset(); second.kp_eproc.e_pgid++; assert(md_get(1234, &row, &detail) == -ESTALE);
-    reset(); second.kp_eproc.e_ppid++; assert(md_get(1234, &row, &detail) == -ESTALE);
+    reset(); second.kp_eproc.e_pgid++; assert(md_get(1234, &row, &detail) == 1 && row.relationship_transition);
+    assert(row.relationships[0].pgid==1234 && row.relationships[1].pgid==1235 && row.relationships[2].pgid==1234);
+    reset(); second.kp_eproc.e_ppid++; assert(md_get(1234, &row, &detail) == 1 && row.relationship_transition);
+    reset(); third.kp_eproc.e_pgid++; assert(md_get(1234, &row, &detail) == 1 && row.relationship_transition);
+    reset(); session_last=42; assert(md_get(1234, &row, &detail) == 1 && row.relationship_transition && row.session==1234 && row.session_after==42);
+    reset(); third.kp_proc.p_starttime.tv_usec++; assert(md_get(1234, &row, &detail) == -ESTALE);
+    reset(); third.kp_eproc.e_ucred.cr_uid++; assert(md_get(1234, &row, &detail) == -ESTALE);
+    reset(); third.kp_eproc.e_ppid=-1; assert(md_get(1234, &row, &detail) == -EPROTO);
+    reset(); second.kp_eproc.e_pgid=0; assert(md_get(1234, &row, &detail) == -EPROTO);
+    reset(); session_last=-1; session_last_errno=EPERM; assert(md_get(1234, &row, &detail) == -EPERM && calls==2);
+    assert((detail.fields&16) && detail.expected.session==1234 && detail.expected.session_after==-1 && detail.expected.session_after_error==EPERM);
+    reset(); session_last=-1; session_last_errno=ESRCH; assert(md_get(1234, &row, &detail) == -ESRCH);
+    reset(); session_last=-1; session_last_errno=ESRCH; third.kp_proc.p_flag=P_WEXIT;
+    assert(md_get(1234, &row, &detail) == 1 && row.flags&P_WEXIT && !row.relationship_transition);
+    reset(); third.kp_proc.p_stat=5; assert(md_get(1234, &row, &detail) == 0);
     reset(); session = -1; session_errno = EPERM; assert(md_get(1234, &row, &detail) == -EPERM);
     assert(detail.stage == 9 && detail.session_result == -1 && detail.session_errno == EPERM && detail.native_errno == EPERM && calls == 1);
-    reset(); session = -1; session_errno = ESRCH; assert(md_get(1234, &row, &detail) == -ESTALE);
+    reset(); session = -1; session_errno = ESRCH; assert(md_get(1234, &row, &detail) == -ESRCH);
     reset(); session = -1; session_errno = ESRCH; absent_call = 2; assert(md_get(1234, &row, &detail) == 0);
     reset(); assert(md_get(0, &row, &detail) == -EINVAL && calls == 0);
     reset(); assert(md_table(rows, MD_LIMIT, &count, &detail) == 0 && count == 1);

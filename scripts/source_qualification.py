@@ -140,14 +140,26 @@ def check_run_receipts(operation, settlement, exit_record, head):
         return False
     if "native_processes.py" in finalizer:
         reader = settlement.get("native_reader")
-        if (settlement.get("native_state_schema") != "maildesk-native-state/v1" or
+        version = reader.get("ABI", {}).get("version") if isinstance(reader, dict) and isinstance(reader.get("ABI"), dict) else None
+        if (type(version) is not int or version not in (4, 5) or
+                settlement.get("native_state_schema") != "maildesk-native-state/v" + ("2" if version == 5 else "1") or
                 settlement.get("pending_exits") != [] or not isinstance(settlement.get("exit_transition_history"), list) or
                 not isinstance(finalizer.get("native_processes.c"), str) or
                 not re.fullmatch(r"[0-9a-f]{64}", finalizer["native_processes.c"]) or not isinstance(reader, dict) or
-                not isinstance(reader.get("ABI"), dict) or reader["ABI"].get("version") != 4 or
+                not isinstance(reader.get("ABI"), dict) or
                 not isinstance(reader.get("source"), dict) or
                 reader["source"].get("sha256") != finalizer.get("native_processes.c")):
             return False
+        if version == 5 and (settlement.get("pending_relationships") != [] or
+                             not isinstance(settlement.get("relationship_transition_history"), list)):
+            return False
+        if version == 5:
+            abi = reader["ABI"]
+            if (any(type(abi.get(key)) is not int or abi[key] <= 0 for key in
+                    ("exiting_flag", "record_bytes", "diagnostic_bytes", "kernel_record_bytes")) or
+                    abi["exiting_flag"] & (abi["exiting_flag"] - 1) or
+                    abi["record_bytes"] != 184 or abi["diagnostic_bytes"] != 424):
+                return False
     streams = settlement.get("stream_eof")
     if not isinstance(streams, list) or len(streams) != 2 or not all(isinstance(item, str) for item in streams) or set(streams) != {"stdout", "stderr"}:
         return False
