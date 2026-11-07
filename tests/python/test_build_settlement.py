@@ -1,7 +1,5 @@
 """Native normal-exit controls; all processes/leases are disposable fixtures."""
 import fcntl
-import ctypes
-import errno
 import json
 import itertools
 import os
@@ -20,164 +18,66 @@ import build_cache_retirement as cache
 import build_settlement as settlement
 
 
-class NativeIdentityTests(unittest.TestCase):
-    def reader(self, size, error):
-        reader = settlement.Processes.__new__(settlement.Processes)
-        def query(*args):
-            ctypes.set_errno(error)
-            return size
-        reader.lib = types.SimpleNamespace(proc_pidinfo=query)
-        return reader
-
-    def complete_reader(self, **changes):
-        row = settlement.BSDInfo()
-        row.pid, row.uid, row.seconds, row.microseconds, row.status = 12345, os.getuid(), 100, 500, 2
-        row.ppid, row.pgid = 1, 12345
-        for field, value in changes.items():
-            setattr(row, field, value)
-        def query(_pid, _flavor, _arg, output, _size):
-            ctypes.memmove(output, ctypes.byref(row), ctypes.sizeof(row))
-            ctypes.set_errno(0)
-            return ctypes.sizeof(row)
-        reader = settlement.Processes.__new__(settlement.Processes)
-        reader.lib = types.SimpleNamespace(proc_pidinfo=query)
-        return reader
-
-    def test_empty_errorless_query_requires_independent_kernel_absence(self):
-        reader = self.reader(0, 0)
-        with mock.patch.object(settlement.os, "kill", side_effect=ProcessLookupError(errno.ESRCH, "ended")) as probe:
-            self.assertIsNone(reader.get(12345))
-        probe.assert_called_once_with(12345, 0)
-
-    def test_empty_denied_query_requires_independent_kernel_absence(self):
-        with mock.patch.object(settlement.os, "kill", side_effect=ProcessLookupError(errno.ESRCH, "ended")) as probe:
-            self.assertIsNone(self.reader(0, errno.EPERM).get(12345))
-        probe.assert_called_once_with(12345, 0)
-
-    def test_live_or_reused_pid_never_becomes_an_empty_population(self):
-        for error in (0, errno.EPERM):
-            with self.subTest(error=error), mock.patch.object(settlement.os, "kill", return_value=None) as probe:
-                with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, PID exists"):
-                    self.reader(0, error).get(12345)
-                probe.assert_called_once_with(12345, 0)
-
-    def test_denied_absence_probe_preserves_unknown(self):
-        for error in (0, errno.EPERM):
-            with self.subTest(error=error), mock.patch.object(settlement.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
-                with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, probe errno=1"):
-                    self.reader(0, error).get(12345)
-
-    def test_native_denial_is_not_relabelled_as_exit(self):
-        with mock.patch.object(settlement.os, "kill", return_value=None) as probe:
-            with self.assertRaisesRegex(RuntimeError, "bytes=0, errno=1, PID exists"):
-                self.reader(0, errno.EPERM).get(12345)
-        probe.assert_called_once_with(12345, 0)
-
-    def test_only_esrch_from_independent_probe_can_establish_absence(self):
-        for error in (0, errno.EPERM):
-            for probe_error in (errno.ENOENT, errno.EIO, errno.EACCES):
-                with self.subTest(error=error, probe_error=probe_error), mock.patch.object(settlement.os, "kill", side_effect=OSError(probe_error, "unknown")):
-                    with self.assertRaisesRegex(RuntimeError, f"bytes=0, errno={error}, probe errno={probe_error}"):
-                        self.reader(0, error).get(12345)
-
-    def test_partial_native_record_remains_unknown(self):
-        for size in (-1, ctypes.sizeof(settlement.BSDInfo) - 1, ctypes.sizeof(settlement.BSDInfo) + 1):
-            for error in (0, errno.ESRCH, errno.ENOENT, errno.EPERM):
-                with self.subTest(size=size, error=error), mock.patch.object(settlement.os, "kill") as probe:
-                    with self.assertRaisesRegex(RuntimeError, "not probed"):
-                        self.reader(size, error).get(12345)
-                    probe.assert_not_called()
-
-    def test_malformed_complete_identity_is_unknown_without_an_absence_probe(self):
-        for field, value in (("pid", 12346), ("uid", os.getuid() + 1), ("seconds", 0), ("microseconds", 1_000_000)):
-            reader = self.complete_reader(**{field: value})
-            with self.subTest(field=field), mock.patch.object(settlement.os, "kill") as probe, mock.patch.object(settlement.os, "getsid") as session:
-                with self.assertRaisesRegex(RuntimeError, "identity/owner drift"):
-                    reader.get(12345)
-                probe.assert_not_called()
-                session.assert_not_called()
-
-    def test_valid_complete_identity_retains_its_birth_without_an_absence_probe(self):
-        with mock.patch.object(settlement.os, "kill") as probe, mock.patch.object(settlement.os, "getsid", return_value=12345):
-            self.assertEqual(self.complete_reader().get(12345),
-                             {"pid": 12345, "birth": [100, 500], "ppid": 1, "session": 12345, "pgid": 12345})
-            probe.assert_not_called()
-
-    def test_nonprocess_pid_never_reaches_native_or_independent_probe(self):
-        for pid in (0, -1, True, 1.5, 2 ** 31):
-            reader = settlement.Processes.__new__(settlement.Processes)
-            reader.lib = types.SimpleNamespace(proc_pidinfo=mock.Mock())
-            with self.subTest(pid=pid), mock.patch.object(settlement.os, "kill") as probe:
-                with self.assertRaisesRegex(RuntimeError, "positive pid_t"):
-                    reader.get(pid)
-                reader.lib.proc_pidinfo.assert_not_called()
-                probe.assert_not_called()
-
-    def test_explicit_native_absence_needs_no_fallback(self):
-        for error in (errno.ESRCH, errno.ENOENT):
-            with self.subTest(error=error), mock.patch.object(settlement.os, "kill") as probe:
-                self.assertIsNone(self.reader(0, error).get(12345))
-                probe.assert_not_called()
-
-    def population(self, pids, identities):
-        reader = settlement.Processes.__new__(settlement.Processes)
-        def query(_kind, _uid, buffer, _size):
-            target = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int))
-            for index, pid in enumerate(pids):
-                target[index] = pid
-            return len(pids) * ctypes.sizeof(ctypes.c_int)
-        reader.lib = types.SimpleNamespace(proc_listpids=query)
-        reader.get = mock.Mock(side_effect=lambda pid: identities.get(pid))
-        return reader
-
-    def test_population_requires_the_live_observer(self):
-        observer = os.getpid()
-        for pids, identities in (([0], {}), ([observer + 1], {observer + 1: {"pid": observer + 1}}),
-                                  ([observer], {})):
-            with self.subTest(pids=pids, identities=identities):
-                with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
-                    self.population(pids, identities).table()
-
-    def test_population_rejects_duplicate_process_ids(self):
-        observer = os.getpid()
-        with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
-            self.population([observer, observer], {observer: {"pid": observer}}).table()
-
-    def test_population_allows_exited_peers_and_zero_padding(self):
-        observer = os.getpid()
-        identity = {"pid": observer}
-        self.assertEqual(self.population([observer, 0, observer + 1], {observer: identity}).table(),
-                         {observer: identity})
-
-    def test_partial_truncated_and_denied_population_never_establish_coverage(self):
-        for size in (0, -1, 1, 16384 * ctypes.sizeof(ctypes.c_int)):
-            with self.subTest(size=size):
-                reader = self.population([], {})
-                reader.lib.proc_listpids = lambda *args: size
-                with self.assertRaisesRegex(RuntimeError, "population coverage unavailable"):
-                    reader.table()
-                reader.get.assert_not_called()
-
-    def test_unreadable_peer_is_not_excluded_without_qualified_relationship_evidence(self):
-        observer = os.getpid()
-        reader = self.population([observer, observer + 1], {})
-        def get(pid):
-            if pid == observer:
-                return {"pid": observer}
-            raise RuntimeError("full identity denied; relationship unknown")
-        reader.get.side_effect = get
-        with self.assertRaisesRegex(RuntimeError, "full identity denied"):
-            reader.table()
-
-
 class GenerationTrackingTests(unittest.TestCase):
     def setUp(self):
         self.root = {"pid": 10, "birth": [1, 0], "ppid": 1, "session": 10, "pgid": 10}
         self.child = {"pid": 11, "birth": [2, 0], "ppid": 10, "session": 10, "pgid": 10}
         self.current = {10: self.root, 11: self.child}
         self.native = types.SimpleNamespace(table=lambda: dict(self.current),
-                                            get=mock.Mock(side_effect=lambda pid: self.current.get(pid)))
+                                            get=mock.Mock(side_effect=lambda pid: self.current.get(pid)), exiting_flag=0x2000)
         self.tracker = settlement.Tracker(self.native, self.root)
+
+    def exiting(self, row):
+        return {**row, "state": "exiting", "ppid": None, "pgid": None, "session": None,
+                "native_evidence": {"flags": 0x2000, "session_errno": 3}}
+
+    def test_known_and_unrelated_exiting_births_stay_live_until_independent_resolution(self):
+        self.tracker.scan()
+        self.current[11] = self.exiting(self.child)
+        self.current[99] = self.exiting({**self.child, 'pid': 99, 'birth': [4, 0]})
+        self.assertEqual({r['pid'] for r in self.tracker.scan()}, {10, 11, 99})
+        self.assertEqual(len(self.tracker.pending_exits), 2)
+        self.assertEqual(len(self.tracker.exit_history), 2)
+        self.current.pop(11); self.current.pop(99)
+        self.assertEqual(self.tracker.scan(), [self.root])
+        self.assertEqual(self.tracker.pending_exits, [])
+        self.assertEqual(len(self.tracker.exit_history), 2)
+        self.native.get.assert_any_call(99)
+
+    def test_exit_to_active_regression_and_pending_registration_refuse(self):
+        pending = self.exiting(self.child)
+        self.current[11] = pending; self.tracker.scan()
+        with self.assertRaisesRegex(RuntimeError, 'Pending exit'): self.tracker.register(self.root)
+        self.current[11] = self.child
+        with self.assertRaisesRegex(RuntimeError, 'regressed'): self.tracker.scan()
+        with self.assertRaisesRegex(RuntimeError, 'active identity'): settlement.Tracker(self.native, self.exiting(self.root))
+
+    def test_newer_known_exit_does_not_make_an_older_active_snapshot_a_regression(self):
+        self.tracker.scan()
+        self.native.get.side_effect = lambda pid: self.exiting(self.child) if pid == 11 else self.current.get(pid)
+        rows = self.tracker.scan()
+        self.assertEqual(next(r for r in rows if r['pid'] == 11)['state'], 'exiting')
+
+    def test_exiting_snapshot_then_later_active_known_read_is_a_regression(self):
+        self.tracker.scan()
+        self.current[11] = self.exiting(self.child)
+        self.native.get.side_effect = lambda pid: self.child if pid == 11 else self.current.get(pid)
+        with self.assertRaisesRegex(RuntimeError, 'regressed'): self.tracker.scan()
+
+    def test_exiting_label_without_kernel_flag_evidence_is_unknown(self):
+        self.current[11] = {**self.exiting(self.child), 'native_evidence': {'flags': 0}}
+        with self.assertRaisesRegex(RuntimeError, 'Unqualified native exit'): self.tracker.scan()
+
+    def test_recorded_launch_must_be_active_and_complete_even_when_current_is_active(self):
+        for expected in (self.exiting(self.root), {**self.root, 'session': None}, {**self.root, 'pgid': None}):
+            with self.subTest(expected=expected), self.assertRaisesRegex(RuntimeError, 'Recorded launch'):
+                self.tracker.register(expected)
+
+    def test_exit_history_retains_an_immutable_observation(self):
+        self.current[11] = self.exiting(self.child)
+        self.tracker.scan()
+        self.current[11]['native_evidence']['flags'] = 0
+        self.assertEqual(self.tracker.exit_history[0]['native_evidence']['flags'], 0x2000)
 
     def test_reused_child_pid_requires_prior_independent_generation_exit(self):
         self.tracker.scan()
@@ -265,7 +165,7 @@ class GenerationTrackingTests(unittest.TestCase):
 
 class IndependentObservationTests(unittest.TestCase):
     """Only disposable pipes/files and injected observations; no native PID queries."""
-    def observe(self, scans, leases, *, acknowledge=lambda: True):
+    def observe(self, scans, leases, *, acknowledge=lambda: True, pending=None):
         with tempfile.TemporaryDirectory(prefix="maildesk-observation-fixture-") as directory:
             pipes = []
             for _ in range(2):
@@ -274,7 +174,14 @@ class IndependentObservationTests(unittest.TestCase):
                 pipes.append(os.fdopen(read, "rb"))
             child = types.SimpleNamespace(stdout=pipes[0], stderr=pipes[1],
                                           poll=mock.Mock(side_effect=[None, 0]))
-            tracker = types.SimpleNamespace(history={}, scan=mock.Mock(side_effect=scans))
+            tracker = types.SimpleNamespace(history={}, pending_exits=[])
+            scan_values = iter(scans); pending_values = iter(pending) if pending is not None else None
+            def scan():
+                value = next(scan_values)
+                if pending_values is not None: tracker.pending_exits = next(pending_values)
+                if isinstance(value, Exception): raise value
+                return value
+            tracker.scan = mock.Mock(side_effect=scan)
             lease = mock.Mock(side_effect=leases)
             try:
                 with mock.patch.object(settlement.time, "monotonic", side_effect=itertools.count(1, .1)):
@@ -283,6 +190,15 @@ class IndependentObservationTests(unittest.TestCase):
                 for stream in pipes:
                     stream.close()
             return result, lease
+
+    def test_pending_exit_blocks_ack_and_closure_until_resolved(self):
+        pending = [{'pid': 11, 'birth': [2, 0], 'state': 'exiting'}]
+        acknowledge = mock.Mock(return_value=True)
+        result, lease = self.observe([pending, []], [True, True], acknowledge=acknowledge, pending=[pending, []])
+        self.assertEqual(lease.call_count, 2)
+        acknowledge.assert_called_once()
+        self.assertEqual(result['pending_exits'], [])
+        self.assertEqual(result['errors'], [])
 
     def test_process_failure_does_not_suppress_exact_lease_release(self):
         stale = [{"pid": 10, "birth": [1, 0]}]
@@ -333,7 +249,9 @@ class IndependentObservationTests(unittest.TestCase):
             reservation.write_text('{"id":"fixture"}')
             value = reservation.stat()
             root = {"pid": 10, "birth": [1, 0], "ppid": 1, "session": 10, "pgid": 10}
-            binding = {"capability": {"reservation_id": "fixture", "descriptors": [[value.st_dev, value.st_ino]]},
+            reader_binding = {"fixture": "controlled native reader"}
+            binding = {"native_reader": reader_binding,
+                "capability": {"reservation_id": "fixture", "descriptors": [[value.st_dev, value.st_ino]]},
                 "inner_generation": root, "reservation_path": str(reservation),
                 "reservation_record_sha256": settlement.hashlib.sha256(reservation.read_bytes()).hexdigest()}
             (output / "reservation-binding.json").write_text(json.dumps(binding))
@@ -347,7 +265,8 @@ class IndependentObservationTests(unittest.TestCase):
                 if scans == 2 and initially_held:
                     fcntl.flock(held, fcntl.LOCK_UN)
                 raise RuntimeError("population denied")
-            native = types.SimpleNamespace(get=mock.Mock(return_value=root), table=denied_population)
+            native = types.SimpleNamespace(get=mock.Mock(return_value=root), table=denied_population,
+                                           binding=reader_binding)
             pipes = []
             for _ in range(2):
                 read, write = os.pipe(); os.close(write)
@@ -386,6 +305,10 @@ class IndependentObservationTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "Native settlement requires its qualified Darwin identity reader")
 class SettlementTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.native = settlement.Processes()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="maildesk-settlement-fixture-")
         self.addCleanup(self.temp.cleanup)
@@ -416,7 +339,7 @@ if mode=="signal":os.kill(os.getpid(),signal.SIGTERM)
             pass_fds=(held.fileno(), *host), stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
             env={**os.environ, "FIXTURE_HOST_FDS": json.dumps(host)})
         held.close()  # Only the fixture descendants now retain the fixture lease.
-        native = settlement.Processes()
+        native = self.native
         root = native.get(child.pid); self.assertIsNotNone(root)
         tracker = settlement.Tracker(native, root)
         if drift:
@@ -430,6 +353,8 @@ if mode=="signal":os.kill(os.getpid(),signal.SIGTERM)
         started = time.monotonic()
         result = settlement.observe(child, self.output, tracker, lambda: settlement.released(probe),
             timeout=timeout, acknowledge=lambda: True)
+        if result[1]["errors"]:
+            print("Owned native fixture diagnostic: " + json.dumps(result[1]), file=sys.stderr)
         elapsed = time.monotonic() - started
         self.assertEqual(child.wait(timeout=2), -15 if mode == "signal" else 0)
         if mode not in ("direct", "signal"):
@@ -442,9 +367,9 @@ if mode=="signal":os.kill(os.getpid(),signal.SIGTERM)
     def test_normal_exit_closes_both_captured_streams_and_releases_exact_fixture_lease(self):
         result, _ = self.run_case("direct")
         self.assertEqual(sorted(result["stream_eof"]), ["stderr", "stdout"])
-        self.assertTrue(result["exact_reservation_released"])
-        self.assertFalse(result["live_generations"])
-        self.assertFalse(result["errors"])
+        self.assertTrue(result["exact_reservation_released"], json.dumps(result))
+        self.assertFalse(result["errors"], json.dumps(result))
+        self.assertFalse(result["live_generations"], json.dumps(result))
         self.assertEqual((self.output / "stdout.log").read_text(), "owned stdout\n")
         self.assertEqual((self.output / "stderr.log").read_text(), "owned stderr\n")
         expected = "SETTLED" if result["owner_outside_reservation"] else "CACHE_RETAINED_SETTLEMENT_UNPROVED"

@@ -320,6 +320,23 @@ class QualificationBindingTests(unittest.TestCase):
         self.assertFalse(qualification.check_run_receipts({**operation, "source": {"head": head, "status": "?? x"}}, settlement, {"exit": 0}, head))
         self.assertFalse(qualification.check_run_receipts(operation, settlement, {"exit": 0}, "b" * 40))
 
+    def test_primary_native_reader_requires_bound_version_and_empty_pending_set(self):
+        head = 'a' * 40
+        operation = {'command': ['bash', 'scripts/ci.sh'], 'consumer_profile': 'ci', 'retained_qualification': True,
+                     'source': {'head': head, 'status': ''},
+                     'finalizer_sha256': {'native_processes.py': 'b' * 64, 'native_processes.c': 'c' * 64}}
+        settled = {'status': 'SETTLED', 'command_exit': 0, 'errors': [], 'live_generations': [],
+                   'stream_eof': ['stdout', 'stderr'], 'exact_reservation_released': True, 'launch_acknowledged': True,
+                   'owner_outside_reservation': True, 'native_state_schema': 'maildesk-native-state/v1',
+                   'pending_exits': [], 'exit_transition_history': [],
+                   'native_reader': {'ABI': {'version': 4}, 'source': {'sha256': 'c' * 64}}}
+        self.assertTrue(qualification.check_run_receipts(operation, settled, {'exit': 0}, head))
+        for key, value in [('pending_exits', None), ('pending_exits', [{'pid': 1}]), ('native_state_schema', None),
+                           ('exit_transition_history', None), ('native_reader', {'ABI': {'version': 3}}),
+                           ('native_reader', {'ABI': {'version': 4}, 'source': {'sha256': None}})]:
+            with self.subTest(key=key, value=value):
+                self.assertFalse(qualification.check_run_receipts(operation, {**settled, key: value}, {'exit': 0}, head))
+
     def test_evidence_chain_rejects_forged_or_changed_receipts(self):
         capture, run, review, approval = self.authorization()
         operation = {"command": ["bash", "scripts/ci.sh"], "consumer_profile": "ci", "retained_qualification": True,

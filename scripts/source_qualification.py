@@ -135,6 +135,19 @@ def check_run_receipts(operation, settlement, exit_record, head):
     source = operation.get("source")
     if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head) or not isinstance(source, dict):
         return False
+    finalizer = operation.get("finalizer_sha256", {})
+    if not isinstance(finalizer, dict):
+        return False
+    if "native_processes.py" in finalizer:
+        reader = settlement.get("native_reader")
+        if (settlement.get("native_state_schema") != "maildesk-native-state/v1" or
+                settlement.get("pending_exits") != [] or not isinstance(settlement.get("exit_transition_history"), list) or
+                not isinstance(finalizer.get("native_processes.c"), str) or
+                not re.fullmatch(r"[0-9a-f]{64}", finalizer["native_processes.c"]) or not isinstance(reader, dict) or
+                not isinstance(reader.get("ABI"), dict) or reader["ABI"].get("version") != 4 or
+                not isinstance(reader.get("source"), dict) or
+                reader["source"].get("sha256") != finalizer.get("native_processes.c")):
+            return False
     streams = settlement.get("stream_eof")
     if not isinstance(streams, list) or len(streams) != 2 or not all(isinstance(item, str) for item in streams) or set(streams) != {"stdout", "stderr"}:
         return False

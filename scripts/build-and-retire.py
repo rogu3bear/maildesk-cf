@@ -61,7 +61,7 @@ def operation(repo, output, authorization, resource, command, keep, *, policy=No
         "environment_sha256": hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
         "environment_names": sorted(environment), "retained_qualification": retain_cache, "ci_completion": ci_completion,
         "finalizer_sha256": {name: retirement.sha(repo / "scripts" / name) for name in
-            (("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py") +
+            (("build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py", "native_processes.py", "native_processes.c") +
              (("source_qualification.py",) if retain_cache else ()))},
         "retained_obligations": ["source and dirty bytes", "sessions", "locks", "products and releases", "failure diagnostics", "proof", "unknowns"]})
     inner = [sys.executable, "-B", str(Path(__file__).resolve()), "--inner", str(output), "--", *command]
@@ -136,7 +136,8 @@ def inner():
     if len(record) > 16384:
         raise RuntimeError("Reservation record exceeds its qualified bound")
     state = Path(json.loads((Path.home() / ".config/disk-guard/policy.json").read_bytes())["state_dir"])
-    binding = {"capability": capability, "inner_generation": settlement.Processes().get(os.getpid()),
+    native = settlement.Processes(output)
+    binding = {"capability": capability, "inner_generation": native.get(os.getpid()), "native_reader": native.binding,
                "reservation_path": str(state / ("reservation-" + capability["reservation_id"] + ".json")),
                "reservation_record_sha256": hashlib.sha256(record).hexdigest()}
     settlement.atomic_save(output / "reservation-binding.json", binding)

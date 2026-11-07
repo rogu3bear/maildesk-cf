@@ -291,7 +291,7 @@ class RetirementTests(unittest.TestCase):
 
     def lifecycle_settings(self, *, include_qualification=True):
         scripts = self.repo / "scripts"; scripts.mkdir(exist_ok=True)
-        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py"]
+        names = ["build-and-retire.py", "build-workflow.py", "build_cache_retirement.py", "build_readers.py", "build_settlement.py", "native_processes.py", "native_processes.c"]
         if include_qualification:
             names.append("source_qualification.py")
         for name in names:

@@ -48,14 +48,68 @@ same-session, descendant or unrelated identities therefore retain
 the hold. This observer supports bounded synchronous producer chains, not
 universal observation of forks between samples.
 
-A zero-byte errorless or `EPERM` identity read permits one independent
-`kill(pid, 0)` check of that exact positive process ID. Only the probe's `ESRCH`
-establishes absence at that observation; `EPERM` itself never proves exit.
-A successful probe may refer to a live or reused PID and leaves identity unknown,
-as do denied or unexpected probe failures. Partial or malformed records never
-qualify through this check. Signal zero sends no signal; see Apple's
-[`kill(2)` contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kill.2.html).
-This prospective method does not reclassify any historical failed receipt.
+The primary reader is an in-process, SDK-compiled `kinfo_proc` backend. It reads
+the complete bounded `KERN_PROC_ALL` population, projects every current same-UID
+identity, and independently reads each known birth with `KERN_PROC_PID`. It does
+not fall back to another interface after a denial. All syscall errors, including
+`EPERM` and `ENOMEM`, partial or malformed records, duplicates, capacity overflow,
+unsupported ABI and a missing observer preserve UNKNOWN. A successful zero-length
+PID response requires independent `kill(pid, 0)` `ESRCH` to establish absence;
+an existing PID or denied probe stays UNKNOWN. A denied PID response never probes
+another interface. Birth tuples
+remain kernel start-time seconds and microseconds. A numeric session ID comes
+from `getsid`, bracketed by records with matching birth, UID, parent and process
+group. Drift refuses the sample. This remains sampled coverage, not an atomic
+whole-host history or universal fork observation.
+The published kernel iterator omits still-being-forked (`SIDL`) processes and
+internal shadow records before exposing runnable entries; this limitation is
+explicit, not an exclusion inferred from a denied identity. Registered births
+still require independent reads. A surfaced in-creation or malformed record is
+UNKNOWN, and a missing record never proves nonexistence without the absence check.
+
+Backend preparation uses separate small normal Disk Guard admissions in a fresh
+owned namespace, before the main producer. It never changes retained products.
+The retained settlement and launch binding identify the backend source, compiler,
+SDK dependency headers, platform, compilation command and actual artifact bytes.
+Inputs must remain stable through compilation, and the loaded artifact's identity
+must remain unchanged. There is no shared mutable helper cache or environment
+override for backend selection. Production proof retains its backend namespace;
+disposable tests own and close their temporary namespaces.
+
+This is a platform-bound macOS build diagnostic. Both libproc and `kern.proc`
+records are SDK-declared private/SPI interfaces, with no general future-platform
+stability promise. See Apple's [`sysctl(3)` contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sysctl.3.html)
+and [kernel process-node implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c).
+The installed SDK defines the record layout; unsupported layouts and preparation
+failures hold before the main producer. This prospective replacement does not
+identify the denying policy in historical runs or reclassify any failed receipt.
+Complete same-owner zombies retain the existing no-executable-writer meaning
+even after their group or parent fields have been cleared. Immutable birth and
+owner validation precedes that classification; drift remains UNKNOWN.
+
+The size-checked native ABI also returns bounded diagnostics from the same call:
+failure stage, syscall result/errno, reported length and capacity, target PID,
+and identity/session fields already read, with explicit known-field flags.
+Python retains these in sticky operation errors without further diagnostic
+probes. Missing data stays unknown; receipts contain no process names or arguments.
+
+Native ABI v4 exports the installed SDK's `P_WEXIT` bit. Complete matching birth
+and owner records with an affirmative exit flag can project an explicit `exiting`
+identity, with session/parent/group set to null rather than invented. The backend
+retains each generation's raw flags and any session result/errno already observed.
+For a record already flagged as exiting, it does not request live-only session
+data; an attempted session denial remains fatal. Birth/owner drift and an
+exiting-to-active regression remain fatal.
+
+Every same-UID exiting identity is conservatively live, regardless of relationship.
+Independent known-birth reads continue until validated zombie or kernel absence;
+the flag itself never proves exit. Launch registration and acknowledgement require
+complete active identity and no pending exits. `maildesk-native-state/v1` receipts
+retain current `pending_exits` and immutable `exit_transition_history`; settlement
+requires an empty current pending set. Existing deadlines, sticky failures, stream
+EOF and exact reservation release requirements remain unchanged. Publication
+validates this state schema and backend source binding for new native-reader runs;
+older receipts retain their original source-bound meaning.
 
 The CI child records inputs after frozen Bun installation and before the checks,
 then captures them again with products after all checks. Both captures must match

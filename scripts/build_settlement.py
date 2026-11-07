@@ -3,8 +3,6 @@
 This is an attended, synchronous owner. It never cancels descendants, releases
 their leases, runs a detached finalizer or claims universal fork observation.
 """
-import ctypes
-import errno
 import fcntl
 import hashlib
 import json
@@ -17,76 +15,7 @@ import subprocess
 import sys
 import time
 
-
-class BSDInfo(ctypes.Structure):
-    _fields_ = [(n, ctypes.c_uint32) for n in (
-        "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid",
-        "rgid", "svuid", "svgid", "reserved")]
-    _fields_ += [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)]
-    _fields_ += [(n, ctypes.c_uint32) for n in ("nfiles", "pgid", "jobc", "tdev", "tpgid")]
-    _fields_ += [("nice", ctypes.c_int32), ("seconds", ctypes.c_uint64), ("microseconds", ctypes.c_uint64)]
-
-
-class Processes:
-    def __init__(self):
-        if sys.platform != "darwin":
-            raise RuntimeError("Native process settlement is qualified only on Darwin")
-        self.lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-        self.lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-        self.lib.proc_pidinfo.restype = ctypes.c_int
-        self.lib.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
-        self.lib.proc_listpids.restype = ctypes.c_int
-
-    def get(self, pid):
-        if type(pid) is not int or not 0 < pid < 2 ** 31:
-            raise RuntimeError("Native process identity target must be a positive pid_t")
-        row = BSDInfo(); ctypes.set_errno(0)
-        size = self.lib.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
-        if size != ctypes.sizeof(row):
-            error = ctypes.get_errno()
-            if size == 0 and error in (errno.ESRCH, errno.ENOENT):
-                return None
-            # An enumerated process can exit before libproc supplies a record.
-            # Neither an empty/errorless read nor EPERM proves exit. For these
-            # zero-byte results only, independent kernel ESRCH can establish
-            # absence. A live/reused PID, probe denial or other probe failure
-            # stays unknown; partial records never take this path.
-            absence = "not probed"
-            if size == 0 and error in (0, errno.EPERM):
-                try:
-                    os.kill(pid, 0)
-                    absence = "PID exists"
-                except OSError as probe:
-                    if probe.errno == errno.ESRCH:
-                        return None
-                    absence = "probe errno=" + str(probe.errno)
-            raise RuntimeError("Unknown native process identity for PID " + str(pid) +
-                               " (bytes=" + str(size) + ", errno=" + str(error) + ", " + absence + ")")
-        if row.pid != pid or row.uid != os.getuid() or not row.seconds or row.microseconds >= 1_000_000:
-            raise RuntimeError("Native process identity/owner drift")
-        if row.status == 5:  # Kernel zombie: no executable writer remains.
-            return None
-        try:
-            session = os.getsid(pid)
-        except ProcessLookupError:
-            return None
-        return {"pid": pid, "birth": [row.seconds, row.microseconds], "ppid": row.ppid,
-                "session": session, "pgid": row.pgid}
-
-    def table(self):
-        pids = (ctypes.c_int * 16384)()
-        size = self.lib.proc_listpids(4, os.getuid(), ctypes.byref(pids), ctypes.sizeof(pids))
-        if size <= 0 or size >= ctypes.sizeof(pids) or size % ctypes.sizeof(ctypes.c_int):
-            raise RuntimeError("Native process population coverage unavailable")
-        population = [pid for pid in pids[:size // ctypes.sizeof(ctypes.c_int)] if pid > 0]
-        if len(population) != len(set(population)):
-            raise RuntimeError("Native process population coverage unavailable: duplicate PIDs")
-        table = {pid: row for pid in population if (row := self.get(pid)) is not None}
-        # This observer is necessarily live under the queried UID. Its absence
-        # makes an empty or partial native snapshot unknown, never settled.
-        if os.getpid() not in table:
-            raise RuntimeError("Native process population coverage unavailable: observer missing")
-        return table
+from native_processes import Processes
 
 
 def atomic_save(path, value):
@@ -99,37 +28,75 @@ def atomic_save(path, value):
 
 
 class Tracker:
+    @staticmethod
+    def active_launch(row):
+        if not isinstance(row, dict) or row.get("state", "active") != "active":
+            return False
+        return (all(type(row.get(key)) is int and row[key] > 0 for key in ("pid", "session", "pgid")) and
+                type(row.get("ppid")) is int and row["ppid"] >= 0 and isinstance(row.get("birth"), list) and
+                len(row["birth"]) == 2 and all(type(value) is int for value in row["birth"]) and
+                row["birth"][0] > 0 and 0 <= row["birth"][1] < 1_000_000)
+
     def __init__(self, processes, root):
+        if not self.active_launch(root):
+            raise RuntimeError("Launch registration requires a complete active identity")
         self.processes, self.session = processes, root["session"]
         self.known = {root["pid"]: root}
         self.history = {(root["pid"], tuple(root["birth"])): root}
         self.root_pid = root["pid"]
         self.live = dict(self.known)
         self.ended = set()
+        self.exiting = set()
+        self.exit_history = []
+        self.pending_exits = []
         self.population_observation = {"state": "unknown", "observed_at": None, "last_successful_observed_at": None}
         self.birth_observations = []
 
     def register(self, expected):
+        if not self.active_launch(expected):
+            raise RuntimeError("Recorded launch registration requires a complete active identity")
+        if self.pending_exits:
+            raise RuntimeError("Pending exit identities prevent launch acknowledgement")
         actual = self.processes.get(expected["pid"])
         if actual is None or actual["birth"] != expected["birth"]:
             raise RuntimeError("Registered generation changed before launch acknowledgement")
+        if not self.active_launch(actual):
+            raise RuntimeError("Launch registration requires a complete active identity")
         self.validate_generation(actual)
         self.known[actual["pid"]] = actual
         self.history[(actual["pid"], tuple(actual["birth"]))] = actual
         self.live[actual["pid"]] = actual
 
-    def validate_generation(self, row):
+    def validate_generation(self, row, *, observe_state=True):
         pid = row["pid"]
         if pid in self.known and row["birth"] != self.known[pid]["birth"]:
             previous = (pid, tuple(self.known[pid]["birth"]))
             if pid == self.root_pid or previous not in self.ended:
                 raise RuntimeError("Known process generation drift for PID " + str(pid) +
                                    " (expected=" + str(previous[1]) + ", observed=" + str(tuple(row["birth"])) + ")")
+        if observe_state:
+            key = (pid, tuple(row["birth"]))
+            state = row.get("state", "active")
+            if state == "exiting":
+                evidence = row.get("native_evidence")
+                flag = getattr(self.processes, "exiting_flag", 0)
+                if (not flag or not isinstance(evidence, dict) or type(evidence.get("flags")) is not int or
+                        not evidence["flags"] & flag or any(row[key] is not None for key in ("session", "ppid", "pgid"))):
+                    raise RuntimeError("Unqualified native exit identity")
+            if state not in ("active", "exiting") or key in self.exiting and state != "exiting":
+                raise RuntimeError("Native exiting identity regressed or has an unsupported state")
+            if state == "exiting" and key not in self.exiting:
+                if len(self.exit_history) >= 16384:
+                    raise RuntimeError("Native exit history exceeds qualified bound for PID " + str(pid))
+                self.exiting.add(key)
+                self.exit_history.append({"observed_at": time.time(), **row, "birth": list(row["birth"]),
+                                          "native_evidence": dict(row["native_evidence"])})
 
     def scan(self):
         # Population coverage and known births are independent observations.
         # A denied peer must not prevent reads of already owned generations.
         errors = []
+        self.pending_exits = None
         table = None
         self.population_observation["attempted_at"] = time.time()
         try:
@@ -140,6 +107,12 @@ class Tracker:
         except Exception as error:
             self.population_observation.update(state="unknown", observed_at=None, error=str(error))
             errors.append(str(error))
+        if table is not None:
+            for row in table.values():
+                try:
+                    self.validate_generation(row)
+                except Exception as error:
+                    errors.append(str(error))
         current = {}
         previous = {(r["pid"], tuple(r["birth"])): r for r in self.birth_observations}
         self.birth_observations = []
@@ -154,6 +127,8 @@ class Tracker:
                     self.validate_generation(actual)
                 current[pid] = actual
                 observation["state"] = "alive" if actual is not None and actual["birth"] == expected["birth"] else "ended"
+                if observation["state"] == "alive" and actual.get("state") == "exiting":
+                    observation["state"] = "exiting"
                 observation["observed_at"] = time.time()
                 observation["last_successful_observation"] = {"state": observation["state"],
                     "observed_at": observation["observed_at"], "observed_birth": actual["birth"] if actual is not None else None}
@@ -166,7 +141,13 @@ class Tracker:
         if table is None:
             raise RuntimeError("; ".join(dict.fromkeys(errors)))
         live = {pid: row for pid, row in table.items() if
+                row.get("state") == "exiting" or
                 pid in self.known and row["birth"] == self.known[pid]["birth"] or row["session"] == self.session}
+        # Independent known-birth reads occur after the population snapshot.
+        # Keep their newer exit state; an older active snapshot is not regression.
+        for pid, actual in current.items():
+            if pid in live and actual is not None and actual.get("state") == "exiting":
+                live[pid] = actual
         while True:
             children = {pid: row for pid, row in table.items() if row["ppid"] in live and pid not in live}
             if not children:
@@ -174,7 +155,7 @@ class Tracker:
             live.update(children)
         for pid, row in live.items():
             try:
-                self.validate_generation(row)
+                self.validate_generation(row, observe_state=False)
             except Exception as error:
                 errors.append(str(error))
         if errors:
@@ -195,6 +176,7 @@ class Tracker:
                 ended.add((pid, tuple(row["birth"])))
         self.ended, self.live = ended, live
         self.known.update(live)
+        self.pending_exits = [row for row in live.values() if row.get("state") == "exiting"]
         return list(live.values())
 
 
@@ -208,7 +190,7 @@ def released(fd):
     return True
 
 
-def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: None, lease_evidence=None, control_errors=None):
+def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: None, lease_evidence=None, control_errors=None, native_reader=None):
     """Drain both captured streams and observe independent process/lease gates.
 
     A missed deadline permanently refuses cleanup. The same attended owner
@@ -220,9 +202,11 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
     for stream in streams:
         os.set_blocking(stream.fileno(), False); selector.register(stream, selectors.EVENT_READ)
     started = time.monotonic()
-    result = {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "stream_eof": [],
+    result = {"status": "CACHE_RETAINED_SETTLEMENT_UNPROVED", "native_state_schema": "maildesk-native-state/v1", "stream_eof": [],
               "stream_eof_elapsed_seconds": {}, "reservation_observations": lease_evidence if lease_evidence is not None else {},
               "errors": control_errors if control_errors is not None else []}
+    if native_reader is not None:
+        result["native_reader"] = native_reader
     ended = None; last_scan = 0; live = None; acknowledged = False; lease_released = None
     last_live = None
     process_observation = {"state": "unknown", "attempted_elapsed_seconds": None, "last_successful_elapsed_seconds": None}
@@ -233,7 +217,7 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
             result["errors"].append(text)
 
     def closure_observed():
-        return live == [] and lease_released is True and not selector.get_map()
+        return live == [] and getattr(tracker, "pending_exits", []) == [] and lease_released is True and not selector.get_map()
     with (output / "operation.log").open("xb") as combined, (output / "stdout.log").open("xb") as stdout, (output / "stderr.log").open("xb") as stderr:
         logs = {"stdout": stdout, "stderr": stderr}
         while True:
@@ -258,7 +242,7 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
                     live = None
                     process_observation.update(state="unknown", error=str(error))
                     error_record(error)
-                if not acknowledged and not result["errors"]:
+                if not acknowledged and not result["errors"] and getattr(tracker, "pending_exits", []) == []:
                     try:
                         acknowledged = acknowledge()
                     except Exception as error:
@@ -292,6 +276,8 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
                         "last_successful_live_generations": last_live, "process_scope_observation": process_observation,
                         "native_population_observation": getattr(tracker, "population_observation", {"state": "unknown"}),
                         "known_birth_observations": getattr(tracker, "birth_observations", []),
+                        "pending_exits": getattr(tracker, "pending_exits", None),
+                        "exit_transition_history": getattr(tracker, "exit_history", []),
                         "exact_reservation_released": lease_released, "lease_observation": lease_observation})
             if code is not None and not selector.get_map() and (closure_observed() or result["errors"]):
                 break
@@ -299,6 +285,7 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
             stream.flush(); os.fsync(stream.fileno())
     selector.close()
     result.update(command_exit=code, known_generations=list(tracker.history.values()), live_generations=live,
+                  pending_exits=getattr(tracker, "pending_exits", None), exit_transition_history=getattr(tracker, "exit_history", []),
                   last_successful_live_generations=last_live, process_scope_observation=process_observation,
                   native_population_observation=getattr(tracker, "population_observation", {"state": "unknown", "observed_at": None}),
                   known_birth_observations=getattr(tracker, "birth_observations", []), lease_observation=lease_observation,
@@ -311,7 +298,7 @@ def observe(child, output, tracker, lease, *, timeout=30, acknowledge=lambda: No
 
 
 def run(argv, *, cwd, env, output, read_record, timeout=30):
-    processes = Processes()
+    processes = Processes(output)
     child = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     root = None
@@ -347,6 +334,10 @@ def run(argv, *, cwd, env, output, read_record, timeout=30):
         if not path.exists():
             return False
         candidate = read_record(path)
+        expected_reader = {key: value for key, value in processes.binding.items() if key not in ("artifact", "argv")}
+        inner_reader = candidate.get("native_reader")
+        if not isinstance(inner_reader, dict) or {key: value for key, value in inner_reader.items() if key not in ("artifact", "argv")} != expected_reader:
+            raise RuntimeError("Inner native reader source/compiler/SDK binding changed")
         if len(candidate["capability"]["descriptors"]) != 1:
             raise RuntimeError("Watched custody requires its separately qualified outer owner")
         path_reservation = Path(candidate["reservation_path"])
@@ -391,7 +382,7 @@ def run(argv, *, cwd, env, output, read_record, timeout=30):
         return value
     try:
         return observe(child, output, tracker, lease, timeout=timeout, acknowledge=acknowledge,
-                       lease_evidence=evidence, control_errors=control_errors)
+                       lease_evidence=evidence, control_errors=control_errors, native_reader=processes.binding)
     finally:
         for number, handler in handlers.items():
             signal.signal(number, handler)
