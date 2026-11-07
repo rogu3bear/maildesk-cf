@@ -19,6 +19,7 @@ export const MIGRATION_NAMES_SQL = "SELECT name FROM d1_migrations ORDER BY id L
 const roles = ["relay_router", "relay_outbound", "routing_health"] as const;
 type InventoryKind = "schema_columns" | "migration_names" | "worker_deployments";
 const metadataTypes = ["TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC", "TIMESTAMP", ""];
+const INVENTORY_LIFETIME_MS = 600_000;
 
 /** A non-advancing informational lane. Dirty source is explicit and allowed;
  * it can never be used as protected-operation or mail admission evidence.
@@ -46,7 +47,7 @@ export function preparePluginInventory(input: unknown, now = Date.now(), selecte
     target_manifest_sha256: digest(row.target_manifest_sha256, "target manifest"),
     transport: "cloudflare_mcp_v1" as const, connector_subject: row.connector_subject,
     account_id: row.account_id, database_id: row.database_id,
-    prepared_at: new Date(now).toISOString(), expires_at: new Date(now + 600_000).toISOString() };
+    prepared_at: new Date(now).toISOString(), expires_at: new Date(now + INVENTORY_LIFETIME_MS).toISOString() };
   const requests = [
     { kind: "schema_columns", database_id: row.database_id, sql: SCHEMA_COLUMNS_SQL, params: [],
       max_rows: 1000, max_response_bytes: 262144 },
@@ -118,6 +119,10 @@ function rejectMetadata(kind: string, reason: string, value: unknown, index: num
 
 export function assertInventoryFreshness(packet: ReturnType<typeof preparePluginInventory>, observedAt: string, now = Date.now()) {
   const observed = instant(observedAt, "metadata observation");
-  if (observed < instant(packet.context.prepared_at, "inventory preparation") || observed > now ||
-      now >= instant(packet.context.expires_at, "inventory expiry")) throw new Error("plugin informational inventory expired or out of order");
+  const prepared = instant(packet.context.prepared_at, "inventory preparation");
+  const expires = instant(packet.context.expires_at, "inventory expiry");
+  if (!Number.isFinite(now) || expires - prepared !== INVENTORY_LIFETIME_MS ||
+      observed < prepared || observed > now || now >= expires) {
+    throw new Error("plugin informational inventory expired or out of order");
+  }
 }

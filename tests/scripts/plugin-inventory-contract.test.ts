@@ -78,3 +78,24 @@ test("informational receipt time is bounded and never accepted after packet expi
   expect(() => assertInventoryFreshness(packet, new Date(now - 1).toISOString(), now)).toThrow();
   expect(() => assertInventoryFreshness(packet, new Date(now + 600000).toISOString(), now + 600000)).toThrow();
 });
+
+test("inventory freshness rejects invalid clocks and changed validity windows", () => {
+  const packet = preparePluginInventory(input(), now);
+  const observed = new Date(now).toISOString();
+  for (const clock of [NaN, Infinity, -Infinity]) {
+    expect(() => assertInventoryFreshness(packet, observed, clock)).toThrow();
+  }
+  for (const expiry of [now - 1, now, now + 599999, now + 600001, now + 3600000]) {
+    const changed = { ...packet, context: { ...packet.context, expires_at: new Date(expiry).toISOString() } };
+    expect(() => assertInventoryFreshness(changed, observed, now)).toThrow();
+  }
+});
+
+test("inventory freshness preserves exact preparation and expiry boundaries", () => {
+  const packet = preparePluginInventory(input(), now);
+  expect(() => assertInventoryFreshness(packet, new Date(now).toISOString(), now)).not.toThrow();
+  expect(() => assertInventoryFreshness(packet, new Date(now + 599999).toISOString(), now + 599999)).not.toThrow();
+  expect(() => assertInventoryFreshness(packet, new Date(now + 1).toISOString(), now)).toThrow();
+  expect(() => assertInventoryFreshness(packet, new Date(now).toISOString(), now - 1)).toThrow();
+  expect(() => assertInventoryFreshness(packet, new Date(now).toISOString(), now + 600000)).toThrow();
+});
